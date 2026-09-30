@@ -21,12 +21,18 @@ public class ReadTool implements Tool {
 
     private final String workDir;
     private final boolean useRoot;
+    private final TemporaryWorkspace temporary;
     private volatile int epoch;
     private volatile int runEpoch;
 
     public ReadTool(String workDir, boolean useRoot) {
+        this(workDir, useRoot, null);
+    }
+
+    public ReadTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
         this.useRoot = useRoot;
+        this.temporary = temporary;
     }
 
     @Override
@@ -36,7 +42,7 @@ public class ReadTool implements Tool {
 
     @Override
     public String description() {
-        return "读取工作目录内的文本文件。相对路径按工作目录解析，绝对路径也必须位于该目录内。"
+        return "读取项目工作目录内的文本文件，也可读取本轮 temporary 登记的 App 私有临时文件（使用返回的绝对路径）。相对路径按工作目录解析。"
                 + "目录外路径会被拒绝。"
                 + "一次最多 " + MAX_LINES + " 行或 " + (MAX_BYTES / 1024)
                 + "KB，以先到的为准，不截断半行。"
@@ -103,7 +109,7 @@ public class ReadTool implements Tool {
             }
         }
         try {
-            File file = ToolPaths.resolve(workDir, path);
+            File file = ToolPaths.resolve(workDir, path, temporary);
             return readFile(file, path, offset, limit, new Stop() {
                 @Override
                 public boolean stopped() {

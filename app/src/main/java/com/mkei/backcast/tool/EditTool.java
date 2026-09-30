@@ -18,11 +18,17 @@ public class EditTool implements Tool {
 
     private final String workDir;
     private final boolean useRoot;
+    private final TemporaryWorkspace temporary;
     private volatile int epoch;
 
     public EditTool(String workDir, boolean useRoot) {
+        this(workDir, useRoot, null);
+    }
+
+    public EditTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
         this.useRoot = useRoot;
+        this.temporary = temporary;
     }
 
     @Override
@@ -32,7 +38,7 @@ public class EditTool implements Tool {
 
     @Override
     public String description() {
-        return "按原文替换工作目录内单个文件里的内容，目录外路径会被拒绝。edits 是数组，每项有 oldText 和 newText。"
+        return "按原文替换项目文件或本轮 temporary 登记的 App 私有临时文件（使用返回的绝对路径）。其他目录会被拒绝。edits 是数组，每项有 oldText 和 newText。"
                 + "每一处都对着调用前的原文匹配，不是对着前一处替换之后的文本。"
                 + "oldText 不能为空，必须唯一，且各处互不重叠。对不上、不唯一、重叠、或替换后没有变化，都不会写盘。"
                 + "同一文件里分开的几处修改放进同一次 edits，不要连着调用多次。"
@@ -117,8 +123,13 @@ public class EditTool implements Tool {
         }
 
         File file;
-        try { file = ToolPaths.resolve(workDir, path); }
-        catch (IllegalArgumentException error) { return "错误：" + error.getMessage(); }
+        try {
+            file = ToolPaths.resolve(workDir, path, temporary);
+            if (temporary != null && temporary.isOwnershipMarker(file)) {
+                return "错误：不能修改临时目录所有权标记。";
+            }
+        }
+        catch (Exception error) { return "错误：" + error.getMessage(); }
         ToolPaths.Probe probe = ToolPaths.probe(file, useRoot);
         if (!probe.exists) {
             if (probe.denied) {

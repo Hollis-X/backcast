@@ -141,6 +141,16 @@
 				android:contentDescription="@string/label_output_verbosity"/>
 
 			<TextView
+				android:id="@+id/output_verbosity_description"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:paddingLeft="8dp"
+				android:paddingRight="8dp"
+				android:paddingBottom="4dp"
+				android:textColor="@color/text_secondary"
+				android:textSize="12sp"/>
+
+			<TextView
 				android:layout_width="match_parent"
 				android:layout_height="wrap_content"
 				android:text="@string/label_reasoning_summary"
@@ -157,6 +167,16 @@
 				android:contentDescription="@string/label_reasoning_summary"/>
 
 			<TextView
+				android:id="@+id/reasoning_summary_description"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:paddingLeft="8dp"
+				android:paddingRight="8dp"
+				android:paddingBottom="4dp"
+				android:textColor="@color/text_secondary"
+				android:textSize="12sp"/>
+
+			<TextView
 				android:layout_width="match_parent"
 				android:layout_height="wrap_content"
 				android:text="@string/label_output_language"
@@ -171,6 +191,16 @@
 				android:layout_height="48dp"
 				android:spinnerMode="dropdown"
 				android:contentDescription="@string/label_output_language"/>
+
+			<TextView
+				android:id="@+id/output_language_description"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:paddingLeft="8dp"
+				android:paddingRight="8dp"
+				android:paddingBottom="4dp"
+				android:textColor="@color/text_secondary"
+				android:textSize="12sp"/>
 
 			<CheckBox
 				android:id="@+id/use_root"

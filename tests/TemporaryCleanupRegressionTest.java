@@ -7,6 +7,8 @@ import com.mkei.backcast.tool.TemporaryTool;
 import com.mkei.backcast.tool.TemporaryWorkspace;
 import com.mkei.backcast.tool.WriteTool;
 import com.mkei.backcast.tool.ShellTool;
+import com.mkei.backcast.tool.ReadTool;
+import com.mkei.backcast.tool.EditTool;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.List;
@@ -47,6 +49,9 @@ public final class TemporaryCleanupRegressionTest {
         materials.beginTurn();
         WriteTool writer = new WriteTool(project.getPath(), false, materials);
         File temp = materials.directory();
+        check(temp.getCanonicalPath().startsWith(new File(state, "materials").getCanonicalPath() + File.separator),
+                "Temporary allocation was not inside App private storage");
+        check(project.listFiles().length == 0, "Allocation created temporary materials in the project");
         check(!writer.run(write("probe.py", "temporary")).startsWith(ERROR), "Temporary write failed");
         check(new File(temp, "probe.py").isFile(), "Temporary write escaped the allocated directory");
         check(!writer.run(write("tests/regression.py", "test")).startsWith(ERROR), "Formal test write failed");
@@ -61,6 +66,98 @@ public final class TemporaryCleanupRegressionTest {
         check(new File(project, "tests/regression.py").isFile() && new File(project, "result.txt").isFile(),
                 "Cleanup removed formal tests or deliverables");
         pass("managedMaterialsOnly");
+    }
+
+    private static void privateFileAccessIsScoped() throws Exception {
+        TemporaryWorkspace materials = manager(18), other = manager(19);
+        materials.beginTurn(); other.beginTurn();
+        File temp = materials.directory(), otherTemp = other.directory();
+        WriteTool writer = new WriteTool(project.getPath(), false, materials);
+        check(!writer.run(write("probe.txt", "temporary")).startsWith(ERROR), "Private fixture write failed");
+        File file = new File(temp, "probe.txt");
+        ReadTool reader = new ReadTool(project.getPath(), false, materials);
+        EditTool editor = new EditTool(project.getPath(), false, materials);
+        check(reader.run(new JSONObject().put("path", file.getPath())).contains("fixture"),
+                "Current turn cannot read its private temporary file");
+        JSONObject edit = new JSONObject().put("path", file.getPath()).put("edits", new JSONArray()
+                .put(new JSONObject().put("oldText", "fixture").put("newText", "updated")));
+        check(!editor.run(edit).startsWith(ERROR), "Current turn cannot edit its private temporary file");
+        check(reader.run(new JSONObject().put("path", file.getPath())).contains("updated"), "Private edit was not written");
+        check(!writer.run(new JSONObject().put("path", "probe.sh").put("purpose", "temporary")
+                .put("content", "printf private-script-success")).startsWith(ERROR), "Private shell fixture write failed");
+        ShellTool shell = new ShellTool(false, project.getPath(), materials);
+        String shellOutput = shell.run(new JSONObject().put("command", "sh '" + new File(temp, "probe.sh").getPath() + "'"));
+        check(shellOutput.startsWith("exit=0") && shellOutput.contains("private-script-success"), "Shell cannot execute current private script by absolute path");
+        File foreign = new File(otherTemp, "other.txt"); Files.write(foreign.toPath(), "fixture".getBytes("UTF-8"));
+        check(reader.run(new JSONObject().put("path", foreign.getPath())).startsWith(ERROR), "Other session private read was accepted");
+        check(editor.run(new JSONObject(edit.toString()).put("path", foreign.getPath())).startsWith(ERROR),
+                "Other session private edit was accepted");
+        File unrelated = new File(state, "unrelated.txt"); Files.write(unrelated.toPath(), "secret".getBytes("UTF-8"));
+        check(reader.run(new JSONObject().put("path", unrelated.getPath())).startsWith(ERROR), "Unrelated App private data was readable");
+        File marker = new File(temp, ".backcast-owner");
+        JSONObject markerEdit = new JSONObject().put("path", marker.getPath()).put("edits", new JSONArray()
+                .put(new JSONObject().put("oldText", new String(Files.readAllBytes(marker.toPath()), "UTF-8"))
+                .put("newText", "forged-owner")));
+        check(editor.run(markerEdit).startsWith(ERROR), "Ownership marker edit was accepted");
+        File escape = new File(temp, "escape"); Files.createSymbolicLink(escape.toPath(), unrelated.toPath());
+        check(reader.run(new JSONObject().put("path", escape.getPath())).startsWith(ERROR), "Private symlink escaped its allocation");
+        ReadTool broadReader = new ReadTool("/", false, materials);
+        EditTool broadEditor = new EditTool("/", false, materials);
+        WriteTool broadWriter = new WriteTool("/", false, materials);
+        ShellTool broadShell = new ShellTool(false, "/", materials);
+        check(broadReader.run(new JSONObject().put("path", file.getPath())).contains("updated"), "Root project blocked current private allocation");
+        check(broadReader.run(new JSONObject().put("path", foreign.getPath())).startsWith(ERROR), "Root project bypassed other-session read restriction");
+        check(broadReader.run(new JSONObject().put("path", foreign.getPath().substring(1))).startsWith(ERROR), "Relative root project bypassed other-session read restriction");
+        check(broadEditor.run(new JSONObject(edit.toString()).put("path", foreign.getPath())).startsWith(ERROR), "Root project bypassed other-session edit restriction");
+        File ledger = new File(state, "session-18.json");
+        check(broadReader.run(new JSONObject().put("path", ledger.getPath())).startsWith(ERROR), "Root project allowed ledger read");
+        check(broadWriter.run(write(ledger.getPath(), "deliverable")).startsWith(ERROR), "Root project allowed ledger overwrite");
+        check(broadShell.run(new JSONObject().put("command", "cat '" + foreign.getPath() + "'")).startsWith(ERROR), "Root project bypassed other-session shell restriction");
+        check(broadShell.run(new JSONObject().put("command", "cat '" + ledger.getPath() + "'")).startsWith(ERROR), "Root project allowed ledger shell read");
+        check(materials.finishTurn() == null && other.finishTurn() == null, "Private access fixtures did not clean");
+        check(temp.mkdir(), "Could not recreate expired allocation fixture");
+        Files.write(file.toPath(), "expired-file".getBytes("UTF-8"));
+        Files.write(new File(temp, "probe.sh").toPath(), "printf expired-script".getBytes("UTF-8"));
+        check(broadReader.run(new JSONObject().put("path", file.getPath())).startsWith(ERROR), "Finished turn retained private read access");
+        check(broadShell.run(new JSONObject().put("command", "sh '" + new File(temp, "probe.sh").getPath() + "'")).startsWith(ERROR), "Finished turn retained private shell access");
+        remove(temp);
+        Files.delete(unrelated.toPath());
+        pass("privateFileAccessIsScoped");
+    }
+
+    private static void rootAndWorkDirDoNotMovePrivateAllocation() throws Exception {
+        TemporaryWorkspace materials = manager(20); materials.beginTurn();
+        File temp = materials.directory();
+        materials.configure("/root", true);
+        check(temp.equals(materials.directory()), "Root or work directory switch moved private temporary allocation");
+        materials.configure(project.getPath(), false);
+        check(materials.finishTurn() == null && !temp.exists(), "Private allocation did not clean after configuration change");
+        TemporaryWorkspace rootMaterials = new TemporaryWorkspace("/root", true, state, 22);
+        rootMaterials.beginTurn(); File rootTemp = rootMaterials.directory();
+        check(rootTemp.getParentFile().equals(new File(state, "materials")), "Initial root mode allocated materials outside App private storage");
+        rootMaterials.configure(project.getPath(), false);
+        check(rootMaterials.finishTurn() == null && !rootTemp.exists(), "Initially root allocation did not clean");
+        boolean refused = false;
+        try { new TemporaryWorkspace(project.getPath(), false).directory(); }
+        catch (IllegalArgumentException expected) { refused = true; }
+        check(refused, "Missing App private path fell back to workspace allocation");
+        pass("rootAndWorkDirDoNotMovePrivateAllocation");
+    }
+
+    private static void legacyWorkspaceRecoveryMigrates() throws Exception {
+        String owner = java.util.UUID.randomUUID().toString();
+        File old = new File(project, ".backcast-tmp-" + owner); old.mkdir();
+        Files.write(new File(old, ".backcast-owner").toPath(), owner.getBytes("UTF-8"));
+        Files.write(new File(old, "obsolete.py").toPath(), new byte[]{1});
+        JSONObject ledger = new JSONObject().put("directories", new JSONArray().put(new JSONObject()
+                .put("path", old.getPath()).put("workspace", project.getPath()).put("owner", owner)));
+        Files.write(new File(state, "session-21.json").toPath(), ledger.toString().getBytes("UTF-8"));
+        TemporaryWorkspace recovered = manager(21);
+        check(recovered.cleanupRecovered() == null && !old.exists(), "Legacy project allocation was not recovered safely");
+        recovered.beginTurn(); File fresh = recovered.directory();
+        check(fresh.getParentFile().equals(new File(state, "materials")), "Recovery allocated new materials in the legacy project path");
+        check(recovered.finishTurn() == null && !fresh.exists(), "Migrated allocation did not clean");
+        pass("legacyWorkspaceRecoveryMigrates");
     }
 
     private static void purposeIsRequiredAndShellUsesManagedPaths() throws Exception {
@@ -170,6 +267,37 @@ public final class TemporaryCleanupRegressionTest {
         pass("changedOwnershipBlocksCompletion");
     }
 
+    private static void unconfirmedProcessesBlockCleanupAndCanRetry() throws Exception {
+        final TemporaryWorkspace materials = manager(23);
+        final java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicInteger retries = new java.util.concurrent.atomic.AtomicInteger();
+        materials.beginTurn(); final File temp = materials.directory();
+        materials.trackProcess(temp, new TemporaryWorkspace.ProcessCleanup() {
+            public boolean stop() { retries.incrementAndGet(); return stopped.get(); }
+        });
+        Files.write(new File(temp, "live.py").toPath(), new byte[]{1});
+        ToolRegistry registry = new ToolRegistry(); registry.register(new TemporaryTool(materials));
+        AgentLoop loop = new AgentLoop(null, registry, new AgentLoop.Quiet()); loop.setGoal("deliver fixture");
+        check(loop.closeGoal(Goal.COMPLETE, "").startsWith(ERROR), "Goal completed while a process could still recreate temporary files");
+        check(Goal.ACTIVE.equals(loop.goalStatus()) && new File(temp, "live.py").isFile(), "Failed process check deleted files or closed goal");
+        check(materials.finishTurn() != null && temp.isDirectory(), "Turn completion ignored an unconfirmed process");
+        materials.beginTurn(); File next = materials.directory();
+        final java.util.concurrent.atomic.AtomicInteger nextStops = new java.util.concurrent.atomic.AtomicInteger();
+        materials.trackProcess(next, new TemporaryWorkspace.ProcessCleanup() {
+            public boolean stop() { nextStops.incrementAndGet(); return true; }
+        });
+        check(materials.cleanupRecovered() != null && next.isDirectory() && nextStops.get() == 0,
+                "Recovered-process cleanup crossed into another live turn");
+        stopped.set(true);
+        check(materials.cleanupRecovered() == null && !temp.exists() && next.isDirectory() && nextStops.get() == 0,
+                "Process retry did not recover safely or cleaned the live turn");
+        check(!loop.closeGoal(Goal.COMPLETE, "").startsWith(ERROR) && !next.exists() && nextStops.get() == 1,
+                "Confirmed process retry permanently blocked goal completion");
+        check(retries.get() >= 4, "Process cleanup callback was not retried");
+        materials.finishTurn();
+        pass("unconfirmedProcessesBlockCleanupAndCanRetry");
+    }
+
     private static void separateTurnLeases() throws Exception {
         final TemporaryWorkspace materials = manager(7);
         final CountDownLatch oldReady = new CountDownLatch(1), newReady = new CountDownLatch(1), oldCleaned = new CountDownLatch(1);
@@ -203,14 +331,15 @@ public final class TemporaryCleanupRegressionTest {
     }
 
     private static void replacedParentCannotDeleteUserFiles() throws Exception {
-        File original = new File(project, "swap-parent"), moved = new File(project, "real-parent");
+        File original = new File(state, "swap-parent"), moved = new File(state, "real-parent");
         File foreign = new File(project, "foreign-parent");
         original.mkdir(); foreign.mkdir();
-        TemporaryWorkspace materials = new TemporaryWorkspace(original.getPath(), false, state, 12);
+        TemporaryWorkspace materials = new TemporaryWorkspace(project.getPath(), false, original, 12);
         materials.beginTurn();
         File temporary = materials.directory();
         check(original.renameTo(moved), "Fixture could not move parent directory");
-        File user = new File(foreign, temporary.getName()); user.mkdir();
+        File foreignMaterials = new File(foreign, "materials"); foreignMaterials.mkdir();
+        File user = new File(foreignMaterials, temporary.getName()); user.mkdir();
         File keep = new File(user, "keep.txt"); Files.write(keep.toPath(), new byte[]{7});
         Files.createSymbolicLink(original.toPath(), foreign.toPath());
         check(materials.cleanup() != null && keep.isFile(), "Cleanup traversed a replaced parent symlink");
@@ -326,12 +455,16 @@ public final class TemporaryCleanupRegressionTest {
         state = new File(root, "private-state");
         try {
             managedMaterialsOnly();
+            privateFileAccessIsScoped();
+            rootAndWorkDirDoNotMovePrivateAllocation();
+            legacyWorkspaceRecoveryMigrates();
             purposeIsRequiredAndShellUsesManagedPaths();
             temporaryShellRejectsProjectOutputs();
             symlinkTargetsSurvive();
             persistentRecoveryIsScopedToSession();
             recoveryNeverCleansLiveLease();
             changedOwnershipBlocksCompletion();
+            unconfirmedProcessesBlockCleanupAndCanRetry();
             separateTurnLeases();
             replacedParentCannotDeleteUserFiles();
             cancelledShellStopsBeforeCleanup();

@@ -84,6 +84,30 @@ final class ToolPaths {
         }
     }
 
+    static File resolve(String workDir, String path, TemporaryWorkspace temporary) {
+        if (temporary != null && path != null && path.indexOf('\0') < 0
+                && path.indexOf('\n') < 0 && path.indexOf('\r') < 0) {
+            try {
+                File managed = temporary.resolveManaged(path);
+                if (managed != null) return managed;
+            } catch (Exception failure) {
+                throw new IllegalArgumentException(failure.getMessage(), failure);
+            }
+        }
+        File file = resolve(workDir, path);
+        try {
+            if (temporary != null && temporary.isPrivateStorage(file)) {
+                throw new IllegalArgumentException("App 私有临时存储只允许访问本轮登记目录，不能访问其他会话或登记文件。");
+            }
+        } catch (IOException failure) {
+            throw new IllegalArgumentException("无法确认路径：" + path, failure);
+        } catch (Exception failure) {
+            if (failure instanceof IllegalArgumentException) throw (IllegalArgumentException) failure;
+            throw new IllegalArgumentException(failure.getMessage(), failure);
+        }
+        return file;
+    }
+
     private static boolean inside(File root, File target) {
         String base = root.getPath(), path = target.getPath();
         return base.equals(path) || path.startsWith(base.endsWith("/") ? base : base + "/");
@@ -110,11 +134,15 @@ final class ToolPaths {
      * 目的只是把「写错目录还读回来」这类常见越界挡在调用前。
      */
     static void checkCommand(String workDir, String command) {
+        checkCommand(workDir, command, null);
+    }
+
+    static void checkCommand(String workDir, String command, TemporaryWorkspace temporary) {
         if (command == null || command.indexOf('\0') >= 0) {
             throw new IllegalArgumentException("命令不合法。");
         }
         try {
-            scanCommand(workDir, command);
+            scanCommand(workDir, command, temporary);
         } catch (IOException error) {
             throw new IllegalArgumentException("命令无法解析：" + command);
         }
@@ -202,7 +230,7 @@ final class ToolPaths {
         }
     }
 
-    private static void scanCommand(String workDir, String command) throws IOException {
+    private static void scanCommand(String workDir, String command, TemporaryWorkspace temporary) throws IOException {
         StreamTokenizer words = new StreamTokenizer(new StringReader(command));
         words.resetSyntax();
         words.wordChars(33, 65535);
@@ -231,7 +259,7 @@ final class ToolPaths {
                     throw new IllegalArgumentException("不要用 shell 重定向写文件，"
                             + "请使用 write 或 edit，并把文件留在工作目录内。");
                 }
-                if (value.startsWith("/")) resolve(workDir, value);
+                if (value.startsWith("/")) resolve(workDir, value, temporary);
                 readRedirect = false; writeRedirect = false;
                 continue;
             }
@@ -252,7 +280,7 @@ final class ToolPaths {
             int equal = value.indexOf('=');
             String path = equal >= 0 ? value.substring(equal + 1) : value;
             if (path.startsWith("/") || path.equals("..") || path.startsWith("../")) {
-                resolve(workDir, path);
+                resolve(workDir, path, temporary);
             }
         }
         if (changeDir) {

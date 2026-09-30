@@ -32,7 +32,7 @@ public class WriteTool implements Tool {
 
     @Override
     public String description() {
-        return "写入工作目录内的整个文件，目录外路径会被拒绝。不存在会创建，已存在会整篇覆盖，父目录一并创建。"
+        return "写入项目工作目录内的整个文件；purpose=temporary 时写入 App 私有的本轮临时目录。其他目录会被拒绝。不存在会创建，已存在会整篇覆盖，父目录一并创建。"
                 + "只用于新文件或整篇重写。改已有文件里的几处用 edit。"
                 + "purpose 必须按真实用途填写：temporary 临时材料、test 正式测试、deliverable 项目文件或交付物。"
                 + "temporary 的相对路径按专用临时目录解析，绝对路径必须在该临时目录内；用完立即 temporary cleanup。"
@@ -94,7 +94,7 @@ public class WriteTool implements Tool {
                 if (temporary == null) return "错误：当前没有临时材料管理器。";
                 file = temporary.resolveTemporary(path);
             } else {
-                file = ToolPaths.resolve(workDir, path);
+                file = ToolPaths.resolve(workDir, path, temporary);
                 if (temporary != null && temporary.contains(file)) {
                     return "错误：专用临时目录只能存放 purpose=temporary 的材料。";
                 }

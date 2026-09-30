@@ -15,7 +15,7 @@ public final class TemporaryTool implements Tool, TemporaryCleanup {
     @Override public String name() { return "temporary"; }
 
     @Override public String description() {
-        return "管理本轮临时材料。directory 返回工作目录内专用临时目录；cleanup 立即删除本轮登记的临时材料。"
+        return "管理本轮临时材料。directory 返回 App 私有存储中的专用临时目录，与项目工作目录分开；cleanup 立即删除本轮登记的临时材料。"
                 + "临时脚本、临时验证辅助文件、中间结果必须放入此目录，用完立即 cleanup。"
                 + "正式测试和用户交付物不要放入此目录；正式测试应归类到项目已有测试目录或 tests/。"
                 + "目标完成前及本轮结束、失败、停止时也会自动清理。";

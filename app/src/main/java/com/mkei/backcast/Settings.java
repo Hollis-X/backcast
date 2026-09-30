@@ -6,6 +6,7 @@ import com.mkei.backcast.agent.ResponsePreferences;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.io.File;
 
 /**
  * 应用配置：接口地址、密钥、模型、是否用 root。
@@ -58,6 +59,7 @@ public class Settings {
     private final SharedPreferences prefs;
     /** 静态指令原文放在资源里，代码里不再写死一份。 */
     private final String defaultPrompt;
+    private final File temporaryStorage;
 
     /** 分隔符：这条线之前是用户可编辑的静态指令，之后是每轮重算的环境事实。 */
     private static final String ENV_SEPARATOR = "\n\n---\n";
@@ -132,6 +134,7 @@ public class Settings {
     }
 
     public Settings(Context ctx) {
+        temporaryStorage = new File(ctx.getApplicationContext().getFilesDir(), "temporary-workspaces/materials");
         prefs = ctx.getApplicationContext()
                 .getSharedPreferences(PREF, Context.MODE_PRIVATE);
         defaultPrompt = ctx.getApplicationContext()
@@ -314,12 +317,15 @@ public class Settings {
         StringBuilder sb = new StringBuilder();
         sb.append("- 设备：Android ").append(android.os.Build.VERSION.RELEASE).append('\n');
         sb.append("- 工作目录：").append(workDir()).append('\n');
+        sb.append("- 临时材料：App 私有路径 ").append(temporaryStorage.getPath())
+                .append("，按会话和轮次登记隔离；用 temporary directory 获取本轮目录。\n");
         sb.append("- sdcard 路径：").append(DEFAULT_WORK_DIR).append('\n');
         sb.append("- 命令执行：").append(root
                 ? "尝试 root，拿不到时退回普通权限" : "普通权限").append('\n');
         sb.append("- 工具：read 读文件；edit 按原文替换；write 整文件覆盖；shell 执行命令。"
-                + "所有项目文件、交付物和临时材料都留在工作目录内。相对路径按工作目录解析，"
-                + "绝对路径也必须位于该目录内，目录外路径会被拒绝。"
+                + "项目文件、正式测试和交付物留在工作目录内。相对项目路径按工作目录解析。"
+                + "临时材料只放 App 私有的本轮专用临时目录，不在项目或设备根目录创建临时沙箱。"
+                + "read/edit/shell 只额外允许本轮登记临时目录的绝对路径，不开放其它 App 私有数据或其他会话目录。"
                 + "读文件不要用 cat，改文件不要用重定向。"
                 + "read、edit、write 跟随上面的 root 开关，读不到不要复制到临时目录。"
                 + "工具失败时先读错误中的路径与原因，修正参数，不要重复同一错误调用。"

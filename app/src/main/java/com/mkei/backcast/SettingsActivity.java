@@ -3,10 +3,13 @@ package com.mkei.backcast;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -84,10 +87,13 @@ public class SettingsActivity extends AppCompatActivity {
         model.setText(settings.model());
         useRoot.setChecked(settings.useRoot());
         bindChoices(outputVerbosity, R.array.output_verbosity_labels,
+                R.array.output_verbosity_descriptions, R.id.output_verbosity_description,
                 OUTPUT_VERBOSITY_VALUES, settings.outputVerbosity());
         bindChoices(reasoningSummary, R.array.reasoning_summary_labels,
+                R.array.reasoning_summary_descriptions, R.id.reasoning_summary_description,
                 REASONING_SUMMARY_VALUES, settings.reasoningSummary());
         bindChoices(outputLanguage, R.array.output_language_labels,
+                R.array.output_language_descriptions, R.id.output_language_description,
                 OUTPUT_LANGUAGE_VALUES, settings.outputLanguage());
         // 输入框只放静态指令，环境事实另外只读展示，不会被一起存下来。
         systemPrompt.setText(settings.systemPrompt());
@@ -136,18 +142,93 @@ public class SettingsActivity extends AppCompatActivity {
         });
     }
 
-    private void bindChoices(Spinner spinner, int labels, String[] values, String current) {
-        ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
-                this, labels, android.R.layout.simple_spinner_item);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+    private void bindChoices(Spinner spinner, int labels, int descriptions,
+            int descriptionView, String[] values, String current) {
+        final ChoiceAdapter adapter = new ChoiceAdapter(spinner,
+                getResources().getStringArray(labels), getResources().getStringArray(descriptions));
+        final TextView description = (TextView) findViewById(descriptionView);
         spinner.setAdapter(adapter);
+        int selection = 0;
         for (int i = 0; i < values.length; i++) {
             if (values[i].equals(current)) {
-                spinner.setSelection(i);
-                return;
+                selection = i;
+                break;
             }
         }
-        spinner.setSelection(0);
+        spinner.setSelection(selection);
+        description.setText(adapter.descriptionAt(selection));
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                description.setText(adapter.descriptionAt(position));
+                adapter.notifyDataSetChanged();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                description.setText(adapter.descriptionAt(0));
+            }
+        });
+    }
+
+    private final class ChoiceAdapter extends ArrayAdapter<String> {
+        private final Spinner owner;
+        private final String[] descriptions;
+
+        ChoiceAdapter(Spinner owner, String[] labels, String[] descriptions) {
+            super(SettingsActivity.this, android.R.layout.simple_spinner_item, labels);
+            this.owner = owner;
+            this.descriptions = descriptions;
+        }
+
+        String descriptionAt(int position) {
+            return position >= 0 && position < descriptions.length ? descriptions[position] : "";
+        }
+
+        @Override
+        public View getView(int position, View convertView, ViewGroup parent) {
+            TextView title = (TextView) super.getView(position, convertView, parent);
+            title.setTextColor(getResources().getColor(R.color.text_primary));
+            title.setTextSize(14);
+            title.setSingleLine(false);
+            return title;
+        }
+
+        @Override
+        public View getDropDownView(int position, View convertView, ViewGroup parent) {
+            View row = convertView;
+            ChoiceRow fields;
+            if (row == null || !(row.getTag() instanceof ChoiceRow)) {
+                row = getLayoutInflater().inflate(R.layout.settings_choice_item, parent, false);
+                fields = new ChoiceRow(row);
+                row.setTag(fields);
+            } else {
+                fields = (ChoiceRow) row.getTag();
+            }
+            fields.title.setText(getItem(position));
+            fields.description.setText(descriptionAt(position));
+            boolean selected = position == owner.getSelectedItemPosition();
+            row.setSelected(selected);
+            row.setBackgroundResource(selected ? R.drawable.bg_settings_choice_selected : 0);
+            fields.check.setVisibility(selected ? View.VISIBLE : View.INVISIBLE);
+            return row;
+        }
+    }
+
+    private final class ChoiceRow {
+        final TextView title;
+        final TextView description;
+        final ImageView check;
+
+        ChoiceRow(View row) {
+            title = (TextView) row.findViewById(R.id.choice_title);
+            description = (TextView) row.findViewById(R.id.choice_description);
+            check = (ImageView) row.findViewById(R.id.choice_check);
+            int size = (int) (22 * getResources().getDisplayMetrics().density);
+            check.setImageDrawable(Icons.tinted(SettingsActivity.this,
+                    R.drawable.ic_ds_checkmark_lg_regular_24,
+                    getResources().getColor(R.color.text_primary), size));
+        }
     }
 
     private String selectedValue(Spinner spinner, String[] values) {

@@ -102,11 +102,23 @@
         <item>中</item>
         <item>高</item>
     </string-array>
+    <string-array name="output_verbosity_descriptions">
+        <item>由模型决定回复的详细程度</item>
+        <item>保持回复简洁</item>
+        <item>兼顾细节与简洁</item>
+        <item>在回复中包含更多细节</item>
+    </string-array>
     <string-array name="reasoning_summary_labels">
         <item>自动</item>
         <item>简洁</item>
         <item>详细</item>
         <item>无</item>
+    </string-array>
+    <string-array name="reasoning_summary_descriptions">
+        <item>根据任务内容生成适量的推理摘要</item>
+        <item>用一句话概括当前思路</item>
+        <item>提供更完整的思路与验证摘要</item>
+        <item>不生成或显示推理摘要；仍保留工具调用和最终回复</item>
     </string-array>
     <string-array name="output_language_labels">
         <item>简体中文</item>
@@ -117,6 +129,16 @@
         <item>Español</item>
         <item>Français</item>
         <item>Deutsch</item>
+    </string-array>
+    <string-array name="output_language_descriptions">
+        <item>过程回复、推理摘要和最终回复均使用简体中文；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用繁体中文；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用英语；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用日语；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用韩语；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用西班牙语；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用法语；代码、路径和引用保留原文</item>
+        <item>过程回复、推理摘要和最终回复均使用德语；代码、路径和引用保留原文</item>
     </string-array>
     <string name="label_use_root">用 root 执行命令</string>
     <string name="label_system_prompt">系统提示词</string>

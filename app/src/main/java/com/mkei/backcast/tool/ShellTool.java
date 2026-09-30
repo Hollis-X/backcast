@@ -8,6 +8,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 import java.util.concurrent.TimeUnit;
 
@@ -32,6 +33,7 @@ public class ShellTool implements Tool {
     private final TemporaryWorkspace temporary;
     private volatile Process running;
     private volatile ProcessTree runningTree;
+    private volatile boolean cleanupFailed;
     /** 每次停止加一。正在跑的命令记下旧值，对不上就退出。 */
     private volatile int epoch;
 
@@ -98,7 +100,9 @@ public class ShellTool implements Tool {
 
     private void kill(Process process) {
         ProcessTree tree = running == process ? runningTree : null;
-        if (tree != null) tree.stop();
+        if (tree != null && !tree.stop()) {
+            cleanupFailed = true;
+        }
         try {
             process.getInputStream().close();
         } catch (Exception ignored) {
@@ -121,12 +125,13 @@ public class ShellTool implements Tool {
     @Override
     public String run(JSONObject args) throws Exception {
         final int mine = epoch;
+        cleanupFailed = false;
         String command = args.optString("command", "").trim();
         if (command.length() == 0) {
             return "错误：command 为空。";
         }
 
-        try { ToolPaths.checkCommand(workDir, command); }
+        try { ToolPaths.checkCommand(workDir, command, temporary); }
         catch (IllegalArgumentException error) { return "错误：" + error.getMessage(); }
         int timeoutSec = args.optInt("timeout_sec", DEFAULT_TIMEOUT_SEC);
         if (timeoutSec < 1) {
@@ -177,8 +182,9 @@ public class ShellTool implements Tool {
         // 在命令前先切到工作目录，相对路径就不用模型自己拼了。
         String directory = workDir;
         String prefix = "";
+        final File tempDirectory = temporary == null ? null : temporary.directory();
         if (temporary != null) {
-            String temp = temporary.directory().getPath();
+            String temp = tempDirectory.getPath();
             if (epoch != mine) return "已停止。";
             prefix = "export TMPDIR=" + RootShell.quote(temp) + " TMP=" + RootShell.quote(temp)
                     + " TEMP=" + RootShell.quote(temp) + "; ";
@@ -190,10 +196,18 @@ public class ShellTool implements Tool {
         } else if (temporaryCommand) {
             return "错误：当前没有临时材料管理器。";
         }
-        final String pidPrefix = "__backcast_pid_" + java.util.UUID.randomUUID().toString() + ":";
-        String full = "printf " + RootShell.quote(pidPrefix + "%s\\n") + " \"$$\"; "
-                + prefix + (directory == null ? command
+        final String token = java.util.UUID.randomUUID().toString();
+        final String pidPrefix = "__backcast_pid_" + token + ":";
+        final String donePrefix = "__backcast_done_" + token + ":";
+        String userCommand = prefix + (directory == null ? command
                 : "cd " + RootShell.quote(directory) + " && " + command);
+        // Keep a supervisor alive after command completion, so its process group
+        // cannot be reused before Java kills background writers. No command runs
+        // until Java has registered the supervisor identity and acknowledged it.
+        String supervisor = supervisorScript(userCommand, pidPrefix, donePrefix, token);
+        String full = "if command -v setsid >/dev/null 2>&1; then exec setsid sh -c "
+                + quoteScript(supervisor) + "; else exec sh -c "
+                + quoteScript(supervisor) + "; fi";
         String[] shell = withRoot
                 ? new String[]{"su", "-c", full}
                 : new String[]{"sh", "-c", full};
@@ -205,6 +219,19 @@ public class ShellTool implements Tool {
         final ProcessTree tree = new ProcessTree(process, withRoot);
         runningTree = tree;
         running = process;
+        if (temporary != null) {
+            try {
+                // Register against the captured allocation before the reader can
+                // acknowledge the supervisor and permit any user command.
+                temporary.trackProcess(tempDirectory, new TemporaryWorkspace.ProcessCleanup() {
+                    @Override public boolean stop() { return tree.stop(); }
+                });
+            } catch (Exception failure) {
+                kill(process);
+                if (running == process) { running = null; runningTree = null; }
+                throw failure;
+            }
+        }
         if (epoch != mine) {
             kill(process);
             running = null;
@@ -212,6 +239,8 @@ public class ShellTool implements Tool {
         }
 
         final StringBuilder sb = new StringBuilder();
+        final java.util.concurrent.atomic.AtomicInteger result =
+                new java.util.concurrent.atomic.AtomicInteger(Integer.MIN_VALUE);
         Thread reader = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -219,15 +248,18 @@ public class ShellTool implements Tool {
                     BufferedReader in = new BufferedReader(
                             new InputStreamReader(process.getInputStream(), "UTF-8"));
                     String line;
-                    boolean first = true;
                     while ((line = in.readLine()) != null) {
-                        if (first) {
-                            first = false;
-                            if (line.startsWith(pidPrefix)) {
-                                try { tree.observeShell(Long.parseLong(line.substring(pidPrefix.length()))); }
-                                catch (NumberFormatException ignored) { }
-                                continue;
+                        if (line.startsWith(pidPrefix)) {
+                            if (tree.observeSupervisor(line.substring(pidPrefix.length())) && epoch == mine) {
+                                process.getOutputStream().write((token + "\n").getBytes("UTF-8"));
+                                process.getOutputStream().flush();
                             }
+                            continue;
+                        }
+                        if (line.startsWith(donePrefix)) {
+                            try { result.set(Integer.parseInt(line.substring(donePrefix.length()))); }
+                            catch (NumberFormatException ignored) { }
+                            break;
                         }
                         synchronized (sb) {
                             if (sb.length() < MAX_OUTPUT) {
@@ -247,36 +279,42 @@ public class ShellTool implements Tool {
             long deadline = System.currentTimeMillis() + timeoutSec * 1000L;
             while (epoch == mine) {
                 tree.sample();
+                if (result.get() != Integer.MIN_VALUE) break;
                 if (finished(process)) {
                     break;
                 }
                 if (System.currentTimeMillis() >= deadline) {
                     kill(process);
-                    return "命令超时（" + timeoutSec + "s），已终止。\n输出片段：\n" + textOf(sb);
+                    return cleanupWarning() + "命令超时（" + timeoutSec + "s）。\n输出片段：\n" + textOf(sb);
                 }
                 Thread.sleep(150);
             }
             if (epoch != mine) {
                 kill(process);
-                return "已停止。\n" + textOf(sb);
+                return cleanupWarning() + "已停止。\n" + textOf(sb);
+            }
+            int exit;
+            if (result.get() != Integer.MIN_VALUE) {
+                exit = result.get();
+                kill(process);
+            } else {
+                exit = process.exitValue();
             }
             reader.join(400);
-            int exit = process.exitValue();
             String body = textOf(sb);
             if (body.length() == 0) {
                 body = "(无输出)";
             } else if (body.length() >= MAX_OUTPUT) {
                 body = body + "\n…（输出已截断）";
             }
-            return "exit=" + exit + "\n" + body;
+            return cleanupWarning() + "exit=" + exit + "\n" + body;
         } catch (Exception e) {
             if (epoch != mine) {
                 return "已停止。\n" + textOf(sb);
             }
             throw e;
         } finally {
-            if (epoch != mine || !finished(process)) kill(process);
-            else tree.stopChildren();
+            kill(process);
             if (running == process) {
                 running = null;
                 runningTree = null;
@@ -300,5 +338,33 @@ public class ShellTool implements Tool {
         synchronized (sb) {
             return sb.toString();
         }
+    }
+
+    private static String quoteScript(String script) {
+        return "'" + script.replace("'", "'\\''") + "'";
+    }
+
+    static String supervisorScript(String userCommand, String pidPrefix, String donePrefix, String token) {
+        // EOF means the app closed or died. Keep the leader only while its owner
+        // pipe exists, and independently verify an isolated group before killing
+        // it. Fallback shells sharing the app's process group simply exit.
+        String eofCleanup = "s=$(cat /proc/$BACKCAST_PROCESS_LEADER/stat 2>/dev/null); "
+                + "s=${s##*) }; set -- $s; if [ $# -ge 4 ] "
+                + "&& [ \"$3\" = \"$BACKCAST_PROCESS_LEADER\" ] "
+                + "&& [ \"$4\" = \"$BACKCAST_PROCESS_LEADER\" ]; then "
+                + "kill -s KILL -- -\"$BACKCAST_PROCESS_LEADER\"; fi; exit \"$result\"";
+        String completion = "result=$?; printf "
+                + RootShell.quote("\\n" + donePrefix + "%s\\n") + " \"$result\"; "
+                + "IFS= read -r cleanup; " + eofCleanup;
+        String child = "trap " + quoteScript(completion) + " EXIT; " + userCommand;
+        return "BACKCAST_PROCESS_LEADER=$$; export BACKCAST_PROCESS_LEADER; "
+                + "s=$(cat /proc/$$/stat) || exit 125; printf "
+                + RootShell.quote(pidPrefix + "%s\\n") + " \"$s\"; "
+                + "IFS= read -r ack || exit 125; [ \"$ack\" = " + RootShell.quote(token)
+                + " ] || exit 125; sh -c " + quoteScript(child) + "; " + completion;
+    }
+
+    private String cleanupWarning() {
+        return cleanupFailed ? "错误：未能确认所有后台子进程已结束，临时清理不能视为完成。\n" : "";
     }
 }

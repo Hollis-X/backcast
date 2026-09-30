@@ -48,6 +48,7 @@ public final class ResponsePreferencesRegressionTest {
                 "public class Context { public static final int MODE_PRIVATE=0;"
                 + "public final java.util.Map<String,Object> values=new java.util.HashMap<String,Object>();"
                 + "public Context getApplicationContext(){return this;}"
+                + "public java.io.File getFilesDir(){return new java.io.File(\"/data/user/0/com.mkei.backcast/files\");}"
                 + "public String getString(int id){return \"Fixture system prompt: 中文回答，简洁。\";}"
                 + "public SharedPreferences getSharedPreferences(String name,int mode){return new SharedPreferences(){"
                 + "public String getString(String k,String f){Object v=values.get(k);return v instanceof String?(String)v:f;}"

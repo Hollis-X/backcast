@@ -331,9 +331,9 @@ public final class RunHub {
         boolean root = settings.useRoot();
         TemporaryWorkspace materials = temporary.get(loop);
         materials.configure(dir, root);
-        next.register(new ReadTool(dir, root));
+        next.register(new ReadTool(dir, root, materials));
         next.register(new ShellTool(root, dir, materials));
-        next.register(new EditTool(dir, root));
+        next.register(new EditTool(dir, root, materials));
         next.register(new WriteTool(dir, root, materials));
         next.register(new TemporaryTool(materials));
         next.register(new GoalTool(loop));

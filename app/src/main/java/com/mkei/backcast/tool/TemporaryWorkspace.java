@@ -11,6 +11,10 @@ import java.util.UUID;
 
 /** Only directories allocated by this manager may be automatically removed. */
 public final class TemporaryWorkspace {
+    /** Retain a live process identity until stopping it can be positively confirmed. */
+    public interface ProcessCleanup {
+        boolean stop() throws Exception;
+    }
     private static final String MARKER = ".backcast-owner";
     private static final String RECOVERED = "recovered";
 
@@ -19,6 +23,7 @@ public final class TemporaryWorkspace {
         final String workspace;
         final String owner;
         String lease;
+        final ArrayList<ProcessCleanup> processes = new ArrayList<ProcessCleanup>();
 
         Allocation(File directory, String workspace, String owner, String lease) {
             this.directory = directory;
@@ -31,19 +36,20 @@ public final class TemporaryWorkspace {
     private String workDir;
     private boolean useRoot;
     private final File stateDir;
+    private final File materialsDir;
     private File ledger;
     private final ArrayList<Allocation> allocations = new ArrayList<Allocation>();
     private final ThreadLocal<String> turn = new ThreadLocal<String>();
     private String loadError;
-
     public TemporaryWorkspace(String workDir, boolean useRoot) {
         this(workDir, useRoot, null, -1);
     }
 
     public TemporaryWorkspace(String workDir, boolean useRoot, File stateDir, long sessionId) {
         configure(workDir, useRoot);
-        this.stateDir = stateDir;
-        ledger = stateDir == null ? null : new File(stateDir, sessionId < 0
+        this.stateDir = canonical(stateDir);
+        materialsDir = this.stateDir == null ? null : new File(this.stateDir, "materials");
+        ledger = this.stateDir == null ? null : new File(this.stateDir, sessionId < 0
                 ? "draft-" + UUID.randomUUID().toString() + ".json"
                 : "session-" + sessionId + ".json");
         load();
@@ -76,10 +82,14 @@ public final class TemporaryWorkspace {
 
     public synchronized File directory() throws Exception {
         if (loadError != null) throw new IllegalArgumentException(loadError);
-        if (workDir == null || workDir.length() == 0) {
-            throw new IllegalArgumentException("临时材料需要明确的工作目录。");
+        if (materialsDir == null) throw new IllegalArgumentException("临时材料需要配置 App 私有存储路径。");
+        File base = materialsDir;
+        if (!base.getAbsolutePath().equals(base.getCanonicalPath())) {
+            throw new IllegalArgumentException("App 私有临时目录被替换成链接，拒绝写入。");
         }
-        File base = ToolPaths.resolve(workDir, ".");
+        if (!base.isDirectory() && !base.mkdirs()) {
+            throw new IllegalArgumentException("无法创建 App 私有临时目录：" + base.getPath());
+        }
         String lease = lease();
         for (Allocation allocation : allocations) {
             if (allocation.workspace.equals(base.getPath()) && allocation.lease.equals(lease)) {
@@ -95,17 +105,13 @@ public final class TemporaryWorkspace {
         allocations.add(allocation);
         save();
         boolean created = directory.mkdir();
-        if (!created && useRoot && RootShell.available()) {
-            created = RootShell.exec("mkdir " + RootShell.quote(directory.getPath()),
-                    null, 1024, 15000).exit == 0;
-        }
         if (!created) {
             allocations.remove(allocation);
             save();
             throw new IllegalArgumentException("无法创建临时目录：" + directory.getPath());
         }
         try {
-            ToolPaths.writeBytes(new File(directory, MARKER), owner.getBytes("UTF-8"), useRoot);
+            ToolPaths.writeBytes(new File(directory, MARKER), owner.getBytes("UTF-8"), false);
         } catch (Exception failure) {
             // An empty allocation remains ours even if writing its marker failed.
             directory.delete();
@@ -115,7 +121,52 @@ public final class TemporaryWorkspace {
     }
 
     public synchronized File resolveTemporary(String path) throws Exception {
-        return ToolPaths.resolve(directory().getPath(), path);
+        File file = ToolPaths.resolve(directory().getPath(), path);
+        if (MARKER.equals(file.getName())) throw new IllegalArgumentException("不能修改临时目录所有权标记。");
+        return file;
+    }
+
+    /** Bind before executing user commands; callbacks may be retried after cancellation. */
+    public synchronized void trackProcess(File directory, ProcessCleanup process) throws Exception {
+        if (process == null) throw new IllegalArgumentException("进程清理检查为空。");
+        for (Allocation allocation : allocations) {
+            if (allocation.directory.equals(directory.getCanonicalFile())) {
+                verify(allocation);
+                allocation.processes.add(process);
+                return;
+            }
+        }
+        throw new IllegalArgumentException("进程没有对应的本轮临时目录登记。");
+    }
+
+    /** Extra file-tool access is limited to this turn's verified allocations. */
+    public synchronized File resolveManaged(String path) throws Exception {
+        if (path == null || !new File(path).isAbsolute()) return null;
+        File file = new File(path).getCanonicalFile();
+        for (Allocation allocation : allocations) {
+            String base = allocation.directory.getPath();
+            if (!allocation.lease.equals(lease()) || RECOVERED.equals(allocation.lease)) continue;
+            if (file.getPath().equals(base) || file.getPath().startsWith(base + File.separator)) {
+                verify(allocation);
+                return file;
+            }
+        }
+        return null;
+    }
+
+    public synchronized boolean isOwnershipMarker(File file) throws Exception {
+        if (!MARKER.equals(file.getName())) return false;
+        for (Allocation allocation : allocations) {
+            if (new File(allocation.directory, MARKER).equals(file)) return true;
+        }
+        return false;
+    }
+
+    /** A broad project root must not grant access to another turn or the private ledger. */
+    synchronized boolean isPrivateStorage(File file) throws Exception {
+        if (stateDir == null) return false;
+        String base = stateDir.getPath(), path = file.getCanonicalPath();
+        return path.equals(base) || path.startsWith(base + File.separator);
     }
 
     public synchronized boolean contains(File file) throws Exception {
@@ -142,6 +193,12 @@ public final class TemporaryWorkspace {
             Allocation allocation = allocations.get(i);
             if (!allocation.lease.equals(lease) && !RECOVERED.equals(allocation.lease)) continue;
             try {
+                for (int p = allocation.processes.size() - 1; p >= 0; p--) {
+                    if (!allocation.processes.get(p).stop()) {
+                        throw new IllegalArgumentException("未能确认后台子进程已结束，保留临时目录并等待重试。");
+                    }
+                    allocation.processes.remove(p);
+                }
                 remove(allocation);
                 allocations.remove(i);
             } catch (Exception failure) {
@@ -189,6 +246,14 @@ public final class TemporaryWorkspace {
         if (!probe.exists) return;
         File[] empty = directory.listFiles();
         if (empty != null && empty.length == 0 && directory.delete()) return;
+        try {
+            verify(allocation);
+            removeTree(directory);
+            return;
+        } catch (Exception directFailure) {
+            if (!useRoot || !RootShell.available()) throw directFailure;
+        }
+        // Root commands can leave restrictive ownership/modes inside an app-owned allocation.
         if (useRoot && RootShell.available()) {
             String path = RootShell.quote(directory.getPath());
             String marker = RootShell.quote(new File(directory, MARKER).getPath());
@@ -198,18 +263,22 @@ public final class TemporaryWorkspace {
                     + " ] && [ \"$(cat " + marker + ")\" = " + RootShell.quote(allocation.owner)
                     + " ]; then rm -rf " + path + "; else exit 2; fi";
             if (RootShell.exec(command, null, 2048, 60000).exit != 0) {
-                throw new IllegalArgumentException("无法确认所有权或删除临时目录。");
+                throw new IllegalArgumentException("无法确认所有权或删除临时目录；请检查 root 授权及 SELinux 拒绝记录。");
             }
             return;
         }
-        verify(allocation);
-        removeTree(directory);
     }
 
     private static void verifyParent(Allocation allocation) throws Exception {
         if (!new File(allocation.workspace).getCanonicalPath().equals(allocation.workspace)) {
             throw new IllegalArgumentException("工作目录父路径被替换成链接，拒绝自动删除。");
         }
+    }
+
+    private static File canonical(File file) {
+        if (file == null) return null;
+        try { return file.getCanonicalFile(); }
+        catch (Exception failure) { throw new IllegalArgumentException("无法确认 App 私有存储路径。", failure); }
     }
 
     private static void removeTree(File file) throws Exception {
@@ -246,7 +315,8 @@ public final class TemporaryWorkspace {
                 File base = new File(value.getString("workspace")).getCanonicalFile();
                 File path = new File(value.getString("path")).getAbsoluteFile();
                 if (!UUID.fromString(owner).toString().equals(owner)
-                        || !path.equals(new File(base, ".backcast-tmp-" + owner))) {
+                        || !path.equals(new File(base, ".backcast-tmp-" + owner))
+                        || ("private".equals(value.optString("storage", "legacy")) && !base.equals(materialsDir))) {
                     throw new IllegalArgumentException("临时登记路径不合法。");
                 }
                 allocations.add(new Allocation(path, base.getPath(), owner, RECOVERED));
@@ -267,7 +337,8 @@ public final class TemporaryWorkspace {
         JSONArray roots = new JSONArray();
         for (Allocation allocation : allocations) {
             roots.put(new JSONObject().put("path", allocation.directory.getPath())
-                    .put("workspace", allocation.workspace).put("owner", allocation.owner));
+                    .put("workspace", allocation.workspace).put("owner", allocation.owner)
+                    .put("storage", new File(allocation.workspace).equals(materialsDir) ? "private" : "legacy"));
         }
         byte[] data = new JSONObject().put("directories", roots).toString().getBytes("UTF-8");
         File pending = new File(parent, ledger.getName() + ".new");
