@@ -47,31 +47,33 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.AgentService", "public class AgentService { public static void start(android.content.Context c) {} }");
         add(files, "com.mkei.backcast.ChatStore",
                 "public class ChatStore {"
-                + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,turnAt,turnWall,seenAt,tokensUsed,tokenBudget; public boolean running; }"
+                + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,turnAt,turnWall,seenAt,tokensUsed,tokenBudget; public boolean running; public Boolean budgetWrapFinished; }"
                 + "private static final java.util.Map<Long,Run> runs=new java.util.HashMap<Long,Run>();"
                 + "public ChatStore(android.content.Context c) {}"
                 + "public static void reset() { runs.clear(); }"
                 + "public static void pending(long sid) { Run r=new Run(); r.running=true; r.turnAt=10; r.turnWall=20; runs.put(sid,r); }"
+                + "public static void pendingBudget(long sid,Boolean finished) { pending(sid); Run r=runs.get(sid); r.goal=\"spent goal\"; r.status=\"budget_limited\"; r.budgetWrapFinished=finished; }"
                 + "public Run readRun(long sid) { Run r=runs.get(sid); return r==null?new Run():r; }"
                 + "public java.util.List<Long> runningIds() { java.util.List<Long> out=new java.util.ArrayList<Long>(); for(java.util.Map.Entry<Long,Run> e:runs.entrySet()) if(e.getValue().running) out.add(e.getKey()); return out; }"
                 + "public java.util.List<com.mkei.backcast.agent.Message> contextMessages(long sid) { return new java.util.ArrayList<com.mkei.backcast.agent.Message>(); }"
                 + "public void append(long sid,com.mkei.backcast.agent.Message m) {}"
                 + "public void replaceAll(long sid,java.util.List<com.mkei.backcast.agent.Message> m) {}"
-                + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget) {} }");
+                + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished) {} }");
         add(files, "com.mkei.backcast.agent.AgentLoop",
                 "public class AgentLoop {"
                 + "public static final int DEFAULT_CONTEXT_LIMIT=456000;"
                 + "public interface Listener {} public static class Quiet implements Listener {}"
                 + "public interface Recorder { void record(long sid,Message m); void replace(long sid,java.util.List<Message> m); }"
-                + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget); }"
+                + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished); }"
                 + "private Listener listener; private long sid;"
                 + "public volatile boolean busyState; public volatile int resumes; public int loads, clockRestores, cancellations;"
+                + "public Boolean restoredBudgetWrapFinished;"
                 + "public AgentLoop(LlmClient c,ToolRegistry r,Listener l) { listener=l; }"
                 + "public void bindSession(long id) { sid=id; } public long sessionKey() { return sid; }"
                 + "public boolean busy() { return busyState; }"
                 + "public Listener listener() { return listener; } public void setListener(Listener l) { listener=l; }"
                 + "public void loadHistory(String s,java.util.List<Message> m) { loads++; }"
-                + "public void restoreGoal(String g,String s,long ms) {} public void restoreGoal(String g,String s,long ms,long used,long budget) {} public void restoreTurnClock(long at,long wall,long seen) { clockRestores++; }"
+                + "public void restoreGoal(String g,String s,long ms) {} public void restoreGoal(String g,String s,long ms,long used,long budget,Boolean budgetWrapFinished) { restoredBudgetWrapFinished=budgetWrapFinished; } public void restoreTurnClock(long at,long wall,long seen) { clockRestores++; }"
                 + "public void resume(long id,int token) { resumes++; }"
                 + "public void setRecorder(Recorder r) {} public void setDurability(Durability d) {}"
                 + "public void setContextBudget(int limit,float ratio) {} public void setAccessLevel(String level) {}"
@@ -84,7 +86,7 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.agent.Message", "public class Message { public String content; }");
         add(files, "com.mkei.backcast.agent.LlmClient", "public class LlmClient { public static class Config { public Config(String a,String b,String c,String d) {} } public LlmClient(Config c) {} }");
         add(files, "com.mkei.backcast.agent.ToolRegistry", "public class ToolRegistry { public java.util.List<String> names=new java.util.ArrayList<String>(); public void register(Object tool) { names.add(tool.getClass().getSimpleName()); } }");
-        for (String name : Arrays.asList("EditTool", "GoalTool", "ReadTool", "ShellTool", "WriteTool")) {
+        for (String name : Arrays.asList("EditTool", "GoalTool", "GetGoalTool", "ReadTool", "ShellTool", "WriteTool")) {
             add(files, "com.mkei.backcast.tool." + name, "public class " + name + " { public " + name + "(Object... args) {} }");
         }
     }
@@ -189,8 +191,18 @@ public final class RunHubRecoveryTest {
         tools.setAccessible(true);
         Object registry = tools.invoke(hub, loop);
         Object names = registry.getClass().getField("names").get(registry);
-        check(names.equals(Arrays.asList("ReadTool", "ShellTool", "EditTool", "WriteTool", "GoalTool")),
+        check(names.equals(Arrays.asList("ReadTool", "ShellTool", "EditTool", "WriteTool", "GoalTool", "GetGoalTool")),
                 "registry contains a removed tool or is missing a current tool");
+    }
+
+    private static void budgetWrapStateSurvivesRecovery() throws Exception {
+        for (Boolean finished : Arrays.asList(Boolean.TRUE, Boolean.FALSE, null)) {
+            Object hub = freshHub();
+            storeType.getMethod("pendingBudget", long.class, Boolean.class).invoke(null, 7L, finished);
+            Object loop = bind(hub, 7L, listener());
+            Object restored = loopType.getField("restoredBudgetWrapFinished").get(loop);
+            check(java.util.Objects.equals(finished, restored), "Recovery lost budget wrap-up state " + finished);
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -213,7 +225,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

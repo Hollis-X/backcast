@@ -10,6 +10,7 @@ import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.mkei.backcast.tool.EditTool;
 import com.mkei.backcast.tool.GoalTool;
+import com.mkei.backcast.tool.GetGoalTool;
 import com.mkei.backcast.tool.ReadTool;
 import com.mkei.backcast.tool.ShellTool;
 import com.mkei.backcast.tool.WriteTool;
@@ -57,9 +58,10 @@ public final class RunHub {
         durability = new AgentLoop.Durability() {
             @Override
             public void save(long sessionId, boolean running, String goal, String status, long elapsedMs,
-                        long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget) {
+                        long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget,
+                        boolean budgetWrapFinished) {
                 store.saveRun(sessionId, running, goal, status, elapsedMs, turnAt, turnWall, seenAt,
-                        tokensUsed, tokenBudget);
+                        tokensUsed, tokenBudget, budgetWrapFinished);
                 if (running || hasWork()) {
                     AgentService.start(app);
                 } else {
@@ -93,7 +95,8 @@ public final class RunHub {
             loops.put(Long.valueOf(sessionId), loop);
             loop.bindSession(sessionId);
             ChatStore.Run run = store.readRun(sessionId);
-            loop.restoreGoal(run.goal, run.status, run.elapsedMs, run.tokensUsed, run.tokenBudget);
+            loop.restoreGoal(run.goal, run.status, run.elapsedMs, run.tokensUsed, run.tokenBudget,
+                    run.budgetWrapFinished);
             loop.loadHistory(settings.fullSystemPrompt(),
                     stripSteer(store.contextMessages(sessionId)));
             if (run.running) {
@@ -282,6 +285,7 @@ public final class RunHub {
         next.register(new EditTool(dir, root));
         next.register(new WriteTool(dir, root));
         next.register(new GoalTool(loop));
+        next.register(new GetGoalTool(loop));
         return next;
     }
 

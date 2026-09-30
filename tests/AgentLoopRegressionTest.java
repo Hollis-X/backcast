@@ -525,15 +525,22 @@ public final class AgentLoopRegressionTest {
         check(loop.goalElapsed() == paused, "Resume changed accumulated time");
         check(loop.goalTokenBudget() == 800L, "Resume reset the budget");
     }
-    /** 换路径读、换命令查，只要不改文件，连续 12 轮就停。目标留着，不判死。 */
-    private static void readOnlySpiralStops() throws Exception {
+    /** 连续读取新的证据，不因没有修改文件而被固定轮数上限误停。 */
+    private static void newReadOnlyEvidenceContinuesBeyondTwelveRounds() throws Exception {
         SystemClock.set(100000);
         final int[] served = new int[1];
+        final AgentLoop[] box = new AgentLoop[1];
         LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
             @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
                 served[0]++;
+                check(served[0] <= 20, "Read-only fixture did not finish");
                 SystemClock.advance(10L);
                 Reply reply = new Reply();
+                if (served[0] == 20) {
+                    box[0].closeGoal("complete", "");
+                    reply.content = "new evidence verified";
+                    return reply;
+                }
                 JSONArray calls = new JSONArray();
                 calls.put(new JSONObject().put("id", "c" + served[0]).put("type", "function")
                         .put("function", new JSONObject().put("name", "read")
@@ -551,16 +558,17 @@ public final class AgentLoopRegressionTest {
             @Override public void abort() { }
         });
         AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet());
+        box[0] = loop;
         loop.bindSession(1);
         loop.reset("system");
-        loop.setGoal("keep auditing forever");
+        loop.setGoal("verify new evidence");
         loop.submit("go", 1, loop.generation(), 1);
-        check(served[0] == 12, "Read-only spiral ran " + served[0] + " rounds");
-        check(Goal.ACTIVE.equals(loop.goalStatus()), "Read-only stop killed the goal");
-        check(!loop.busy(), "Read-only spiral kept running");
+        check(served[0] == 20, "New read-only evidence stopped after " + served[0] + " rounds");
+        check(Goal.COMPLETE.equals(loop.goalStatus()), "Read-only goal did not honor completion");
+        check(!loop.busy(), "Completed read-only goal kept running");
     }
-    /** 重进时接着算只读轮次，满了就不要再问模型。 */
-    private static void resumedReadOnlyStreakStopsWithoutAnotherRound() throws Exception {
+    /** 恢复已收集多个只读证据的任务，仍可继续完成审计。 */
+    private static void resumedReadOnlyEvidenceDoesNotStopTheGoal() throws Exception {
         SystemClock.set(100000);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("go"));
@@ -573,25 +581,29 @@ public final class AgentLoopRegressionTest {
             history.add(Message.toolResult("c" + i, "已读"));
         }
         final int[] served = new int[1];
+        final AgentLoop[] box = new AgentLoop[1];
         LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
             @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
                 served[0]++;
+                check(served[0] == 1, "Resumed read-only fixture did not finish");
+                box[0].closeGoal("complete", "");
                 Reply reply = new Reply();
-                reply.content = "should not be asked";
+                reply.content = "existing evidence verified";
                 return reply;
             }
         };
         AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
+        box[0] = loop;
         loop.bindSession(1);
         loop.loadHistory("system", history);
         loop.setGoal("audit");
         loop.resume(1, 1);
-        check(served[0] == 0, "Resumed read-only streak asked the model again: " + served[0]);
-        check(Goal.ACTIVE.equals(loop.goalStatus()), "Resume killed the goal");
-        check(!loop.busy(), "Resumed streak kept running");
+        check(served[0] == 1, "Restored read-only evidence prevented final verification: " + served[0]);
+        check(Goal.COMPLETE.equals(loop.goalStatus()), "Resumed goal did not honor completion");
+        check(!loop.busy(), "Completed resumed goal kept running");
     }
-    /** 用户点继续之后，只读计数重新给一轮，不会按着旧历史立刻再停。 */
-    private static void userContinueResetsTheReadOnlyStreak() throws Exception {
+    /** 用户点继续之后，新的只读证据同样不会按固定轮数停下。 */
+    private static void userContinueAllowsNewReadOnlyEvidence() throws Exception {
         SystemClock.set(100000);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("go"));
@@ -604,11 +616,18 @@ public final class AgentLoopRegressionTest {
             history.add(Message.toolResult("c" + i, "已读"));
         }
         final int[] served = new int[1];
+        final AgentLoop[] box = new AgentLoop[1];
         LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
             @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
                 served[0]++;
+                check(served[0] <= 20, "User-continued read-only fixture did not finish");
                 SystemClock.advance(10L);
                 Reply reply = new Reply();
+                if (served[0] == 20) {
+                    box[0].closeGoal("complete", "");
+                    reply.content = "continued evidence verified";
+                    return reply;
+                }
                 JSONArray calls = new JSONArray();
                 calls.put(new JSONObject().put("id", "n" + served[0]).put("type", "function")
                         .put("function", new JSONObject().put("name", "read")
@@ -626,16 +645,17 @@ public final class AgentLoopRegressionTest {
             @Override public void abort() { }
         });
         AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet());
+        box[0] = loop;
         loop.bindSession(1);
         loop.loadHistory("system", history);
         loop.setGoal("audit");
         loop.markGoalActive();
         loop.resume(1, 1);
-        check(served[0] == 12, "User continue did not get a fresh read-only window: " + served[0]);
-        check(Goal.ACTIVE.equals(loop.goalStatus()), "User continue killed the goal");
-        check(!loop.busy(), "Fresh window kept running");
+        check(served[0] == 20, "User continue stopped new evidence after " + served[0] + " rounds");
+        check(Goal.COMPLETE.equals(loop.goalStatus()), "Continued goal did not honor completion");
+        check(!loop.busy(), "Completed continued goal kept running");
     }
-    /** 模型调用 update_goal 标完成之后，循环自己停，不再续跑。 */
+    /** update_goal 完成后仍给一次最终答复，不再开放工具或自动续跑。 */
     private static void goalStopsWhenMarkedComplete() throws Exception {
         SystemClock.set(100000);
         final int[] served = new int[1];
@@ -643,8 +663,14 @@ public final class AgentLoopRegressionTest {
         LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
             @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
                 served[0]++;
+                check(served[0] <= 2, "Completed goal continued after its final answer");
                 SystemClock.advance(10L);
                 Reply reply = new Reply();
+                if (served[0] == 2) {
+                    check(tools == null || tools.length() == 0, "Final goal answer still exposes tools");
+                    reply.content = "goal finished";
+                    return reply;
+                }
                 JSONArray calls = new JSONArray();
                 calls.put(new JSONObject().put("id", "done").put("type", "function")
                         .put("function", new JSONObject().put("name", "update_goal")
@@ -667,58 +693,10 @@ public final class AgentLoopRegressionTest {
         loop.reset("system");
         loop.setGoal("finish and stop");
         loop.submit("go", 1, loop.generation(), 1);
-        check(served[0] == 1, "Completed goal kept spinning: " + served[0] + " rounds");
+        check(served[0] == 2, "Completed goal missed its final answer or kept spinning: " + served[0]);
         check(Goal.COMPLETE.equals(loop.goalStatus()), "update_goal did not complete the goal");
         check(!loop.busy() && !loop.goalActive(), "Completed goal stayed active");
-    }
-    /**
-     * 干过活之后，最终答复声明审计通过，但没调 update_goal。
-     * 不能再注入续跑，否则模型会把已经通过的审计重做一遍。
-     */
-    private static void passedAuditStopsTheGoal() throws Exception {
-        SystemClock.set(100000);
-        final int[] served = new int[1];
-        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
-            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
-                served[0]++;
-                SystemClock.advance(10L);
-                Reply reply = new Reply();
-                if (served[0] == 1) {
-                    JSONArray calls = new JSONArray();
-                    calls.put(new JSONObject().put("id", "e1").put("type", "function")
-                            .put("function", new JSONObject().put("name", "edit")
-                                    .put("arguments", "{\"path\":\"face.svg\"}")));
-                    reply.toolCalls = calls;
-                    return reply;
-                }
-                reply.content = "猫脸已精细化完成，审计全部通过。\n\n对比度与几何都核对过了。";
-                return reply;
-            }
-        };
-        ToolRegistry registry = new ToolRegistry();
-        registry.register(new Tool() {
-            @Override public String name() { return "edit"; }
-            @Override public String description() { return "fixture"; }
-            @Override public JSONObject parameters() { return new JSONObject(); }
-            @Override public String run(JSONObject args) { return "已替换 1 处"; }
-            @Override public void abort() { }
-        });
-        AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet());
-        loop.bindSession(1);
-        loop.reset("system");
-        loop.setGoal("把猫脸再精细一点");
-        loop.submit("go", 1, loop.generation(), 1);
-        check(served[0] == 2, "Passed audit kept spinning: " + served[0] + " rounds");
-        check(Goal.COMPLETE.equals(loop.goalStatus()), "Passed audit left the goal active");
-        check(!loop.busy() && !loop.goalActive(), "Passed audit kept the run alive");
-        check(Goal.declaredComplete("猫脸已精细化完成，审计全部通过。"),
-                "Audit-passed opening was not recognized");
-        check(!Goal.declaredComplete("我已经做完了。"),
-                "A bare done claim was treated as a passed audit");
-        check(!Goal.declaredComplete("接下来还要改眼睛。审计全部通过只是局部的。"),
-                "An unfinished opening was treated as done");
-        check(!Goal.declaredComplete("审计全部通过之前先看一眼当前文件。"),
-                "A claim that still wants another look was treated as done");
+        check(!loop.needsResume(), "Completed goal remained resumable");
     }
     /** 还没调用过工具就说审计通过，不能把目标收掉。 */
     private static void bareAuditClaimDoesNotFinish() throws Exception {
@@ -763,11 +741,12 @@ public final class AgentLoopRegressionTest {
         check(!loop.busy() && !loop.goalActive(), "Blocked goal kept running");
     }
     /** 续跑说明要拦住「换角度再验证一轮」。 */
-    private static void continuationForbidsVerificationLoops() {
+    private static void continuationEncouragesClosingOnce() {
         String text = Goal.continuation("fix the overlap", 10L, 0L);
-        check(text.contains("完成审计一旦通过"), "Completion audit has no stop instruction");
-        check(text.contains("同一句目标"), "Repeating the objective can restart finished work");
-        check(text.contains("只读不算进展"), "Read-only verification is still treated as progress");
+        check(text.contains("必须成功调用 update_goal"), "Completion audit does not require an explicit state update");
+        check(text.contains("不要自行增加功能、细节或新的验收条件"), "Continuation can silently expand the objective");
+        check(text.contains("重复已完成的验证"), "Completed verification can start another goal turn");
+        check(!text.contains("只读不算进展"), "New read-only evidence is incorrectly excluded from progress");
     }
     private static void run(String name) {
         try {
@@ -787,11 +766,11 @@ public final class AgentLoopRegressionTest {
                 "repeatedToolResultsStopTheGoal", "goalWithoutToolCallsStopsAfterRepeats",
                 "goalWithoutBudgetRunsUntilTheModelFinishes", "budgetLimitGivesOneWrapUpThenStops",
                 "interleavedSummariesDoNotFalselyStall", "rewrittenObjectiveIsInjectedOnce",
-                "newGoalStartsAFreshLedger", "readOnlySpiralStops",
-                "resumedReadOnlyStreakStopsWithoutAnotherRound", "userContinueResetsTheReadOnlyStreak",
-                "goalStopsWhenMarkedComplete", "passedAuditStopsTheGoal", "bareAuditClaimDoesNotFinish",
-                "emptyContinuationsBlockTheGoal", "continuationForbidsVerificationLoops"}) run(name);
+                "newGoalStartsAFreshLedger", "newReadOnlyEvidenceContinuesBeyondTwelveRounds",
+                "resumedReadOnlyEvidenceDoesNotStopTheGoal", "userContinueAllowsNewReadOnlyEvidence",
+                "goalStopsWhenMarkedComplete", "bareAuditClaimDoesNotFinish",
+                "emptyContinuationsBlockTheGoal", "continuationEncouragesClosingOnce"}) run(name);
         if (failures != 0) throw new AssertionError(failures + " loop tests failed");
-        System.out.println("25 loop tests passed");
+        System.out.println("24 loop tests passed");
     }
 }

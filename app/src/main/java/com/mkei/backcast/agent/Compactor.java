@@ -8,6 +8,8 @@ package com.mkei.backcast.agent;
  */
 public final class Compactor {
 
+    public static final int MAX_USER_MESSAGE_TOKENS = 20000;
+
     /**
      * 压缩时发给模型的指令。与 Codex 的 CONTEXT CHECKPOINT COMPACTION 一致：
      * 要点是「写给下一个接手的人看」，所以必须包含已定决策、约束和下一步。
@@ -41,5 +43,11 @@ public final class Compactor {
     /** 把摘要包成新窗口的第一条消息内容。 */
     public static String wrap(String summary) {
         return SUMMARY_PREFIX + "\n\n" + (summary == null ? "" : summary);
+    }
+
+    public static boolean isSummary(Message message) {
+        return message != null
+                && (Message.USER.equals(message.role) || Message.ASSISTANT.equals(message.role))
+                && message.content != null && message.content.startsWith(SUMMARY_PREFIX);
     }
 }

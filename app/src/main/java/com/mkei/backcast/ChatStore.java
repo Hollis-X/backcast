@@ -40,10 +40,12 @@ public class ChatStore extends SQLiteOpenHelper {
         public long tokensUsed;
         /** 目标 token 预算，0 表示没设。 */
         public long tokenBudget;
+        /** Null for legacy runs whose budget wrap-up must be inferred. */
+        public Boolean budgetWrapFinished;
     }
 
     public ChatStore(Context context) {
-        super(context.getApplicationContext(), "backcast.db", null, 9);
+        super(context.getApplicationContext(), "backcast.db", null, 10);
     }
 
     @Override
@@ -94,9 +96,12 @@ public class ChatStore extends SQLiteOpenHelper {
         if (oldVersion < 8) {
             db.execSQL("ALTER TABLE messages ADD COLUMN work_dir TEXT");
         }
-        if (oldVersion < 9) {
+        if (oldVersion >= 4 && oldVersion < 9) {
             db.execSQL("ALTER TABLE runs ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0");
             db.execSQL("ALTER TABLE runs ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion >= 4 && oldVersion < 10) {
+            db.execSQL("ALTER TABLE runs ADD COLUMN budget_wrap_finished INTEGER");
         }
     }
 
@@ -112,7 +117,8 @@ public class ChatStore extends SQLiteOpenHelper {
                 + "turn_wall INTEGER NOT NULL DEFAULT 0,"
                 + "seen_at INTEGER NOT NULL DEFAULT 0,"
                 + "tokens_used INTEGER NOT NULL DEFAULT 0,"
-                + "token_budget INTEGER NOT NULL DEFAULT 0)");
+                + "token_budget INTEGER NOT NULL DEFAULT 0,"
+                + "budget_wrap_finished INTEGER)");
     }
 
     public synchronized long create(String title) {
@@ -175,7 +181,7 @@ public class ChatStore extends SQLiteOpenHelper {
                             || com.mkei.backcast.agent.Goal.isNote(m.content)) {
                         continue;
                     }
-                    window.put(m.toJson());
+                    window.put(m.toCheckpointJson());
                 }
             }
             db.update("sessions", touchValues(), "id=?",
@@ -277,11 +283,7 @@ public class ChatStore extends SQLiteOpenHelper {
                 JSONArray window = new JSONArray(c.getString(1));
                 for (int i = 0; i < window.length(); i++) {
                     JSONObject item = window.getJSONObject(i);
-                    Message m = new Message(item.getString("role"), item.optString("content", ""));
-                    m.reasoning = item.optString("reasoning_content", "");
-                    m.toolCalls = item.optJSONArray("tool_calls");
-                    if (item.has("tool_call_id")) m.toolCallId = item.optString("tool_call_id", "");
-                    out.add(m);
+                    out.add(Message.fromCheckpointJson(item));
                 }
             }
         } catch (Exception error) {
@@ -415,7 +417,7 @@ public class ChatStore extends SQLiteOpenHelper {
     /** 记下这个会话还在不在跑，以及目标。进程被杀掉后靠它接上。 */
     public synchronized void saveRun(long sessionId, boolean running, String goal,
             String status, long elapsedMs, long turnAt, long turnWall, long seenAt,
-            long tokensUsed, long tokenBudget) {
+            long tokensUsed, long tokenBudget, boolean budgetWrapFinished) {
         if (sessionId < 0) {
             return;
         }
@@ -430,6 +432,7 @@ public class ChatStore extends SQLiteOpenHelper {
         cv.put("seen_at", Long.valueOf(seenAt < 0 ? 0 : seenAt));
         cv.put("tokens_used", Long.valueOf(tokensUsed < 0 ? 0 : tokensUsed));
         cv.put("token_budget", Long.valueOf(tokenBudget < 0 ? 0 : tokenBudget));
+        cv.put("budget_wrap_finished", Integer.valueOf(budgetWrapFinished ? 1 : 0));
         getWritableDatabase().insertWithOnConflict(
                 "runs", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
@@ -437,7 +440,7 @@ public class ChatStore extends SQLiteOpenHelper {
         Run run = new Run();
         Cursor c = getReadableDatabase().query(
                 "runs", new String[]{"running", "goal", "status", "elapsed_ms",
-                        "turn_at", "turn_wall", "seen_at", "tokens_used", "token_budget"},
+                        "turn_at", "turn_wall", "seen_at", "tokens_used", "token_budget", "budget_wrap_finished"},
                 "session_id=?", new String[]{String.valueOf(sessionId)},
                 null, null, null);
         try {
@@ -453,6 +456,7 @@ public class ChatStore extends SQLiteOpenHelper {
             run.seenAt = c.getLong(6);
             run.tokensUsed = c.getLong(7);
             run.tokenBudget = c.getLong(8);
+            if (!c.isNull(9)) run.budgetWrapFinished = Boolean.valueOf(c.getInt(9) != 0);
             return run;
         } finally {
             c.close();

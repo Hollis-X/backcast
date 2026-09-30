@@ -7,7 +7,7 @@ import java.util.List;
 /**
  * 粗略的 token 估算。
  *
- * 只用于给用户看进度，不参与计费，所以按字符构成估：
+ * 服务端未返回用量时，用于窗口展示与自动压缩判定，不参与计费。按字符构成估：
  * 日韩表意文字一个字符约 1 token，拉丁与数字约 4 个字符 1 token，
  * 字符类内容（空白与标点）另算。误差在展示可接受范围内。
  */
@@ -58,12 +58,12 @@ public final class TokenMeter {
             return 0;
         }
         // 每条消息的角色与分隔符本身也要占几个 token。
-        int n = 4;
+        long n = 4;
         n += of(m.content);
         n += of(m.reasoning);
         n += of(m.toolCallId);
         n += of(values(m.toolCalls));
-        return n;
+        return (int) Math.min(Integer.MAX_VALUE, n);
     }
 
     /** 估算整个历史的 token 数。 */
@@ -71,11 +71,11 @@ public final class TokenMeter {
         if (messages == null) {
             return 0;
         }
-        int n = 0;
+        long n = 0;
         for (int i = 0; i < messages.size(); i++) {
             n += of(messages.get(i));
         }
-        return n;
+        return (int) Math.min(Integer.MAX_VALUE, n);
     }
 
     /** 估算全部工具 schema 的 token 数，这部分每轮请求都会带上。 */

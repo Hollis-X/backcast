@@ -170,6 +170,7 @@ public class LlmClient {
 
     private final Config config;
     private volatile HttpURLConnection active;
+    private volatile boolean usageOptionUnsupported;
 
     /** 这一次请求。停止时把它标死并断开，不碰到下一次请求。 */
     private static class Attempt {
@@ -199,11 +200,30 @@ public class LlmClient {
     }
 
     public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
-        Reply reply = new Reply();
         Attempt mine = new Attempt();
         mine.deadline = config.totalTimeoutMs > 0 ? System.currentTimeMillis() + config.totalTimeoutMs : 0;
         mine.maxChars = config.maxResponseChars;
         attempt = mine;
+        Reply reply = sendAttempt(messages, tools, sink, mine, !usageOptionUnsupported);
+        if (!mine.dead && rejectsUsageOption(reply.error)) {
+            usageOptionUnsupported = true;
+            reply = sendAttempt(messages, tools, sink, mine, false);
+        }
+        return reply;
+    }
+
+    private static boolean rejectsUsageOption(String error) {
+        if (error == null || !error.startsWith("HTTP 400:")) return false;
+        String lower = error.toLowerCase(java.util.Locale.US);
+        return (lower.contains("stream_options") || lower.contains("include_usage"))
+                && (lower.contains("unsupported") || lower.contains("unknown")
+                || lower.contains("unrecognized") || lower.contains("not supported")
+                || lower.contains("not permitted") || lower.contains("unexpected"));
+    }
+
+    private Reply sendAttempt(List<Message> messages, JSONArray tools, Sink sink,
+            Attempt mine, boolean includeUsage) {
+        Reply reply = new Reply();
         if (mine.dead) {
             return reply;
         }
@@ -212,6 +232,7 @@ public class LlmClient {
             JSONObject body = new JSONObject();
             body.put("model", config.model);
             body.put("stream", true);
+            if (includeUsage) body.put("stream_options", new JSONObject().put("include_usage", true));
             if (config.maxTokens > 0) body.put("max_tokens", config.maxTokens);
 
             if (config.reasoningWanted()) {

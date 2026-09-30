@@ -107,7 +107,8 @@ public class AgentLoop {
          * @param seenAt 第一次有内容的开机时间，0 表示还没有
          */
         void save(long sessionId, boolean running, String goal, String status, long elapsedMs,
-                long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget);
+                long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget,
+                boolean budgetWrapFinished);
     }
 
     /** 钩子：pi 的扩展点在同样位置。返回非 null 可改写结果，返回 null 表示放行。 */
@@ -170,6 +171,9 @@ public class AgentLoop {
     private Recorder recorder;
     private int contextLimit = DEFAULT_CONTEXT_LIMIT;
     private float compactRatio = DEFAULT_COMPACT_RATIO;
+    private long contextTokenBaseline;
+    private int contextBaselineMessages = -1;
+    private boolean contextBaselineHadTools;
     /** 工具调用的放行策略。完全访问下一直是 null。 */
     private ApprovalGate gate;
     /** 权限级别，取值见 ApprovalGate。 */
@@ -190,6 +194,7 @@ public class AgentLoop {
     private long goalTokensUsed;
     /** 目标预算。0 表示没设，不设就一直跑到模型自己收尾。 */
     private long goalTokenBudget;
+    private boolean goalAccounting;
     /**
      * 预算用尽后是否已经给过收尾机会。
      *
@@ -198,6 +203,8 @@ public class AgentLoop {
      * 就是违反 budget_limited 的语义，直接停下等用户，而不是无限续跑。
      */
     private boolean budgetWrappedUp;
+    /** null 仅用于旧运行记录；新记录明确保存是否已发出预算最终答复。 */
+    private Boolean budgetWrapFinished = Boolean.FALSE;
     /**
      * 用户改写了目标正文，下一轮问模型前先把新目标注入一次。
      *
@@ -249,11 +256,28 @@ public class AgentLoop {
     public int contextUsed() {
         ToolRegistry reg = registry;
         JSONArray schema = reg == null || reg.isEmpty() ? null : reg.toSchema();
-        List<Message> snapshot;
         synchronized (lock) {
-            snapshot = new ArrayList<Message>(history);
+            return contextUsedLocked(schema);
         }
-        return TokenMeter.of(snapshot) + TokenMeter.ofSchema(schema);
+    }
+
+    private int contextUsedLocked(JSONArray schema) {
+        long used;
+        if (contextBaselineMessages >= 0 && contextBaselineMessages <= history.size()) {
+            used = contextTokenBaseline;
+            if (!contextBaselineHadTools) used += TokenMeter.ofSchema(schema);
+            for (int i = contextBaselineMessages; i < history.size(); i++) {
+                used += TokenMeter.of(history.get(i));
+            }
+        } else {
+            used = (long) TokenMeter.of(history) + TokenMeter.ofSchema(schema);
+        }
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(0L, used));
+    }
+
+    private void resetContextUsageLocked() {
+        contextTokenBaseline = 0L;
+        contextBaselineMessages = -1;
     }
 
     public void setRecorder(Recorder recorder) {
@@ -373,13 +397,19 @@ public class AgentLoop {
      */
     public void restoreGoal(String text, String status, long elapsedMs, long tokensUsed,
             long tokenBudget) {
+        restoreGoal(text, status, elapsedMs, tokensUsed, tokenBudget, null);
+    }
+
+    public void restoreGoal(String text, String status, long elapsedMs, long tokensUsed,
+            long tokenBudget, Boolean budgetWrapFinished) {
         synchronized (lock) {
             goalText = text == null ? "" : text;
             goalStatus = status == null ? "" : status;
             goalAccumMs = elapsedMs < 0 ? 0 : elapsedMs;
             goalTokensUsed = tokensUsed < 0 ? 0 : tokensUsed;
             goalTokenBudget = tokenBudget < 0 ? 0 : tokenBudget;
-            budgetWrappedUp = Goal.BUDGET_LIMITED.equals(goalStatus);
+            this.budgetWrapFinished = budgetWrapFinished;
+            restoreBudgetWrapUpLocked();
             goalSegmentStart = Goal.ACTIVE.equals(goalStatus) ? SystemClock.elapsedRealtime() : 0;
         }
     }
@@ -404,6 +434,7 @@ public class AgentLoop {
             goalTokensUsed = 0;
             goalTokenBudget = 0;
             budgetWrappedUp = false;
+            budgetWrapFinished = Boolean.FALSE;
             pendingObjective = "";
             pardonReadonly = false;
         }
@@ -450,6 +481,7 @@ public class AgentLoop {
             goalStatus = Goal.ACTIVE;
             // 用户明确让目标重新跑：上一次的收尾标记不再算数。
             budgetWrappedUp = false;
+            budgetWrapFinished = Boolean.FALSE;
             pardonReadonly = true;
             // 预算已经用完就再给一批，避免刚点继续就又立刻停下。
             if (goalTokenBudget > 0 && goalTokensUsed >= goalTokenBudget) {
@@ -473,6 +505,7 @@ public class AgentLoop {
             goalTokensUsed = 0;
             goalTokenBudget = 0;
             budgetWrappedUp = false;
+            budgetWrapFinished = Boolean.FALSE;
             pendingObjective = "";
             pardonReadonly = false;
         }
@@ -500,6 +533,7 @@ public class AgentLoop {
         long elapsed;
         long used;
         long budget;
+        boolean wrapFinished;
         synchronized (lock) {
             d = durability;
             sid = sessionKey;
@@ -508,12 +542,13 @@ public class AgentLoop {
             elapsed = elapsedLocked();
             used = goalTokensUsed;
             budget = goalTokenBudget;
+            wrapFinished = Boolean.TRUE.equals(budgetWrapFinished);
         }
         if (d == null || sid < 0) {
             return;
         }
         d.save(sid, running, text, status, elapsed, turnStartedAt, turnWall, firstEventAt,
-                used, budget);
+                used, budget, wrapFinished);
     }
 
     /** 这一轮真正结束时清掉「还在跑」。更新的一轮已经占上时不能清。 */
@@ -577,7 +612,6 @@ public class AgentLoop {
 
     /** 模型声明完成或达不到。其它状态它改不了。 */
     public String closeGoal(String status, String reason) {
-        String done;
         synchronized (lock) {
             // 预算用尽还在收尾那一轮时，模型仍可以声明完成或遇到阻塞；
             // 对齐 Codex：budget_limited 是可继续做终态判定的中间态，不是死状态。
@@ -588,7 +622,6 @@ public class AgentLoop {
             if ("complete".equals(status)) {
                 resumeAfter = false;
                 goalStatus = Goal.COMPLETE;
-                done = "目标已标成完成。";
             } else if ("blocked".equals(status)) {
                 String why = reason == null ? "" : reason.trim();
                 if (why.length() < 4) {
@@ -596,14 +629,45 @@ public class AgentLoop {
                 }
                 resumeAfter = false;
                 goalStatus = Goal.BLOCKED;
-                done = "目标已停下：" + why;
+            } else if ("paused".equals(status)) {
+                resumeAfter = false;
+                if (!Goal.BUDGET_LIMITED.equals(goalStatus)) {
+                    goalStatus = Goal.PAUSED;
+                }
+                budgetWrappedUp = true;
             } else {
-                return "错误：只能标成 complete 或 blocked。";
+                return "错误：只能标成 complete、blocked 或用户明确要求的 paused。";
             }
         }
         freezeClock();
         saveRun(busy);
-        return done;
+        return goalReport();
+    }
+
+    public String goalReport() {
+        synchronized (lock) {
+            try {
+                JSONObject report = new JSONObject();
+                if (goalText == null || goalText.length() == 0) {
+                    return report.put("goal", JSONObject.NULL).toString();
+                }
+                JSONObject goal = new JSONObject();
+                goal.put("objective", goalText);
+                goal.put("status", goalStatus);
+                goal.put("tokensUsed", goalTokensUsed);
+                goal.put("tokenBudget", goalTokenBudget > 0 ? Long.valueOf(goalTokenBudget) : JSONObject.NULL);
+                goal.put("timeUsedSeconds", elapsedLocked() / 1000L);
+                report.put("goal", goal);
+                report.put("remainingTokens", goalTokenBudget > 0
+                        ? Long.valueOf(Math.max(0L, goalTokenBudget - goalTokensUsed)) : JSONObject.NULL);
+                report.put("completionBudgetReport", Goal.COMPLETE.equals(goalStatus)
+                        ? "目标已完成。根据此工具结果中的 tokensUsed、tokenBudget 和 timeUsedSeconds 报告最终用量，然后结束当前答复。"
+                        : JSONObject.NULL);
+                return report.toString();
+            } catch (Exception invalid) {
+                throw new IllegalStateException(invalid);
+            }
+        }
     }
     /** 设置上下文窗口上限与压缩触发比例。 */
     public void setContextBudget(int limit, float ratio) {
@@ -653,7 +717,8 @@ public class AgentLoop {
         }
         boolean limited = false;
         synchronized (lock) {
-            if (goalText == null || goalText.length() == 0) {
+            if (!goalAccounting || goalText == null || goalText.length() == 0
+                    || (!Goal.ACTIVE.equals(goalStatus) && !Goal.BUDGET_LIMITED.equals(goalStatus))) {
                 return false;
             }
             goalTokensUsed += delta;
@@ -661,13 +726,14 @@ public class AgentLoop {
                     && Goal.ACTIVE.equals(goalStatus)) {
                 goalStatus = Goal.BUDGET_LIMITED;
                 budgetWrappedUp = false;
+                budgetWrapFinished = Boolean.FALSE;
                 resumeAfter = false;
                 limited = true;
             }
         }
         if (limited) {
             freezeClock();
-            saveRun(false);
+            saveRun(busy);
         }
         return limited;
     }
@@ -685,6 +751,7 @@ public class AgentLoop {
         synchronized (lock) {
             this.client = client;
             this.registry = registry;
+            resetContextUsageLocked();
         }
     }
 
@@ -699,6 +766,7 @@ public class AgentLoop {
             cancelled = true;
             history.clear();
             history.add(Message.system(prompt));
+            resetContextUsageLocked();
         }
     }
 
@@ -709,6 +777,7 @@ public class AgentLoop {
             cancelled = true;
             history.clear();
             history.add(Message.system(prompt));
+            resetContextUsageLocked();
             if (messages == null) {
                 return;
             }
@@ -719,8 +788,23 @@ public class AgentLoop {
                     history.add(m);
                 }
             }
+            restoreBudgetWrapUpLocked();
+            if (Goal.BUDGET_LIMITED.equals(goalStatus) && budgetWrapFinished == null) {
+                budgetWrapFinished = Boolean.valueOf(budgetWrappedUp);
+            }
         }
         repairMissingTools(sessionKey);
+    }
+
+    private void restoreBudgetWrapUpLocked() {
+        if (budgetWrapFinished != null) {
+            budgetWrappedUp = Goal.BUDGET_LIMITED.equals(goalStatus) && budgetWrapFinished.booleanValue();
+            return;
+        }
+        Message last = lastMeaningful();
+        budgetWrappedUp = Goal.BUDGET_LIMITED.equals(goalStatus)
+                && last != null && Message.ASSISTANT.equals(last.role) && !Compactor.isSummary(last)
+                && (last.toolCalls == null || last.toolCalls.length() == 0);
     }
 
     public void setSystemPrompt(String prompt) {
@@ -734,6 +818,7 @@ public class AgentLoop {
             for (Message message : history) {
                 if (Message.SYSTEM.equals(message.role)) {
                     message.content = prompt == null ? "" : prompt;
+                    resetContextUsageLocked();
                     return;
                 }
             }
@@ -777,6 +862,7 @@ public class AgentLoop {
                 acceptedUi = uiToken;
                 cancelled = false;
                 busy = true;
+                goalAccounting = goalActive() || budgetPromptDue();
                 resumeAfter = false;
                 armTurnClock();
                 user.workDir = workspace;
@@ -823,6 +909,7 @@ public class AgentLoop {
                     acceptedUi = uiToken;
                     cancelled = false;
                     busy = true;
+                    goalAccounting = goalActive() || budgetPromptDue();
                     resumeAfter = false;
                     if (Goal.ACTIVE.equals(goalStatus) && goalSegmentStart == 0
                             && goalText != null && goalText.length() > 0) {
@@ -869,12 +956,15 @@ public class AgentLoop {
 
     /** 没有目标、并且模型已经答完时，不要再空转一轮。 */
     private boolean shouldContinue() {
-        if (goalActive()) {
+        if (goalActive() || budgetPromptDue()) {
             return true;
         }
         Message last = lastMeaningful();
         if (last == null) {
             return false;
+        }
+        if (Compactor.isSummary(last)) {
+            return last.resumeAfterCompaction;
         }
         if (Message.TOOL.equals(last.role) || Message.USER.equals(last.role)) {
             return !Goal.isSteer(last.content) && !Goal.isNote(last.content);
@@ -906,13 +996,14 @@ public class AgentLoop {
                 acceptedUi = uiToken;
                 cancelled = false;
                 busy = true;
+                goalAccounting = goalActive() || budgetPromptDue();
                 resumeAfter = false;
             }
             saveRun(true);
             if (refuseDisclosure(sessionId, gen, token)) {
                 return;
             }
-            if (compact(token, gen, sessionId, false) && goalActive() && !stale(token, gen)) {
+            if (compact(token, gen, sessionId, false) && (goalActive() || budgetPromptDue()) && !stale(token, gen)) {
                 runLoop(sessionId, gen, token);
             }
         } catch (Exception e) {
@@ -950,29 +1041,30 @@ public class AgentLoop {
      */
     private boolean compact(int token, int gen, long sessionId, boolean followup) {
         listener.onCompactStart(gen);
-        for (int drop = 0; drop < 64; drop++) {
-            List<Message> request;
-            synchronized (lock) {
-                if (stale(token, gen)) {
-                    return false;
-                }
-                List<Message> base = new ArrayList<Message>(history);
-                base.add(Message.user(Compactor.PROMPT));
-                // 超窗时按「整轮」丢，从最旧的一轮开始，避免留下配不上对的工具结果。
-                request = drop == 0 ? base : dropOldestTurns(base, drop);
+        List<Message> request;
+        synchronized (lock) {
+            if (stale(token, gen)) {
+                return false;
             }
+            request = new ArrayList<Message>(history);
+            request.add(Message.user(Compactor.PROMPT));
+        }
+
+        while (!stale(token, gen)) {
 
             LlmClient.Reply reply = client.send(request, null, null);
             if (stale(token, gen)) {
                 return false;
             }
             if (reply.error != null) {
-                if (isContextOverflow(reply.error) && request.size() > 2) {
-                    continue;
+                if (isContextOverflow(reply.error)) {
+                    List<Message> trimmed = trimCompactionRequest(request);
+                    if (trimmed.size() < request.size()) {
+                        request = trimmed;
+                        continue;
+                    }
                 }
                 if (isTransient(reply.error) && !stale(token, gen)) {
-                    // 不消耗丢历史的次数。断线时停在同一次摘要上再问。
-                    drop--;
                     try {
                         Thread.sleep(retryWait(1));
                     } catch (InterruptedException interrupted) {
@@ -987,14 +1079,17 @@ public class AgentLoop {
                 listener.onError(gen, reply.error);
                 return false;
             }
+            accountGoalUsage(reply.promptTokens, reply.completionTokens);
 
             String summary = reply.content == null ? "" : reply.content;
-            if (summary.length() == 0) {
+            if (summary.trim().length() == 0 || reply.hasToolCalls()) {
                 listener.onError(gen, "压缩没有返回摘要。");
                 return false;
             }
 
-            Message handoff = Message.assistant(Compactor.wrap(summary), null);
+            Message handoff = Message.user(Compactor.wrap(summary));
+            handoff.resumeAfterCompaction = followup;
+            handoff.goalFinalReply = followup && lastToolsClosedGoal();
             List<Message> fresh;
             synchronized (lock) {
                 if (stale(token, gen)) {
@@ -1005,6 +1100,10 @@ public class AgentLoop {
                 fresh = rebuild(handoff);
                 history.clear();
                 history.addAll(fresh);
+                resetContextUsageLocked();
+                if (followup && goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)) {
+                    budgetWrappedUp = false;
+                }
             }
             // Persist the checkpoint; the original conversation remains append-only.
             replace(sessionId, fresh);
@@ -1012,65 +1111,86 @@ public class AgentLoop {
             listener.onContextUsage(gen, contextUsed(), contextLimit);
             return true;
         }
-        listener.onError(gen, "压缩失败：摘要请求始终超出上下文窗口。");
         return false;
     }
 
     /**
-     * 拼压缩后的新窗口：系统提示词 + 历代交接摘要 + 这次摘要 + 尚未完成的这一轮。
-     *
-     * 必须保留最后一个用户轮：压缩是在这一轮请求前触发的，
-     * 把用户刚说的话丢掉，模型就会答非所问。
+     * 工具过程由最新摘要承接。只保留有界的真实用户要求，避免长任务压缩后仍超窗。
      */
     private List<Message> rebuild(Message handoff) {
         List<Message> fresh = new ArrayList<Message>();
         for (int i = 0; i < history.size(); i++) {
             Message m = history.get(i);
-            if (Message.SYSTEM.equals(m.role) || isHandoff(m)) {
+            if (Message.SYSTEM.equals(m.role)) {
                 fresh.add(m);
             }
         }
-        fresh.add(handoff);
-
-        int lastUser = -1;
+        List<Message> users = new ArrayList<Message>();
+        int remaining = Math.min(Compactor.MAX_USER_MESSAGE_TOKENS, Math.max(8, contextLimit / 4));
         for (int i = history.size() - 1; i >= 0; i--) {
             Message m = history.get(i);
             if (Message.USER.equals(m.role) && !Compactor.PROMPT.equals(m.content)
-                    && !Goal.isSteer(m.content) && !Goal.isNote(m.content)) {
-                lastUser = i;
-                break;
+                    && !Goal.isSteer(m.content) && !Goal.isNote(m.content) && !Compactor.isSummary(m)) {
+                int tokens = TokenMeter.of(m);
+                if (tokens <= remaining) {
+                    users.add(0, m);
+                    remaining -= tokens;
+                } else {
+                    if (remaining > 4) {
+                        Message tail = Message.user(truncateUserText(m.content, remaining - 4));
+                        tail.workDir = m.workDir;
+                        users.add(0, tail);
+                    }
+                    break;
+                }
             }
         }
-        for (int i = lastUser; i >= 0 && i < history.size(); i++) {
-            Message m = history.get(i);
-            if (Message.SYSTEM.equals(m.role) || isHandoff(m)) {
-                continue;
-            }
-            fresh.add(m);
-        }
+        fresh.addAll(users);
+        fresh.add(handoff);
         return fresh;
     }
 
-    /** 丢掉最旧的若干「轮」，从某条用户消息起截断，保证工具调用与结果不被拆散。 */
+    private static String truncateUserText(String text, int tokens) {
+        String marker = "\n[...truncated...]\n";
+        if (tokens <= TokenMeter.of(marker)) return textWithinTokens(text, tokens, false);
+        int available = tokens - TokenMeter.of(marker) - 2;
+        int frontBudget = Math.max(0, available / 2);
+        return textWithinTokens(text, frontBudget, false) + marker
+                + textWithinTokens(text, Math.max(0, available - frontBudget), true);
+    }
+
+    private static String textWithinTokens(String text, int tokens, boolean tail) {
+        int low = 0, high = text.length();
+        while (low < high) {
+            int mid = (low + high + 1) / 2;
+            String part = tail ? text.substring(text.length() - mid) : text.substring(0, mid);
+            if (TokenMeter.of(part) <= tokens) low = mid;
+            else high = mid - 1;
+        }
+        int at = tail ? text.length() - low : low;
+        if (at < text.length() && Character.isLowSurrogate(text.charAt(at))) at += tail ? 1 : -1;
+        return tail ? text.substring(at) : text.substring(0, Math.max(0, at));
+    }
+
+    /** 切在下一条真实用户消息之前，整轮工具调用和结果一起移除。 */
     private static List<Message> dropOldestTurns(List<Message> base, int turns) {
         int seen = 0;
         int cut = 0;
         for (int i = 0; i < base.size(); i++) {
             Message m = base.get(i);
-            if (!Message.USER.equals(m.role)) {
+            if (!Message.USER.equals(m.role) || Compactor.PROMPT.equals(m.content)
+                    || Goal.isSteer(m.content) || Goal.isNote(m.content) || Compactor.isSummary(m)) {
                 continue;
             }
-            seen++;
-            if (seen <= turns) {
-                cut = i + 1;
-            } else {
+            if (seen++ == turns) {
+                cut = i;
                 break;
             }
         }
         List<Message> out = new ArrayList<Message>();
         for (int i = 0; i < base.size(); i++) {
             Message m = base.get(i);
-            if (i < cut && !Message.SYSTEM.equals(m.role) && !isHandoff(m)) {
+            if (i < cut && !Message.SYSTEM.equals(m.role)) {
                 continue;
             }
             out.add(m);
@@ -1078,12 +1198,29 @@ public class AgentLoop {
         return out;
     }
 
-    /** 交接摘要：助手发出的、带固定前缀的那条。 */
-    private static boolean isHandoff(Message m) {
-        return m != null
-                && Message.ASSISTANT.equals(m.role)
-                && m.content != null
-                && m.content.startsWith(Compactor.SUMMARY_PREFIX);
+    private static List<Message> trimCompactionRequest(List<Message> request) {
+        List<Message> trimmed = dropOldestTurns(request, 1);
+        if (trimmed.size() < request.size()) return trimmed;
+        // 单个长任务也可剪去旧工具批次，保留最新用户要求和压缩指令。
+        for (int i = 0; i < request.size() - 1; i++) {
+            Message old = request.get(i);
+            if (Message.SYSTEM.equals(old.role) || Message.USER.equals(old.role)) continue;
+            List<String> ids = new ArrayList<String>();
+            if (old.toolCalls != null) {
+                for (int c = 0; c < old.toolCalls.length(); c++) {
+                    JSONObject call = old.toolCalls.optJSONObject(c);
+                    if (call != null) ids.add(call.optString("id", ""));
+                }
+            }
+            trimmed = new ArrayList<Message>();
+            for (int j = 0; j < request.size(); j++) {
+                Message m = request.get(j);
+                if (j == i || (Message.TOOL.equals(m.role) && ids.contains(m.toolCallId))) continue;
+                trimmed.add(m);
+            }
+            return trimmed;
+        }
+        return request;
     }
 
     /**
@@ -1112,30 +1249,6 @@ public class AgentLoop {
                 || e.contains("http 502")
                 || e.contains("http 503")
                 || e.contains("http 504");
-    }
-
-    /**
-     * 模型已经用最终答复声明完成审计通过。
-     *
-     * 只在这一段里真的调用过工具之后才认。还没动手的一句「通过」继续走原来的续跑。
-     * 用户点继续时不走这里，避免刚放行又被同一句历史立刻收掉。
-     */
-    private boolean declaredGoalFinished(LoopProgress progress) {
-        if (!goalActive() || progress == null || !progress.acted()) {
-            return false;
-        }
-        Message last = lastMeaningful();
-        if (last == null || !Message.ASSISTANT.equals(last.role)) {
-            return false;
-        }
-        if (last.toolCalls != null && last.toolCalls.length() > 0) {
-            return false;
-        }
-        if (Goal.isSteer(last.content) || !Goal.declaredComplete(last.content)) {
-            return false;
-        }
-        closeGoal("complete", "");
-        return !goalActive();
     }
 
     /** 连续空续跑。对齐 Codex：标成 blocked，不再自动续。 */
@@ -1201,6 +1314,7 @@ public class AgentLoop {
                 if (m == null || Message.SYSTEM.equals(m.role) || Message.TOOL.equals(m.role)) {
                     continue;
                 }
+                if (Compactor.isSummary(m)) continue;
                 if (Goal.isSteer(m.content)) {
                     return goalText();
                 }
@@ -1254,12 +1368,46 @@ public class AgentLoop {
         return true;
     }
 
+    private boolean lastToolsClosedGoal() {
+        synchronized (lock) {
+            if (goalActive()) return false;
+            Message last = lastMeaningful();
+            if (last != null && Compactor.isSummary(last) && last.goalFinalReply) return true;
+            if (last == null || !Message.TOOL.equals(last.role)) return false;
+            for (int i = history.size() - 1; i >= 0; i--) {
+                Message m = history.get(i);
+                if (Message.TOOL.equals(m.role)) continue;
+                if (!Message.ASSISTANT.equals(m.role) || m.toolCalls == null) return false;
+                for (int c = 0; c < m.toolCalls.length(); c++) {
+                    JSONObject call = m.toolCalls.optJSONObject(c);
+                    JSONObject fn = call == null ? null : call.optJSONObject("function");
+                    if (fn == null || !"update_goal".equals(fn.optString("name"))) continue;
+                    String id = call.optString("id", "");
+                    for (int j = i + 1; j < history.size(); j++) {
+                        Message result = history.get(j);
+                        if (!Message.TOOL.equals(result.role) || !id.equals(result.toolCallId)) continue;
+                        try {
+                            JSONObject goal = new JSONObject(result.content).optJSONObject("goal");
+                            if (goal != null && !Goal.ACTIVE.equals(goal.optString("status", Goal.ACTIVE))) return true;
+                        } catch (Exception invalid) {
+                            return false;
+                        }
+                    }
+                }
+                return false;
+            }
+            return false;
+        }
+    }
+
     private void runLoop(long sessionId, int gen, int token) {
         if (refuseDisclosure(sessionId, gen, token)) {
             return;
         }
         JSONArray schema = registry.isEmpty() ? null : registry.toSchema();
         int strikes = 0;
+        boolean compactedAfterOverflow = false;
+        boolean finishingGoal = lastToolsClosedGoal();
         final LoopProgress progress = new LoopProgress();
         boolean pardon;
         synchronized (lock) {
@@ -1269,8 +1417,6 @@ public class AgentLoop {
         }
         if (pardon) {
             progress.pardonReadonly();
-        } else if (declaredGoalFinished(progress)) {
-            return;
         }
         if (goalActive() && progress.emptyBlocked()) {
             blockEmptyGoal(progress, gen);
@@ -1287,20 +1433,25 @@ public class AgentLoop {
                 return;
             }
             List<Message> snapshot;
+            int used;
+            primeSteer(token, gen, sessionId);
+            if (budgetPromptDue()) addSteer(token, gen, sessionId, false);
             synchronized (lock) {
                 if (stale(token, gen)) {
                     return;
                 }
                 snapshot = new ArrayList<Message>(history);
+                used = contextUsedLocked(schema);
             }
 
             // 到阈值先把这一轮交接出去，再拿新窗口继续，避免整段历史被服务端拒绝。
-            int used = TokenMeter.of(snapshot) + TokenMeter.ofSchema(schema);
             listener.onContextUsage(gen, used, contextLimit);
             if (used >= contextLimit * compactRatio) {
                 if (!compact(token, gen, sessionId, true)) {
                     return;
                 }
+                primeSteer(token, gen, sessionId);
+                if (budgetPromptDue()) addSteer(token, gen, sessionId, false);
                 synchronized (lock) {
                     if (stale(token, gen)) {
                         return;
@@ -1316,7 +1467,7 @@ public class AgentLoop {
             String liveExtra = REVIEW_PROMPT + "\n" + Compactor.PROMPT;
             final PromptGuard.Stream reasonGuard = new PromptGuard.Stream(liveParts[0], liveParts[1], liveExtra);
             final PromptGuard.Stream contentGuard = new PromptGuard.Stream(liveParts[0], liveParts[1], liveExtra);
-            LlmClient.Reply reply = client.send(snapshot, schema, new LlmClient.Sink() {
+            LlmClient.Reply reply = client.send(snapshot, finishingGoal ? null : schema, new LlmClient.Sink() {
                 @Override
                 public void onReasoning(String delta) {
                     noteTurnEvent(liveToken, liveGen);
@@ -1345,6 +1496,15 @@ public class AgentLoop {
                 return;
             }
             if (reply.error != null) {
+                if (isContextOverflow(reply.error)) {
+                    listener.onRetry(gen);
+                    if (compactedAfterOverflow || !compact(token, gen, sessionId, true)) {
+                        if (compactedAfterOverflow) listener.onError(gen, "压缩后仍超出模型上下文窗口，请检查窗口设置或缩短输入。");
+                        return;
+                    }
+                    compactedAfterOverflow = true;
+                    continue;
+                }
                 // 断线一直问到连上，或者用户点停止。普通任务和目标都一样，不在这里收尾。
                 boolean again = isTransient(reply.error) || strikes < retryBudget();
                 if (again) {
@@ -1365,6 +1525,7 @@ public class AgentLoop {
                 return;
             }
             strikes = 0;
+            compactedAfterOverflow = false;
             // 用量记到目标账上；记满会转入 budget_limited，让这一轮收尾。
             accountGoalUsage(reply.promptTokens, reply.completionTokens);
 
@@ -1384,6 +1545,11 @@ public class AgentLoop {
             synchronized (lock) {
                 if (gen == generation && token == runToken) {
                     history.add(assistantMsg);
+                    if (reply.promptTokens > 0) {
+                        contextTokenBaseline = reply.promptTokens + reply.completionTokens;
+                        contextBaselineMessages = history.size();
+                        contextBaselineHadTools = !finishingGoal;
+                    }
                 }
             }
             // 中途换了会话也把这条写回原来的会话，不丢。
@@ -1393,11 +1559,6 @@ public class AgentLoop {
             }
 
             if (!reply.hasToolCalls()) {
-                if (declaredGoalFinished(progress)) {
-                    // 已经干过活，这一轮又声明审计通过，却没调 update_goal。
-                    // 再注入「继续推进」会把做完的目标重开。
-                    return;
-                }
                 if (goalActive()) {
                     boolean blank = (content == null || content.trim().length() == 0)
                             && (assistantMsg.reasoning == null
@@ -1418,12 +1579,27 @@ public class AgentLoop {
                     addSteer(token, gen, sessionId);
                     if (!stale(token, gen)) continue;
                 }
+                synchronized (lock) {
+                    if (goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus) && !stale(token, gen)) {
+                        budgetWrapFinished = Boolean.TRUE;
+                    }
+                }
                 return;
             }
             if (stale(token, gen)) return;
+            if (finishingGoal) {
+                fillMissingTools(sessionId, "目标已结束，此工具调用未执行。");
+                listener.onError(gen, "目标已结束，收尾答复不能再调用工具。");
+                return;
+            }
+            boolean wasGoal = goalAccounting && (goalActive() || Goal.BUDGET_LIMITED.equals(goalStatus));
             progress.ranTools();
             executeToolCalls(reply.toolCalls, sessionId, gen, token, progress);
             if (stale(token, gen)) return;
+            finishingGoal = wasGoal && (Goal.COMPLETE.equals(goalStatus)
+                    || Goal.BLOCKED.equals(goalStatus) || Goal.PAUSED.equals(goalStatus)
+                    || lastToolsClosedGoal());
+            if (finishingGoal) continue;
             if (progress.reason().length() > 0) {
                 stopForNoProgress(progress.reason(), sessionId, gen, token);
                 return;
@@ -1439,14 +1615,21 @@ public class AgentLoop {
                 if (!stale(token, gen)) continue;
                 return;
             }
-            if (!goalActive()) {
-                // 模型已经标成完成或达不到，这一轮工具跑完就停，不再自动续跑。
-                return;
+            if (goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)) {
+                boolean goalOnly = true;
+                for (int i = 0; i < reply.toolCalls.length(); i++) {
+                    JSONObject call = reply.toolCalls.optJSONObject(i);
+                    JSONObject fn = call == null ? null : call.optJSONObject("function");
+                    String name = fn == null ? "" : fn.optString("name", "");
+                    if (!"get_goal".equals(name) && !"update_goal".equals(name)) goalOnly = false;
+                }
+                finishingGoal = !goalOnly;
             }
         }
     }
 
     private void executeToolCalls(JSONArray calls, long sessionId, int gen, int token, LoopProgress progress) {
+        boolean closed = false;
         for (int i = 0; i < calls.length(); i++) {
             if (stale(token, gen)) {
                 return;
@@ -1467,6 +1650,18 @@ public class AgentLoop {
             String argsRaw = fn.optString("arguments", "{}");
 
             JSONObject args = parseArgs(argsRaw);
+            boolean goalTool = "update_goal".equals(name) || "get_goal".equals(name);
+            if (closed || (goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)
+                    && budgetWrappedUp && !goalTool)) {
+                String stopped = "目标已进入收尾，不再执行新的实质工具工作。";
+                Message result = Message.toolResult(id, stopped);
+                synchronized (lock) {
+                    if (!stale(token, gen)) history.add(result);
+                }
+                record(sessionId, result);
+                if (!stale(token, gen)) listener.onToolEnd(gen, name, stopped);
+                continue;
+            }
             // 同一个调用已经连续拿到相同结果时不再重跑，把结论回给模型。
             String repeated = progress.before(name, args);
             if (repeated != null) {
@@ -1505,6 +1700,8 @@ public class AgentLoop {
             }
 
             String result = invoke(name, args);
+            closed = goalAccounting && "update_goal".equals(name) && (Goal.COMPLETE.equals(goalStatus)
+                    || Goal.BLOCKED.equals(goalStatus) || Goal.PAUSED.equals(goalStatus));
             progress.tool(name, args, result);
             if (stale(token, gen)) {
                 return;
@@ -1651,6 +1848,7 @@ public class AgentLoop {
         if (last == null) {
             return false;
         }
+        if (Compactor.isSummary(last)) return last.resumeAfterCompaction;
         if (Message.TOOL.equals(last.role) || Message.USER.equals(last.role)) {
             return true;
         }
@@ -1787,21 +1985,21 @@ public class AgentLoop {
         return sb.length() == 0 ? "（无）" : sb.toString();
     }
 
-    /** 模型已经停手、目标却还在时，补一条续跑说明再问。全文不入库。 */
+    /** 首次提交、压缩恢复、目标改写都在请求前补规则，不创建新的界面轮次。 */
     private void primeSteer(int token, int gen, long sessionId) {
         if (!goalActive() || stale(token, gen)) {
             return;
         }
-        Message last = lastMeaningful();
-        if (last != null && Goal.isSteer(last.content)) {
-            return;
+        synchronized (lock) {
+            if (pendingObjective.length() == 0) {
+                for (int i = history.size() - 1; i >= 0; i--) {
+                    Message m = history.get(i);
+                    if (Goal.isSteer(m.content)) return;
+                    if (Compactor.isSummary(m) || Message.USER.equals(m.role)) break;
+                }
+            }
         }
-        boolean open = last == null
-                || (Message.ASSISTANT.equals(last.role)
-                && (last.toolCalls == null || last.toolCalls.length() == 0));
-        if (open) {
-            addSteer(token, gen, sessionId);
-        }
+        addSteer(token, gen, sessionId, false);
     }
 
     /**
@@ -1810,6 +2008,10 @@ public class AgentLoop {
      * 预算用尽时换成 budget_limit 模板：让模型收尾，但不许就此标完成。
      */
     private void addSteer(int token, int gen, long sessionId) {
+        addSteer(token, gen, sessionId, true);
+    }
+
+    private void addSteer(int token, int gen, long sessionId, boolean newTurn) {
         boolean limited;
         boolean retargeted;
         long used, budget;
@@ -1835,7 +2037,7 @@ public class AgentLoop {
                 return;
             }
             // Publish a goal continuation's clock with its first message too.
-            armTurnClock();
+            if (newTurn) armTurnClock();
             history.add(steer);
             if (retargeted) {
                 // 新目标只说一次，之后仍按普通续跑走。
@@ -1856,7 +2058,7 @@ public class AgentLoop {
             return;
         }
         saveRun(true);
-        listener.onSteer(gen);
+        if (newTurn) listener.onSteer(gen);
     }
 
     private Message lastMeaningful() {

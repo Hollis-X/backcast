@@ -14,21 +14,12 @@ import org.json.JSONObject;
 /**
  * 目标推进过程中的停滞检测。
  *
- * 两件事会停手，都不替模型宣布完成或 blocked：
- * 同一个调用原地打转，或者连续多轮只读、没有改文件。
+ * 重复相同调用结果会停手。新的只读证据也可能推进目标，不以是否写文件判断。
  * 完成与达不到仍只能由模型经 update_goal 声明。
  */
 final class LoopProgress {
     /** 同一个工具调用连续返回多少次相同结果，就认定在原地打转。 */
     private static final int REPEAT_LIMIT = 3;
-    /**
-     * 连续多少轮只有读取和检查、没有改文件，就认定在重复验证。
-     *
-     * 成功的 edit / write 会把计数清掉，所以一边改一边查不会被停。
-     * 还没改过文件的排查同样受这个上限：换路径读、换脚本查，只要不改文件，
-     * 就不是 Codex 说的「改变了权威状态」。
-     */
-    private static final int READONLY_LIMIT = 12;
     /**
      * 连续多少轮一个工具都没调用，算原地表态。
      *
@@ -58,21 +49,12 @@ final class LoopProgress {
     private final LinkedHashMap<String, Result> results = new LinkedHashMap<String, Result>();
     private int idleRounds;
     private int emptyRounds;
-    private int readonlyRounds;
-    private boolean roundMutated;
-    /** 这一段目标里已经执行过工具。纯口头宣布完成不算数。 */
-    private boolean acted;
-    /** 只读上限触发的停手。之后真的改了文件就撤销，避免重进时把已经改过的历史判死。 */
-    private boolean readonlyStall;
     private boolean emptyStall;
     private String reason = "";
 
     String reason() { return reason; }
 
     boolean stalled() { return reason.length() > 0; }
-
-    /** 这一段里已经有过工具调用。还没动手就宣布完成，不能当完成。 */
-    boolean acted() { return acted; }
 
     /** 已经攒够的空续跑轮数。重进时从历史接着算。 */
     boolean emptyBlocked() { return emptyRounds >= EMPTY_LIMIT; }
@@ -103,8 +85,6 @@ final class LoopProgress {
     void ranTools() {
         idleRounds = 0;
         emptyRounds = 0;
-        roundMutated = false;
-        acted = true;
     }
 
     /**
@@ -144,12 +124,6 @@ final class LoopProgress {
         // 成功改了文件就是实质进展，之前那些重复结果和只读轮次都不再算数。
         if (("edit".equals(name) || "write".equals(name)) && !ToolOutcome.failed(name, output)) {
             results.clear();
-            roundMutated = true;
-            readonlyRounds = 0;
-            if (readonlyStall) {
-                readonlyStall = false;
-                reason = "";
-            }
             return;
         }
         String key = key(name, args), fingerprint = digest(output == null ? "" : output);
@@ -161,37 +135,18 @@ final class LoopProgress {
     }
 
     /**
-     * 这一轮工具已经跑完。没改文件就记一笔只读。
+     * 这一轮工具已经跑完。
      *
      * @return null 表示还能继续；否则返回停下来的原因。
      */
     String finishRound() {
-        if (reason.length() > 0) {
-            return reason;
-        }
-        if (roundMutated) {
-            readonlyRounds = 0;
-            return null;
-        }
-        readonlyRounds++;
-        if (readonlyRounds >= READONLY_LIMIT) {
-            readonlyStall = true;
-            reason = "目标连续 " + readonlyRounds
-                    + " 轮只有读取和检查，没有修改任何文件。"
-                    + "已停止自动续跑：若完成审计已经通过，调用 update_goal 标成完成；"
-                    + "若还要改代码，先改再继续；若确实做不到，标成 blocked。";
-            return reason;
-        }
-        return null;
+        return reason.length() == 0 ? null : reason;
     }
 
-    /** 用户点了继续：只读打转重新计数。同一个调用原地打转的记录留着。 */
+    /** 用户点了继续：空输出重新计数。同一个调用原地打转的记录留着。 */
     void pardonReadonly() {
-        readonlyRounds = 0;
         emptyRounds = 0;
-        roundMutated = false;
-        if (readonlyStall || emptyStall) {
-            readonlyStall = false;
+        if (emptyStall) {
             emptyStall = false;
             reason = "";
         }
@@ -203,7 +158,7 @@ final class LoopProgress {
         for (int i = history.size() - 1; i >= 0; i--) {
             Message message = history.get(i);
             if (Message.USER.equals(message.role) && !Goal.isSteer(message.content)
-                    && !Goal.isNote(message.content)) {
+                    && !Goal.isNote(message.content) && !Compactor.isSummary(message)) {
                 start = i + 1;
                 break;
             }

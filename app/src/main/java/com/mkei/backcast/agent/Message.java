@@ -31,6 +31,9 @@ public class Message {
     public long elapsedMs;
     /** 发出到第一次有内容的耗时，只用于界面。 */
     public long thinkMs;
+    /** Local checkpoint state; never sent to the model. */
+    public boolean resumeAfterCompaction;
+    public boolean goalFinalReply;
 
     public Message(String role, String content) {
         this.role = role;
@@ -103,5 +106,26 @@ public class Message {
         } catch (Exception ignored) {
         }
         return o;
+    }
+
+    public JSONObject toCheckpointJson() {
+        try {
+            JSONObject item = toJson();
+            if (resumeAfterCompaction) item.put("resume_after_compaction", true);
+            if (goalFinalReply) item.put("goal_final_reply", true);
+            return item;
+        } catch (Exception invalid) {
+            throw new IllegalStateException("Invalid context checkpoint message", invalid);
+        }
+    }
+
+    public static Message fromCheckpointJson(JSONObject item) throws org.json.JSONException {
+        Message message = new Message(item.getString("role"), item.optString("content", ""));
+        message.reasoning = item.optString("reasoning_content", "");
+        message.toolCalls = item.optJSONArray("tool_calls");
+        if (item.has("tool_call_id")) message.toolCallId = item.optString("tool_call_id", "");
+        message.resumeAfterCompaction = item.optBoolean("resume_after_compaction", false);
+        message.goalFinalReply = item.optBoolean("goal_final_reply", false);
+        return message;
     }
 }
