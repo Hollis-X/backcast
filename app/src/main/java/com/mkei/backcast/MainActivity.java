@@ -41,6 +41,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupWindow;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AlertDialog;
@@ -53,12 +54,14 @@ import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
+import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.agent.TokenMeter;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.mkei.backcast.tool.EditTool;
 import com.mkei.backcast.tool.ReadTool;
 import com.mkei.backcast.tool.ShellTool;
 import com.mkei.backcast.tool.WriteTool;
+import com.mkei.backcast.tool.ToolCatalog;
 import com.mkei.backcast.ui.ContextMeter;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
@@ -135,6 +138,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private static final int HISTORY_PAGE_SIZE = 48;
     private static final int HISTORY_FRAME_SIZE = 4;
     private final ExecutorService historyReader = Executors.newSingleThreadExecutor();
+    private final ExecutorService childReader = Executors.newSingleThreadExecutor();
+    private final ExecutorService toolkitReader = Executors.newCachedThreadPool();
+    private final List<ToolkitOperation> toolkitOperations = new ArrayList<ToolkitOperation>();
     private final List<Runnable> historyEvents = new LinkedList<Runnable>();
     private int historyToken;
     private long historySequence = -1;
@@ -149,6 +155,30 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private boolean autoScrollQueued;
     private int scrollActionToken;
     private boolean latestJumpAnimating;
+    private final Object approvalLock = new Object();
+    private final List<ApprovalRequest> approvals = new LinkedList<ApprovalRequest>();
+    private volatile boolean activityDestroyed;
+
+    private static final class ApprovalRequest {
+        final AgentLoop source;
+        final int generation, token;
+        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        volatile boolean accepted, completed;
+        AlertDialog dialog;
+        ApprovalRequest(AgentLoop source) {
+            this.source = source;
+            generation = source == null ? -1 : source.generation();
+            token = source == null ? -1 : source.runToken();
+        }
+    }
+
+    private interface ToolkitResult { void apply(JSONObject result); }
+
+    private static final class ToolkitOperation {
+        volatile boolean cancelled;
+        volatile java.util.concurrent.Future<?> future;
+        RunHub.ToolkitSession session;
+    }
 
     private static class ReplayCursor {
         TurnTrace turn;
@@ -629,8 +659,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     @Override
     protected void onDestroy() {
+        activityDestroyed = true;
+        cancelApprovals();
         resetHistoryLoading();
         historyReader.shutdownNow();
+        childReader.shutdownNow();
+        List<ToolkitOperation> pendingTools;
+        synchronized (toolkitOperations) { pendingTools = new ArrayList<ToolkitOperation>(toolkitOperations); }
+        for (ToolkitOperation operation : pendingTools) cancelToolkitOperation(operation);
+        toolkitReader.shutdown();
         if (goalBar != null) {
             goalBar.removeCallbacks(goalTicker);
         }
@@ -664,49 +701,85 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     @Override
     public boolean approve(final String toolName, final JSONObject args) {
-        if (isFinishing()) {
-            return false;
-        }
-        // 跑循环的线程上调用，必须切回界面线程弹窗并等结果。
-        final java.util.concurrent.CountDownLatch latch =
-                new java.util.concurrent.CountDownLatch(1);
-        final boolean[] ok = new boolean[]{false};
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    new AlertDialog.Builder(MainActivity.this)
-                            .setTitle(getString(R.string.approve_title, toolName))
-                            .setMessage(getString(R.string.approve_body, prettyArgs(args)))
-                            .setPositiveButton(R.string.approve_run,
-                                    new android.content.DialogInterface.OnClickListener() {
-                                        @Override
-                                        public void onClick(android.content.DialogInterface d, int w) {
-                                            ok[0] = true;
-                                        }
-                                    })
-                            .setNegativeButton(R.string.approve_deny, null)
-                            .setOnDismissListener(
-                                    new android.content.DialogInterface.OnDismissListener() {
-                                        @Override
-                                        public void onDismiss(android.content.DialogInterface d) {
-                                            latch.countDown();
-                                        }
-                                    })
-                            .show();
-                } catch (Exception e) {
-                    latch.countDown();
-                }
-            }
-        });
+        final ApprovalRequest request = new ApprovalRequest(AgentLoop.callingApprovalSource());
+        if (!approvalCurrent(request)) return false;
+        synchronized (approvalLock) { approvals.add(request); }
+        boolean displayed = false;
         try {
-            // 一直等到用户点。停下按钮会走到这里也没关系，等的是弹窗本身。
-            latch.await();
+            while (!request.completed) {
+                if (!approvalCurrent(request)) break;
+                if (!displayed) {
+                    boolean head;
+                    synchronized (approvalLock) { head = !approvals.isEmpty() && approvals.get(0) == request; }
+                    if (head) {
+                        displayed = true;
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() { showApproval(request, toolName, args); }
+                        });
+                    }
+                }
+                request.done.await(250, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+            return request.accepted && approvalCurrent(request);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
+        } finally {
+            request.completed = true;
+            request.done.countDown();
+            runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    if (request.dialog != null && request.dialog.isShowing()) request.dialog.dismiss();
+                    synchronized (approvalLock) { approvals.remove(request); }
+                }
+            });
         }
-        return ok[0];
+    }
+
+    private boolean approvalCurrent(ApprovalRequest request) {
+        return !activityDestroyed && !isFinishing() && (request.source == null
+                || request.source.generation() == request.generation && request.source.runToken() == request.token
+                && request.source.approvalGate() == this);
+    }
+
+    private void showApproval(final ApprovalRequest request, String toolName, JSONObject args) {
+        synchronized (approvalLock) {
+            if (request.completed || !approvalCurrent(request) || approvals.isEmpty() || approvals.get(0) != request) {
+                request.completed = true; request.done.countDown(); return;
+            }
+        }
+        try {
+            String name = request.source == null ? "" : RunHub.get(this).agentName(request.source);
+            String title = name.length() == 0 ? toolName : name + " · " + toolName;
+            request.dialog = new AlertDialog.Builder(this)
+                    .setTitle(getString(R.string.approve_title, title))
+                    .setMessage(getString(R.string.approve_body, prettyArgs(args)))
+                    .setPositiveButton(R.string.approve_run, new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                            request.accepted = approvalCurrent(request);
+                        }
+                    }).setNegativeButton(R.string.approve_deny, null)
+                    .setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+                        @Override public void onDismiss(android.content.DialogInterface dialog) {
+                            request.completed = true; request.done.countDown();
+                        }
+                    }).create();
+            if (request.completed || !approvalCurrent(request)) {
+                request.completed = true; request.done.countDown(); return;
+            }
+            request.dialog.show();
+        } catch (Exception failure) { request.completed = true; request.done.countDown(); }
+    }
+
+    private void cancelApprovals() {
+        List<ApprovalRequest> waiting;
+        synchronized (approvalLock) { waiting = new ArrayList<ApprovalRequest>(approvals); approvals.clear(); }
+        for (ApprovalRequest request : waiting) {
+            request.accepted = false;
+            request.completed = true;
+            request.done.countDown();
+            if (request.dialog != null && request.dialog.isShowing()) request.dialog.dismiss();
+        }
     }
 
     /** 参数摊平给用户看，命令类参数比较长，超长就截断。 */
@@ -1478,7 +1551,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /**
      * 顶部模型胶囊的弹出菜单。
-     * 当前接口支持 off/low/medium/high，显示成目标图的紧凑选项列表。
+     * 显示实际生效的思考强度与当前会话的子任务入口。
      */
     private void showModelPopup() {
         if (modelPopup != null && modelPopup.isShowing()) {
@@ -1509,15 +1582,531 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         addEffortOption(card, "低", Settings.EFFORT_LOW);
         addEffortOption(card, "中", Settings.EFFORT_MEDIUM);
         addEffortOption(card, "高", Settings.EFFORT_HIGH);
+        addEffortOption(card, "最大 (max)", Settings.EFFORT_MAX);
+        if (Settings.AGENT_ULTRA.equals(settings.agentMode())) {
+            TextView policy = popupText(getString(R.string.agent_ultra_effort_hint), 12,
+                    R.color.text_secondary);
+            policy.setPadding(dp(12), dp(8), dp(12), 0);
+            card.addView(policy, wrapParams());
+        }
+        TextView children = popupText(getString(R.string.sub_agents_title), 16, R.color.text_primary);
+        children.setMinHeight(dp(48));
+        children.setGravity(Gravity.CENTER_VERTICAL);
+        children.setPadding(dp(12), dp(8), dp(12), 0);
+        children.setCompoundDrawables(Icons.tinted(this, Icons.CHAT, 0xFF3C3C43, dp(20)), null, null, null);
+        children.setCompoundDrawablePadding(dp(8));
+        children.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (modelPopup != null) modelPopup.dismiss();
+                showSubAgents();
+            }
+        });
+        card.addView(children, wrapParams());
+        TextView toolkit = popupText(getString(R.string.toolkit_title), 16, R.color.text_primary);
+        toolkit.setMinHeight(dp(48));
+        toolkit.setGravity(Gravity.CENTER_VERTICAL);
+        toolkit.setPadding(dp(12), dp(8), dp(12), 0);
+        toolkit.setCompoundDrawables(Icons.tinted(this, Icons.TERMINAL, 0xFF3C3C43, dp(20)), null, null, null);
+        toolkit.setCompoundDrawablePadding(dp(8));
+        toolkit.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (modelPopup != null) modelPopup.dismiss();
+                showToolkit();
+            }
+        });
+        card.addView(toolkit, wrapParams());
 
-        modelPopup = new PopupWindow(card, dp(280),
-                ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        card.measure(View.MeasureSpec.makeMeasureSpec(dp(280), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int height = Math.min(card.getMeasuredHeight(), getResources().getDisplayMetrics().heightPixels - dp(64));
+        ScrollView menu = new ScrollView(this);
+        menu.addView(card);
+        modelPopup = new PopupWindow(menu, dp(280), Math.max(dp(120), height), true);
         modelPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         modelPopup.setOutsideTouchable(true);
         // 不用 elevation：部分机型会渲染成硬边灰块，改用 drawable 自绘阴影。
         card.startAnimation(AnimationUtils.loadAnimation(this, R.anim.popup_in));
         View anchor = modelChipAnchor != null ? modelChipAnchor : modelChip;
         showAbove(modelPopup, anchor, dp(280));
+    }
+
+    private void showToolkit() {
+        final LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        rows.setPadding(dp(20), dp(8), dp(20), dp(12));
+        ScrollView pane = new ScrollView(this);
+        pane.addView(rows);
+        final ToolkitOperation[] active = { null };
+        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle(R.string.toolkit_title).setView(pane)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setNeutralButton(R.string.sub_agents_refresh, null).create();
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                if (active[0] != null) cancelToolkitOperation(active[0]);
+            }
+        });
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { loadToolkit(dialog, rows, active); }
+        });
+        loadToolkit(dialog, rows, active);
+    }
+
+    private void loadToolkit(final AlertDialog dialog, final LinearLayout rows, final ToolkitOperation[] active) {
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
+        rows.removeAllViews();
+        rows.addView(popupText(getString(R.string.toolkit_loading), 14, R.color.text_secondary));
+        active[0] = requestToolkit(dialog, toolkitArguments("list", ""), new ToolkitResult() {
+            @Override public void apply(JSONObject result) {
+                active[0] = null;
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+                rows.removeAllViews();
+                JSONArray tools = result.optJSONArray("tools");
+                if (tools == null) {
+                    rows.addView(popupText(result.optString("error", getString(R.string.toolkit_failed)), 14, R.color.text_secondary));
+                    return;
+                }
+                TextView location = popupText(getString(R.string.toolkit_storage,
+                        result.optString("storage"), result.optString("abi")), 12, R.color.text_secondary);
+                rows.addView(location, fullWidth());
+                for (int i = 0; i < tools.length(); i++) {
+                    final JSONObject entry = tools.optJSONObject(i);
+                    if (entry == null) continue;
+                    TextView row = popupText(entry.optString("name") + "\n" + toolkitState(entry.optString("state")),
+                            14, R.color.text_primary);
+                    row.setPadding(0, dp(12), 0, dp(12));
+                    row.setOnClickListener(new View.OnClickListener() {
+                        @Override public void onClick(View view) { showToolkitEntry(entry); }
+                    });
+                    rows.addView(row, fullWidth());
+                }
+            }
+        });
+    }
+
+    private void showToolkitEntry(final JSONObject entry) {
+        final String id = entry.optString("id");
+        final ToolkitOperation[] active = { null };
+        final TextView info = popupText(toolkitDetails(entry), 13, R.color.text_primary);
+        info.setTextIsSelectable(true);
+        info.setAutoLinkMask(android.text.util.Linkify.WEB_URLS);
+        final EditText path = new EditText(this);
+        path.setSingleLine(true);
+        path.setTextSize(14);
+        path.setHint(R.string.toolkit_path_hint);
+        path.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        final EditText runtime = new EditText(this);
+        runtime.setSingleLine(true);
+        runtime.setTextSize(14);
+        runtime.setHint(R.string.toolkit_runtime_hint);
+        runtime.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        JSONObject configuration = entry.optJSONObject("configuration");
+        if (configuration != null) {
+            path.setText(configuration.optString("path"));
+            runtime.setText(configuration.optString("runtime"));
+        }
+        final LinearLayout fields = new LinearLayout(this);
+        fields.setOrientation(LinearLayout.VERTICAL);
+        fields.setPadding(dp(20), dp(8), dp(20), dp(12));
+        fields.addView(info, fullWidth());
+        fields.addView(popupText(getString(R.string.toolkit_path), 12, R.color.text_secondary));
+        fields.addView(path, fullWidth());
+        if ("apktool".equals(id)) {
+            fields.addView(popupText(getString(R.string.toolkit_runtime), 12, R.color.text_secondary));
+            fields.addView(runtime, fullWidth());
+        }
+        final Button bind = toolkitButton(R.string.toolkit_bind, Icons.PENCIL);
+        final Button clear = toolkitButton(R.string.toolkit_clear, Icons.UNDO);
+        final Button install = toolkitButton(R.string.toolkit_install, Icons.PLUS);
+        final Button cancel = toolkitButton(R.string.toolkit_cancel, Icons.STOP);
+        LinearLayout first = new LinearLayout(this);
+        first.setOrientation(LinearLayout.HORIZONTAL);
+        first.addView(bind, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        first.addView(clear, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        fields.addView(first, fullWidth());
+        if (entry.optBoolean("download_available") && ("apktool".equals(id) || "radare2".equals(id))) {
+            fields.addView(install, fullWidth());
+        }
+        cancel.setVisibility(View.GONE);
+        fields.addView(cancel, fullWidth());
+        ScrollView pane = new ScrollView(this);
+        pane.addView(fields);
+        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle(entry.optString("name"))
+                .setView(pane).setNegativeButton(android.R.string.cancel, null)
+                .setNeutralButton(R.string.toolkit_probe, null).create();
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                if (active[0] != null) cancelToolkitOperation(active[0]);
+            }
+        });
+        dialog.show();
+        final ToolkitResult complete = new ToolkitResult() {
+            @Override public void apply(JSONObject result) {
+                active[0] = null;
+                setToolkitBusy(dialog, bind, clear, install, cancel, false);
+                java.util.Iterator<String> keys = result.keys();
+                entry.remove("error");
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    try { entry.put(key, result.get(key)); } catch (Exception ignored) { }
+                }
+                info.setText(toolkitDetails(entry));
+                JSONObject configured = result.optJSONObject("configuration");
+                if (configured != null) {
+                    path.setText(configured.optString("path"));
+                    runtime.setText(configured.optString("runtime"));
+                } else if ("unconfigured".equals(result.optString("state"))) {
+                    path.setText(""); runtime.setText("");
+                    entry.remove("configuration");
+                    entry.remove("probe_output");
+                    entry.remove("ready");
+                }
+            }
+        };
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                setToolkitBusy(dialog, bind, clear, install, cancel, true);
+                active[0] = requestToolkit(dialog, toolkitArguments("status", id), complete);
+            }
+        });
+        bind.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                String executable = path.getText().toString().trim(), java = runtime.getText().toString().trim();
+                if (!validToolkitPath(executable) || java.length() > 0 && !validToolkitPath(java)) {
+                    path.setError(getString(R.string.toolkit_absolute_required)); return;
+                }
+                JSONObject args = toolkitArguments("configure", id);
+                try { args.put("path", executable).put("runtime", java); } catch (Exception ignored) { }
+                setToolkitBusy(dialog, bind, clear, install, cancel, true);
+                active[0] = requestToolkit(dialog, args, complete);
+            }
+        });
+        clear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                setToolkitBusy(dialog, bind, clear, install, cancel, true);
+                active[0] = requestToolkit(dialog, toolkitArguments("clear", id), complete);
+            }
+        });
+        install.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                setToolkitBusy(dialog, bind, clear, install, cancel, true);
+                info.setText(getString(R.string.toolkit_installing));
+                active[0] = requestToolkit(dialog, toolkitArguments("install", id), complete);
+            }
+        });
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (active[0] != null) cancelToolkitOperation(active[0]);
+                active[0] = null;
+                info.setText(getString(R.string.toolkit_cancelled));
+                setToolkitBusy(dialog, bind, clear, install, cancel, false);
+            }
+        });
+    }
+
+    private Button toolkitButton(int label, int icon) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(13);
+        button.setCompoundDrawables(Icons.tinted(this, icon, 0xFF3C3C43, dp(18)), null, null, null);
+        button.setCompoundDrawablePadding(dp(6));
+        button.setMinHeight(dp(48));
+        return button;
+    }
+
+    private void setToolkitBusy(AlertDialog dialog, Button bind, Button clear, Button install, Button cancel, boolean busy) {
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(!busy);
+        bind.setEnabled(!busy); clear.setEnabled(!busy); install.setEnabled(!busy);
+        cancel.setVisibility(busy ? View.VISIBLE : View.GONE);
+    }
+
+    private static boolean validToolkitPath(String path) {
+        return path != null && path.startsWith("/") && path.indexOf('\0') < 0
+                && path.indexOf('\n') < 0 && path.indexOf('\r') < 0;
+    }
+
+    private static JSONObject toolkitArguments(String action, String id) {
+        JSONObject args = new JSONObject();
+        try { args.put("action", action); if (id.length() > 0) args.put("tool", id); }
+        catch (Exception ignored) { }
+        return args;
+    }
+
+    private String toolkitState(String state) {
+        if ("ready".equals(state)) return getString(R.string.toolkit_ready);
+        if ("configured_not_probed".equals(state)) return getString(R.string.toolkit_configured);
+        if ("needs_runtime".equals(state)) return getString(R.string.toolkit_needs_runtime);
+        if ("unavailable".equals(state)) return getString(R.string.toolkit_unavailable);
+        if ("error".equals(state)) return getString(R.string.toolkit_failed);
+        if ("cancelled".equals(state)) return getString(R.string.toolkit_cancelled);
+        return getString(R.string.toolkit_unconfigured);
+    }
+
+    private String toolkitDetails(JSONObject entry) {
+        StringBuilder text = new StringBuilder(toolkitState(entry.optString("state")))
+                .append("\n\n").append(getString(R.string.toolkit_source)).append('\n').append(entry.optString("source"))
+                .append("\n\n").append(getString(R.string.toolkit_requirements)).append('\n').append(entry.optString("requirements"));
+        JSONObject config = entry.optJSONObject("configuration");
+        if (config != null) {
+            text.append("\n\n").append(getString(R.string.toolkit_path)).append('\n').append(config.optString("path"));
+            if (config.optString("runtime").length() > 0) text.append('\n').append(getString(R.string.toolkit_runtime))
+                    .append("\n").append(config.optString("runtime"));
+            if (config.optString("version").length() > 0) text.append("\n").append(config.optString("version"));
+        }
+        if (entry.optBoolean("download_available")) try {
+            ToolCatalog.Artifact artifact = ToolCatalog.artifact(entry.optString("id"), android.os.Build.CPU_ABI);
+            text.append("\n\n").append(getString(R.string.toolkit_official_version, artifact.version))
+                    .append('\n').append(artifact.url).append("\nSHA-256: ").append(artifact.sha256);
+        } catch (IllegalArgumentException unsupported) { text.append("\n\n").append(unsupported.getMessage()); }
+        if (entry.optString("probe_output").length() > 0) text.append("\n\n").append(getString(R.string.toolkit_probe_output))
+                .append('\n').append(shortChildText(entry.optString("probe_output"), 8000));
+        if (entry.optString("error").length() > 0) text.append("\n\n").append(entry.optString("error"));
+        return text.toString();
+    }
+
+    private ToolkitOperation requestToolkit(final AlertDialog dialog, final JSONObject args, final ToolkitResult callback) {
+        final ToolkitOperation operation = new ToolkitOperation();
+        synchronized (toolkitOperations) { toolkitOperations.add(operation); }
+        operation.future = toolkitReader.submit(new Runnable() {
+            @Override public void run() {
+                JSONObject result = new JSONObject();
+                try {
+                    if (operation.cancelled) return;
+                    RunHub.ToolkitSession session = RunHub.get(MainActivity.this).newToolkitSession();
+                    synchronized (operation) { operation.session = session; }
+                    if (operation.cancelled) return;
+                    result = new JSONObject(session.toolkit.run(args));
+                } catch (Exception failure) {
+                    try { result.put("state", "error").put("error", String.valueOf(failure.getMessage())); }
+                    catch (Exception ignored) { }
+                } finally {
+                    try { closeToolkitSession(operation); }
+                    catch (Exception cleanup) {
+                        try { result.put("state", "error").put("error", String.valueOf(cleanup.getMessage())); }
+                        catch (Exception ignored) { }
+                    }
+                    synchronized (toolkitOperations) { toolkitOperations.remove(operation); }
+                }
+                final JSONObject response = result;
+                ui(new Runnable() {
+                    @Override public void run() {
+                        if (!operation.cancelled && !activityDestroyed && !isFinishing() && dialog.isShowing()) callback.apply(response);
+                    }
+                });
+            }
+        });
+        return operation;
+    }
+
+    private void cancelToolkitOperation(final ToolkitOperation operation) {
+        if (operation.cancelled) return;
+        operation.cancelled = true;
+        java.util.concurrent.Future<?> future = operation.future;
+        if (future != null) future.cancel(true);
+        synchronized (toolkitOperations) { toolkitOperations.remove(operation); }
+        if (!toolkitReader.isShutdown()) toolkitReader.execute(new Runnable() {
+            @Override public void run() { closeToolkitSession(operation); }
+        });
+    }
+
+    private static void closeToolkitSession(ToolkitOperation operation) {
+        RunHub.ToolkitSession session;
+        synchronized (operation) {
+            if (operation.session == null) return;
+            session = operation.session;
+        }
+        session.close();
+    }
+
+    private void showSubAgents() {
+        final AgentLoop source = loop;
+        final long sid = sessionId;
+        final LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        rows.setPadding(dp(20), dp(8), dp(20), dp(12));
+        ScrollView pane = new ScrollView(this);
+        pane.addView(rows);
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.sub_agents_title).setView(pane)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setNeutralButton(R.string.sub_agents_refresh, null).create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { loadSubAgents(dialog, rows, source, sid); }
+        });
+        loadSubAgents(dialog, rows, source, sid);
+    }
+
+    private void loadSubAgents(final AlertDialog dialog, final LinearLayout rows,
+            final AgentLoop source, final long sid) {
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
+        rows.removeAllViews();
+        rows.addView(popupText(getString(R.string.sub_agents_loading), 14, R.color.text_secondary));
+        childReader.execute(new Runnable() {
+            @Override public void run() {
+                final List<SubAgentManager.Record> records = new ArrayList<SubAgentManager.Record>();
+                String failure = "";
+                try {
+                    SubAgentManager manager = source == null || Settings.AGENT_OFF.equals(settings.agentMode())
+                            ? null : RunHub.get(MainActivity.this).subAgents(source);
+                    if (manager != null) for (SubAgentManager.Record record : manager.records()) {
+                        if (!SubAgentManager.ROOT.equals(record.id)) records.add(record);
+                    }
+                } catch (Exception error) { failure = String.valueOf(error.getMessage()); }
+                final String error = failure;
+                ui(new Runnable() {
+                    @Override public void run() {
+                        if (isFinishing() || !dialog.isShowing()) return;
+                        if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
+                        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+                        rows.removeAllViews();
+                        if (error.length() > 0) {
+                            rows.addView(popupText(getString(R.string.sub_agents_error, error), 14, R.color.text_secondary));
+                        } else if (records.isEmpty()) {
+                            rows.addView(popupText(getString(Settings.AGENT_OFF.equals(settings.agentMode())
+                                    ? R.string.sub_agents_disabled : R.string.sub_agents_empty), 14, R.color.text_secondary));
+                        } else for (final SubAgentManager.Record record : records) {
+                            TextView row = popupText(record.name + " · " + childStatus(record.status)
+                                    + "\n" + shortChildText(record.task, 180), 14, R.color.text_primary);
+                            row.setPadding(0, dp(12), 0, dp(12));
+                            row.setOnClickListener(new View.OnClickListener() {
+                                @Override public void onClick(View view) { showSubAgent(source, sid, record.id); }
+                            });
+                            rows.addView(row, fullWidth());
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    private void showSubAgent(final AgentLoop source, final long sid, final String id) {
+        final TextView body = popupText(getString(R.string.sub_agents_loading), 14, R.color.text_primary);
+        body.setPadding(dp(20), dp(8), dp(20), dp(12));
+        body.setTextIsSelectable(true);
+        ScrollView pane = new ScrollView(this);
+        pane.addView(body);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.addView(pane, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                Math.max(dp(180), getResources().getDisplayMetrics().heightPixels / 2)));
+        LinearLayout pages = new LinearLayout(this);
+        pages.setOrientation(LinearLayout.HORIZONTAL);
+        final Button earlier = new Button(this);
+        earlier.setText(R.string.sub_agents_earlier);
+        final Button later = new Button(this);
+        later.setText(R.string.sub_agents_later);
+        pages.addView(earlier, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        pages.addView(later, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        content.addView(pages, fullWidth());
+        final int[] bounds = {0, 0, 0};
+        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle(R.string.sub_agents_title).setView(content)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setNeutralButton(R.string.sub_agents_refresh, null)
+                .setPositiveButton(R.string.sub_agents_stop, null).create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -1); }
+        });
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, true, -1); }
+        });
+        earlier.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, bounds[0]);
+            }
+        });
+        later.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false,
+                        Math.min(bounds[2], bounds[1] + 40));
+            }
+        });
+        loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -1);
+    }
+
+    private void loadSubAgent(final AlertDialog dialog, final TextView body, final Button earlier,
+            final Button later, final int[] bounds, final AgentLoop source,
+            final long sid, final String id, final boolean stop, final int before) {
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+        earlier.setEnabled(false);
+        later.setEnabled(false);
+        childReader.execute(new Runnable() {
+            @Override public void run() {
+                String text;
+                String status = SubAgentManager.CLOSED;
+                int start = 0, end = 0, total = 0;
+                try {
+                    SubAgentManager manager = Settings.AGENT_OFF.equals(settings.agentMode())
+                            ? null : RunHub.get(MainActivity.this).subAgents(source);
+                    if (manager == null) throw new IllegalStateException(getString(R.string.sub_agents_disabled));
+                    if (stop) manager.close(SubAgentManager.ROOT, id);
+                    SubAgentManager.Record record = manager.find(id);
+                    status = record.status;
+                    total = record.history.length();
+                    end = before < 0 ? total : Math.min(before, total);
+                    start = Math.max(0, end - 40);
+                    text = childDetails(record, start, end);
+                } catch (Exception error) { text = getString(R.string.sub_agents_error, String.valueOf(error.getMessage())); }
+                final String details = text;
+                final int from = start, to = end, count = total;
+                final boolean canStop = !SubAgentManager.CLOSED.equals(status);
+                ui(new Runnable() {
+                    @Override public void run() {
+                        if (isFinishing() || !dialog.isShowing()) return;
+                        if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
+                        body.setText(details);
+                        bounds[0] = from; bounds[1] = to; bounds[2] = count;
+                        earlier.setEnabled(from > 0);
+                        later.setEnabled(to < count);
+                        ViewParent parent = body.getParent();
+                        if (parent instanceof ScrollView) ((ScrollView) parent).scrollTo(0, 0);
+                        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(canStop);
+                    }
+                });
+            }
+        });
+    }
+
+    private String childDetails(SubAgentManager.Record record, int from, int to) throws Exception {
+        StringBuilder text = new StringBuilder(record.name).append(" · ").append(childStatus(record.status))
+                .append("\n").append(record.id).append("\n\n")
+                .append(getString(R.string.sub_agents_task)).append('\n').append(shortChildText(record.task, 8000));
+        if (record.result.length() > 0) text.append("\n\n").append(getString(R.string.sub_agents_result))
+                .append('\n').append(shortChildText(record.result, 8000));
+        if (record.error.length() > 0) text.append("\n\n").append(getString(R.string.sub_agents_failure))
+                .append('\n').append(shortChildText(record.error, 8000));
+        text.append("\n\n").append(getString(R.string.sub_agents_history_page,
+                Integer.valueOf(to > from ? from + 1 : from), Integer.valueOf(to), Integer.valueOf(record.history.length())));
+        int remaining = 32000;
+        for (int i = from; i < to; i++) {
+            Message message = Message.fromCheckpointJson(record.history.getJSONObject(i));
+            if ("system".equals(message.role)) continue;
+            text.append("\n\n[").append(message.role).append("]\n");
+            String messageText = PromptGuard.redact(message.content, settings.systemPrompt(), settings.environmentContext(), "");
+            if (message.toolCalls != null) messageText += "\n" + message.toolCalls.toString();
+            int limit = Math.min(8000, Math.max(100, remaining / Math.max(1, to - i)));
+            text.append(shortChildText(messageText, limit));
+            remaining -= Math.min(limit, messageText.length());
+            if (messageText.length() > limit) text.append('\n').append(getString(R.string.sub_agents_text_truncated));
+        }
+        return text.toString();
+    }
+
+    private static String shortChildText(String text, int limit) {
+        if (text == null) return "";
+        return text.length() <= limit ? text : text.substring(0, limit) + "…";
+    }
+
+    private String childStatus(String status) {
+        if (SubAgentManager.QUEUED.equals(status)) return getString(R.string.sub_agents_queued);
+        if (SubAgentManager.RUNNING.equals(status)) return getString(R.string.sub_agents_running);
+        if (SubAgentManager.WAITING.equals(status)) return getString(R.string.sub_agents_waiting);
+        if (SubAgentManager.IDLE.equals(status)) return getString(R.string.sub_agents_idle);
+        if (SubAgentManager.FAILED.equals(status)) return getString(R.string.sub_agents_failed);
+        return getString(R.string.sub_agents_closed);
     }
 
     /** 芯片在底栏，菜单往上弹，避免掉到屏幕外。 */
@@ -1532,12 +2121,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
         int[] loc = new int[2];
         anchor.getLocationOnScreen(loc);
-        int y = loc[1] - content.getMeasuredHeight() - dp(8);
+        int height = popup.getHeight() > 0 ? popup.getHeight() : content.getMeasuredHeight();
+        int y = loc[1] - height - dp(8);
         if (y < dp(8)) {
             y = dp(8);
         }
         if (popup.isShowing()) {
-            popup.update(loc[0], y, w, content.getMeasuredHeight());
+            popup.update(loc[0], y, w, height);
         } else {
             popup.setWidth(w);
             popup.showAtLocation(anchor, Gravity.NO_GRAVITY, loc[0], y);
@@ -1549,8 +2139,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setMinHeight(dp(50));
         row.setPadding(dp(12), 0, dp(12), 0);
-        if (effort.equals(settings.reasoningEffort())) {
+        if (effort.equals(settings.effectiveReasoningEffort())) {
             row.setBackgroundResource(R.drawable.bg_popup_selected);
+        }
+        if (Settings.AGENT_ULTRA.equals(settings.agentMode()) && !Settings.EFFORT_MAX.equals(effort)) {
+            row.setEnabled(false);
+            row.setAlpha(0.45f);
         }
         row.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -1906,7 +2500,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             if (!settings.isConfigured()) {
                 modelChip.setText(R.string.status_no_model);
             } else {
-                String effort = effortLabel(settings.reasoningEffort());
+                String effort = effortLabel(settings.effectiveReasoningEffort());
+                if (Settings.AGENT_ULTRA.equals(settings.agentMode())) effort = "ultra " + effort;
                 String name = displayModelName(settings.model());
                 modelChip.setText(effort.length() == 0 ? name : name + "  " + effort);
             }
@@ -1929,6 +2524,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         if (Settings.EFFORT_HIGH.equals(effort)) {
             return "高";
+        }
+        if (Settings.EFFORT_MAX.equals(effort)) {
+            return "max";
         }
         return "";
     }

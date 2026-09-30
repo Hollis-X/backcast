@@ -37,6 +37,52 @@
     <string name="drawer_chat">聊天</string>
     <string name="popup_model">模型</string>
     <string name="popup_reasoning">推理强度</string>
+    <string name="sub_agents_title">子 agent</string>
+    <string name="sub_agents_refresh">刷新</string>
+    <string name="sub_agents_stop">停止任务</string>
+    <string name="sub_agents_loading">加载中…</string>
+    <string name="sub_agents_empty">当前会话还没有子任务</string>
+    <string name="sub_agents_disabled">子 agent 已关闭</string>
+    <string name="sub_agents_error">读取子任务失败：%1$s</string>
+    <string name="sub_agents_task">任务</string>
+    <string name="sub_agents_result">结果</string>
+    <string name="sub_agents_failure">错误</string>
+    <string name="sub_agents_history">对话记录</string>
+    <string name="sub_agents_history_page">对话记录 %1$d-%2$d / %3$d</string>
+    <string name="sub_agents_earlier">前 40 条</string>
+    <string name="sub_agents_later">后 40 条</string>
+    <string name="sub_agents_text_truncated">本条过长，显示内容已截断</string>
+    <string name="sub_agents_queued">排队中</string>
+    <string name="sub_agents_running">运行中</string>
+    <string name="sub_agents_waiting">等待中</string>
+    <string name="sub_agents_idle">空闲</string>
+    <string name="sub_agents_failed">失败</string>
+    <string name="sub_agents_closed">已停止</string>
+    <string name="toolkit_title">工具目录</string>
+    <string name="toolkit_loading">读取工具目录…</string>
+    <string name="toolkit_storage">工具位置：%1$s\n设备 ABI：%2$s</string>
+    <string name="toolkit_source">官方来源</string>
+    <string name="toolkit_requirements">运行依赖</string>
+    <string name="toolkit_path">已有可执行文件或 JAR 的绝对路径</string>
+    <string name="toolkit_runtime">设备 Java 可执行文件的绝对路径</string>
+    <string name="toolkit_path_hint">/完整路径/工具</string>
+    <string name="toolkit_runtime_hint">/完整路径/java</string>
+    <string name="toolkit_absolute_required">请输入绝对路径，不能包含换行</string>
+    <string name="toolkit_bind">绑定并探测</string>
+    <string name="toolkit_clear">清除绑定</string>
+    <string name="toolkit_install">安装官方版本</string>
+    <string name="toolkit_probe">探测状态</string>
+    <string name="toolkit_cancel">取消操作</string>
+    <string name="toolkit_installing">正在下载并校验官方版本…</string>
+    <string name="toolkit_official_version">固定官方版本：%1$s</string>
+    <string name="toolkit_probe_output">实际探测输出</string>
+    <string name="toolkit_ready">探测成功，可运行</string>
+    <string name="toolkit_configured">已绑定，尚未探测</string>
+    <string name="toolkit_needs_runtime">已绑定，缺少运行时</string>
+    <string name="toolkit_unavailable">探测失败，当前不可运行</string>
+    <string name="toolkit_unconfigured">尚未绑定</string>
+    <string name="toolkit_failed">操作失败</string>
+    <string name="toolkit_cancelled">操作已取消</string>
     <string name="tool_running">执行中…</string>
     <string name="tool_failed">失败</string>
     <string name="tool_done">完成</string>
@@ -96,6 +142,42 @@
     <string name="label_output_verbosity">输出详细程度</string>
     <string name="label_reasoning_summary">推理摘要</string>
     <string name="label_output_language">AI 输出语言</string>
+    <string name="label_agent_mode">子 agent 模式</string>
+    <string name="label_agent_concurrency">子 agent 并发上限</string>
+    <string name="label_reasoning_effort">思考强度</string>
+    <string name="agent_status_normal">子 agent 并发上限：%1$d；实际思考强度：%2$s。关闭思考时不发送 reasoning_effort 参数。</string>
+    <string name="agent_status_off">子 agent 已关闭；实际思考强度：%2$s。并发上限 %1$d 会保留，重新启用后生效。</string>
+    <string name="agent_status_ultra">Ultra：最多同时运行 %1$d 个子 agent，实际思考强度固定为 %2$s。原思考选择会保留；接口不支持 max 时，请改用按需模式并选择关闭。</string>
+    <string name="agent_ultra_effort_hint">Ultra 模式固定使用 max。其他思考强度在设置中退出 Ultra 后生效。</string>
+    <string-array name="agent_mode_labels">
+        <item>关闭 (off)</item>
+        <item>按需 (manual)</item>
+        <item>主动并行 (ultra)</item>
+    </string-array>
+    <string-array name="agent_mode_descriptions">
+        <item>由主 agent 完成任务，不提供子 agent 协调工具</item>
+        <item>由模型根据任务需要决定是否委派；主 agent 收集证据并审核结果</item>
+        <item>先判断可独立开展的任务，再主动并行委派并复用合适的子 agent；主 agent 审核后汇总。简单问答不强行派发，思考强度固定为 max</item>
+    </string-array>
+    <string-array name="agent_concurrency_labels">
+        <item>1</item><item>2</item><item>3</item><item>4</item>
+    </string-array>
+    <string-array name="agent_concurrency_descriptions">
+        <item>同时最多运行 1 个子 agent，其余任务排队</item>
+        <item>同时最多运行 2 个子 agent，其余任务排队</item>
+        <item>同时最多运行 3 个子 agent，其余任务排队</item>
+        <item>同时最多运行 4 个子 agent，其余任务排队</item>
+    </string-array>
+    <string-array name="reasoning_effort_labels">
+        <item>关闭 (off)</item><item>低 (low)</item><item>中 (medium)</item><item>高 (high)</item><item>最大 (max)</item>
+    </string-array>
+    <string-array name="reasoning_effort_descriptions">
+        <item>不发送 reasoning_effort 参数，适用于不支持此参数的接口</item>
+        <item>发送 low，优先较短的思考时间</item>
+        <item>发送 medium，兼顾思考时间和复杂度</item>
+        <item>发送 high，增加复杂任务的思考投入</item>
+        <item>发送 max，需要接口支持该值；不支持时请选择关闭。Ultra 模式固定使用 max</item>
+    </string-array>
     <string-array name="output_verbosity_labels">
         <item>模型默认</item>
         <item>低</item>

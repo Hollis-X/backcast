@@ -10,6 +10,7 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -151,6 +152,38 @@ public class ShellTool implements Tool {
         return output;
     }
 
+    /** Trusted launcher paths come from the private registry; user arguments stay structured. */
+    public String runProgram(ToolchainStore.Launcher launcher, List<String> arguments,
+            boolean temporaryCommand, int timeoutSec) throws Exception {
+        return runProgram(launcher, arguments, temporaryCommand, timeoutSec, epoch);
+    }
+
+    int cancellationEpoch() { return epoch; }
+
+    String runProgram(ToolchainStore.Launcher launcher, List<String> arguments,
+            boolean temporaryCommand, int timeoutSec, final int mine) throws Exception {
+        if (mine != epoch || Thread.currentThread().isInterrupted()) return "已停止。";
+        cleanupFailed = false;
+        try { ToolPaths.checkProgram(workDir, launcher.id, arguments, temporary, temporaryCommand); }
+        catch (IllegalArgumentException failure) { return "错误：" + failure.getMessage(); }
+        StringBuilder command = new StringBuilder();
+        java.util.Iterator<String> keys = launcher.environment.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (!"R2_PREFIX".equals(key) && !"LD_LIBRARY_PATH".equals(key)) throw new IllegalArgumentException("工具环境变量不合法。");
+            command.append(key).append('=').append(RootShell.quote(launcher.environment.getString(key))).append(' ');
+        }
+        command.append(RootShell.quote(launcher.executable));
+        if ("apktool".equals(launcher.id) && !launcher.prefix.isEmpty() && temporary != null) {
+            command.append(' ').append(RootShell.quote("-Duser.home=" + temporary.directory().getPath()));
+        }
+        for (String prefix : launcher.prefix) command.append(' ').append(RootShell.quote(prefix));
+        for (String value : arguments) command.append(' ').append(RootShell.quote(value));
+        boolean withRoot = useRoot && rootAvailable();
+        String result = exec(command.toString(), Math.min(600, Math.max(1, timeoutSec)), withRoot, temporaryCommand, mine, true);
+        return useRoot && !withRoot ? "注意：root 不可用，本次按普通权限执行。\n" + result : result;
+    }
+
     /** root 是否真的可用。探测失败即视为不可用，不再反复尝试。 */
     private static boolean rootAvailable() {
         Boolean cached = rootAvailable;
@@ -179,6 +212,10 @@ public class ShellTool implements Tool {
     }
 
     private String exec(String command, int timeoutSec, boolean withRoot, boolean temporaryCommand, final int mine) throws Exception {
+        return exec(command, timeoutSec, withRoot, temporaryCommand, mine, false);
+    }
+
+    private String exec(String command, int timeoutSec, boolean withRoot, boolean temporaryCommand, final int mine, boolean program) throws Exception {
         // 在命令前先切到工作目录，相对路径就不用模型自己拼了。
         String directory = workDir;
         String prefix = "";
@@ -188,8 +225,9 @@ public class ShellTool implements Tool {
             if (epoch != mine) return "已停止。";
             prefix = "export TMPDIR=" + RootShell.quote(temp) + " TMP=" + RootShell.quote(temp)
                     + " TEMP=" + RootShell.quote(temp) + "; ";
+            if (program) prefix += "export HOME=" + RootShell.quote(temp) + "; ";
             if (temporaryCommand) directory = temp;
-            if (temporaryCommand) {
+            if (temporaryCommand && !program) {
                 try { ToolPaths.checkTemporaryCommand(temp, command); }
                 catch (IllegalArgumentException error) { return "错误：" + error.getMessage(); }
             }

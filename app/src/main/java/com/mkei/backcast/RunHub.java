@@ -8,6 +8,8 @@ import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.ToolRegistry;
+import com.mkei.backcast.agent.SubAgentManager;
+import com.mkei.backcast.agent.FileSubAgentStore;
 import com.mkei.backcast.tool.EditTool;
 import com.mkei.backcast.tool.GoalTool;
 import com.mkei.backcast.tool.GetGoalTool;
@@ -16,6 +18,9 @@ import com.mkei.backcast.tool.ShellTool;
 import com.mkei.backcast.tool.WriteTool;
 import com.mkei.backcast.tool.TemporaryTool;
 import com.mkei.backcast.tool.TemporaryWorkspace;
+import com.mkei.backcast.tool.SubAgentTools;
+import com.mkei.backcast.tool.ToolkitTool;
+import com.mkei.backcast.tool.ToolchainStore;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -36,6 +41,11 @@ public final class RunHub {
     private final Settings settings;
     private final Map<Long, AgentLoop> loops = new HashMap<Long, AgentLoop>();
     private final Map<AgentLoop, TemporaryWorkspace> temporary = new ConcurrentHashMap<AgentLoop, TemporaryWorkspace>();
+    private final Map<AgentLoop, SubAgentManager> children = new ConcurrentHashMap<AgentLoop, SubAgentManager>();
+    private final Map<AgentLoop, FileSubAgentStore> childStores = new ConcurrentHashMap<AgentLoop, FileSubAgentStore>();
+    private final Map<AgentLoop, ChildOwner> childOwners = new ConcurrentHashMap<AgentLoop, ChildOwner>();
+    private final ToolchainStore toolchains;
+    private final TemporaryWorkspace uiMaterials;
     private final ConcurrentHashMap<Long, Object> sessionPreparations = new ConcurrentHashMap<Long, Object>();
     private final AgentLoop.Recorder recorder;
     private final AgentLoop.Durability durability;
@@ -45,10 +55,22 @@ public final class RunHub {
     private String applied = "";
     private boolean recovered;
 
+    private static final class ChildOwner {
+        final AgentLoop root;
+        final SubAgentManager manager;
+        final String id;
+        ChildOwner(AgentLoop root, SubAgentManager manager, String id) {
+            this.root = root; this.manager = manager; this.id = id;
+        }
+    }
+
     private RunHub(android.content.Context context) {
         app = context.getApplicationContext();
         store = new ChatStore(app);
         settings = new Settings(app);
+        toolchains = new ToolchainStore(new java.io.File(app.getFilesDir(), "toolchains"));
+        uiMaterials = new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
+                new java.io.File(app.getFilesDir(), "temporary-workspaces/tool-ui"), 0);
         recorder = new AgentLoop.Recorder() {
             @Override
             public void record(long sessionId, Message message) {
@@ -101,6 +123,52 @@ public final class RunHub {
     /** Returns only a fully restored loop; performs no database or filesystem work. */
     public synchronized AgentLoop existingSession(long sessionId) {
         return loops.get(Long.valueOf(sessionId));
+    }
+
+    public SubAgentManager subAgents(AgentLoop loop) { return children.get(loop); }
+
+    /** UI probes use their own runner so they cannot cancel a model's active command. */
+    public ToolkitSession newToolkitSession() {
+        String dir = settings.workDir();
+        boolean root = settings.useRoot();
+        uiMaterials.configure(dir, root);
+        String cleanup = uiMaterials.cleanupRecovered();
+        if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
+        uiMaterials.beginTurn();
+        ShellTool shell = new ShellTool(root, dir, uiMaterials);
+        return new ToolkitSession(new ToolkitTool(shell, toolchains, dir, uiMaterials,
+                android.os.Build.CPU_ABI), uiMaterials);
+    }
+
+    public static final class ToolkitSession {
+        public final ToolkitTool toolkit;
+        private final TemporaryWorkspace materials;
+        private final Thread owner = Thread.currentThread();
+        private boolean closed;
+
+        private ToolkitSession(ToolkitTool toolkit, TemporaryWorkspace materials) {
+            this.toolkit = toolkit;
+            this.materials = materials;
+        }
+
+        public void close() {
+            toolkit.abort();
+            // Cancellation can come from the UI; the worker owns the temporary lease.
+            if (Thread.currentThread() != owner) return;
+            synchronized (this) {
+                if (closed) return;
+                closed = true;
+            }
+            String cleanup = materials.finishTurn();
+            if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
+        }
+    }
+
+    public String agentName(AgentLoop loop) {
+        ChildOwner child = childOwners.get(loop);
+        if (child == null) return "主 agent";
+        try { return child.manager.find(child.id).name; }
+        catch (Exception missing) { return child.id; }
     }
 
     /** Preload persisted context off the UI thread without changing listener ownership. */
@@ -161,6 +229,8 @@ public final class RunHub {
         loop.bindSession(sessionId);
         TemporaryWorkspace materials = temporary.get(loop);
         if (materials != null) materials.bindSession(sessionId);
+        FileSubAgentStore childStore = childStores.get(loop);
+        if (childStore != null) childStore.bindDirectory(childDirectory(sessionId));
         loops.put(Long.valueOf(sessionId), loop);
         if (draft == loop) {
             draft = null;
@@ -185,6 +255,11 @@ public final class RunHub {
         for (AgentLoop loop : all()) {
             loop.setAccessLevel(level);
             loop.setApprovalGate(use);
+            SubAgentManager manager = children.get(loop);
+            if (manager != null) for (AgentLoop child : manager.runtimeLoops()) {
+                child.setAccessLevel(level);
+                child.setApprovalGate(use);
+            }
         }
     }
 
@@ -194,6 +269,8 @@ public final class RunHub {
         }
         for (AgentLoop loop : all()) {
             loop.clearGate(gate);
+            SubAgentManager manager = children.get(loop);
+            if (manager != null) for (AgentLoop child : manager.runtimeLoops()) child.clearGate(gate);
         }
     }
 
@@ -203,6 +280,13 @@ public final class RunHub {
             boolean running = loop.busy();
             loop.clearGoal();
             loop.cancel();
+            SubAgentManager manager = children.remove(loop);
+            FileSubAgentStore checkpoint = childStores.remove(loop);
+            if (checkpoint != null) checkpoint.remove();
+            if (manager != null) for (AgentLoop child : manager.runtimeLoops()) {
+                childOwners.remove(child);
+                temporary.remove(child);
+            }
             final TemporaryWorkspace materials = temporary.remove(loop);
             if (!running && materials != null) {
                 new Thread(new Runnable() {
@@ -218,9 +302,10 @@ public final class RunHub {
             return;
         }
         String sig = settings.baseUrl() + "\n" + settings.apiKey() + "\n" + settings.model()
-                + "\n" + settings.reasoningEffort() + "\n" + settings.useRoot()
+                + "\n" + settings.effectiveReasoningEffort() + "\n" + settings.useRoot()
                 + "\n" + settings.workDir() + "\n" + settings.outputVerbosity()
-                + "\n" + settings.outputLanguage();
+                + "\n" + settings.outputLanguage() + "\n" + settings.agentMode()
+                + "\n" + settings.agentConcurrency();
         if (sig.equals(applied)) {
             return;
         }
@@ -228,6 +313,14 @@ public final class RunHub {
         for (AgentLoop loop : all()) {
             arm(loop);
             loop.retarget(newClient(), tools(loop));
+            SubAgentManager manager = children.get(loop);
+            if (manager != null) for (AgentLoop child : manager.runtimeLoops()) {
+                child.setEnvironment(settings.fullSystemPrompt(), settings.workDir());
+                child.setContextBudget(loop.contextLimit(), settings.compactRatio());
+                child.setAccessLevel(loop.accessLevel());
+                child.setApprovalGate(loop.approvalGate());
+                child.retarget(newClient(), tools(child));
+            }
         }
     }
 
@@ -309,17 +402,18 @@ public final class RunHub {
 
     private AgentLoop create(long sessionId) {
         AgentLoop loop = new AgentLoop(newClient(), new ToolRegistry(), quiet);
+        loop.bindSession(sessionId);
         temporary.put(loop, new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
                 new java.io.File(app.getFilesDir(), "temporary-workspaces"), sessionId));
-        loop.retarget(newClient(), tools(loop));
         arm(loop);
+        loop.retarget(newClient(), tools(loop));
         return loop;
     }
 
     private LlmClient newClient() {
         LlmClient.Config config = new LlmClient.Config(
                 settings.baseUrl(), settings.apiKey(), settings.model(),
-                settings.reasoningEffort());
+                settings.effectiveReasoningEffort());
         config.verbosity = settings.outputVerbosity();
         config.responseInstructions = settings.responseInstructions();
         return new LlmClient(config);
@@ -332,13 +426,72 @@ public final class RunHub {
         TemporaryWorkspace materials = temporary.get(loop);
         materials.configure(dir, root);
         next.register(new ReadTool(dir, root, materials));
-        next.register(new ShellTool(root, dir, materials));
+        ShellTool shell = new ShellTool(root, dir, materials);
+        next.register(shell);
         next.register(new EditTool(dir, root, materials));
         next.register(new WriteTool(dir, root, materials));
         next.register(new TemporaryTool(materials));
+        next.register(new ToolkitTool(shell, toolchains, dir, materials, android.os.Build.CPU_ABI));
+        ChildOwner owner = childOwners.get(loop);
+        if (owner != null) {
+            if (!Settings.AGENT_OFF.equals(settings.agentMode())) SubAgentTools.register(next, owner.manager, owner.id);
+            return next;
+        }
         next.register(new GoalTool(loop));
         next.register(new GetGoalTool(loop));
+        if (Settings.AGENT_OFF.equals(settings.agentMode())) {
+            SubAgentManager manager = children.get(loop);
+            if (manager != null) manager.cancelAll();
+            loop.setSubAgents(null);
+        } else {
+            SubAgentManager manager = manager(loop);
+            manager.setMaxParallel(settings.agentConcurrency());
+            loop.setSubAgents(manager);
+            SubAgentTools.register(next, manager, SubAgentManager.ROOT);
+        }
         return next;
+    }
+
+    private java.io.File childDirectory(long sessionId) {
+        return new java.io.File(app.getFilesDir(), "sub-agents/session-" + sessionId);
+    }
+
+    private SubAgentManager manager(final AgentLoop parent) {
+        SubAgentManager known = children.get(parent);
+        if (known != null) return known;
+        try {
+            final FileSubAgentStore checkpoint = new FileSubAgentStore(parent.sessionKey() < 0
+                    ? new java.io.File(app.getFilesDir(), "sub-agents/draft-" + java.util.UUID.randomUUID().toString())
+                    : childDirectory(parent.sessionKey()));
+            SubAgentManager created = new SubAgentManager(settings.agentConcurrency(), new SubAgentManager.Factory() {
+                @Override public AgentLoop create(final SubAgentManager.Record task, AgentLoop.Listener listener,
+                        final SubAgentManager manager) {
+                    AgentLoop child = new AgentLoop(newClient(), new ToolRegistry(), listener);
+                    childOwners.put(child, new ChildOwner(parent, manager, task.id));
+                    temporary.put(child, new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
+                            new java.io.File(app.getFilesDir(), "temporary-workspaces/children/" + task.id), task.sessionId));
+                    child.retarget(newClient(), tools(child));
+                    child.reset(settings.fullSystemPrompt());
+                    child.setEnvironment(settings.fullSystemPrompt(), settings.workDir());
+                    child.setContextBudget(parent.contextLimit(), settings.compactRatio());
+                    child.setAccessLevel(parent.accessLevel());
+                    child.setApprovalGate(parent.approvalGate());
+                    child.setUsageObserver(new AgentLoop.UsageObserver() {
+                        @Override public void onUsage(long tokens) {
+                            manager.accountUsage(task.id, tokens);
+                            parent.accountExternalUsage(tokens, manager.usageLease(task.id));
+                        }
+                    });
+                    return child;
+                }
+            }, checkpoint);
+            created.attachRoot(parent);
+            childStores.put(parent, checkpoint);
+            children.put(parent, created);
+            return created;
+        } catch (Exception failure) {
+            throw new IllegalStateException("无法初始化子 agent：" + failure.getMessage(), failure);
+        }
     }
 
     private List<AgentLoop> all() {

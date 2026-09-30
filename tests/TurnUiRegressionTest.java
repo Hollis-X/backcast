@@ -1,9 +1,11 @@
 import android.os.SystemClock;
 import com.mkei.backcast.agent.AgentLoop;
+import com.mkei.backcast.agent.ApprovalGate;
 import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
+import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
@@ -143,8 +145,8 @@ public final class TurnUiRegressionTest {
     private static void compileView(Path root, Path build) throws Exception {
         StringBuilder source = new StringBuilder(
                 "import android.os.SystemClock; import com.mkei.backcast.agent.*;"
-                + "import com.mkei.backcast.ui.TurnTrace; import java.util.*; import org.json.*;"
-                + "public class TurnUiFixture {"
+                + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.tool.ToolCatalog; import java.util.*; import org.json.*;"
+                + "public class TurnUiFixture implements ApprovalGate {"
                 + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt; int turnUiToken=-1;"
                 + "interface ViewParent {}"
                 + "static class View implements ViewParent { static final int VISIBLE=0,GONE=8;"
@@ -163,6 +165,23 @@ public final class TurnUiRegressionTest {
                 + "Animator setDuration(long v){duration=v;lastAnimationDuration=v;return this;} Animator setInterpolator(Object v){return this;}"
                 + "Animator setListener(AnimatorListenerAdapter l){listener=l;return this;} void start(){lastAnimationStarts++;} void finish(){if(listener!=null)listener.onAnimationEnd(this);} }"
                 + "static class DecelerateInterpolator {} static long lastAnimationDuration; static int lastAnimationStarts;"
+                + "static class AlertDialog implements android.content.DialogInterface {boolean showing;String title;"
+                + "android.content.DialogInterface.OnClickListener positive;android.content.DialogInterface.OnDismissListener dismissed;"
+                + "static List<AlertDialog> dialogs=new ArrayList<AlertDialog>();void show(){showing=true;dialogs.add(this);}"
+                + "boolean isShowing(){return showing;}void dismiss(){showing=false;if(dismissed!=null)dismissed.onDismiss(this);}"
+                + "void approve(){if(positive!=null)positive.onClick(this,1);dismiss();}"
+                + "static class Builder{AlertDialog d=new AlertDialog();Builder(Object c){}Builder setTitle(String s){d.title=s;return this;}"
+                + "Builder setMessage(String s){return this;}Builder setPositiveButton(int r,android.content.DialogInterface.OnClickListener l){d.positive=l;return this;}"
+                + "Builder setNegativeButton(int r,android.content.DialogInterface.OnClickListener l){return this;}"
+                + "Builder setOnDismissListener(android.content.DialogInterface.OnDismissListener l){d.dismissed=l;return this;}AlertDialog create(){return d;}}}"
+                + "static class RunHub{static List<ToolkitSession> sessions=Collections.synchronizedList(new ArrayList<ToolkitSession>());"
+                + "static boolean block,failCleanup;static RunHub get(Object c){return new RunHub();}String agentName(AgentLoop l){return \"child_fixture\";}"
+                + "ToolkitSession newToolkitSession(){ToolkitSession s=new ToolkitSession();sessions.add(s);return s;}"
+                + "static class ToolkitSession{Thread owner=Thread.currentThread();FixtureToolkit toolkit=new FixtureToolkit();volatile int closes,aborts;boolean closed;"
+                + "synchronized void close(){aborts++;toolkit.cancelled=true;if(Thread.currentThread()!=owner)return;"
+                + "if(closed)return;closed=true;closes++;if(failCleanup)throw new IllegalStateException(\"cleanup_failed\");}}"
+                + "static class FixtureToolkit{volatile boolean cancelled;JSONObject arguments;String run(JSONObject args)throws Exception{arguments=args;"
+                + "if(block)while(!cancelled){Thread.sleep(20);}return new JSONObject().put(\"state\",cancelled?\"cancelled\":\"ready\").toString();}}}"
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
                 + "static class MarginLayoutParams { int bottomMargin; }"
                 + "int getChildCount(){return children.size();} View getChildAt(int i){return children.get(i);}"
@@ -189,7 +208,12 @@ public final class TurnUiRegressionTest {
                 + "void setPadding(int a,int b,int c,int d){paddingBottom=d;}"
                 + "void stopScroll(){flinging=false;stops++;} void nativeFrame(){if(flinging)y-=40;}"
                 + "void scrollTo(int x,int to){if(y!=to){y=to;calls++;}} ViewTreeObserver getViewTreeObserver(){return observer;} }"
-                + "static class R { static class string { static final int history_loading=1,history_retry=2,earlier_messages=3; }"
+                + "static class R { static class string { static final int history_loading=1,history_retry=2,earlier_messages=3,"
+                + "sub_agents_task=7,sub_agents_result=8,sub_agents_failure=9,sub_agents_history_page=10,sub_agents_text_truncated=11,"
+                + "sub_agents_queued=12,sub_agents_running=13,sub_agents_waiting=14,sub_agents_idle=15,sub_agents_failed=16,sub_agents_closed=17,"
+                + "approve_title=18,approve_body=19,approve_run=20,approve_deny=21,toolkit_ready=22,toolkit_configured=23,"
+                + "toolkit_needs_runtime=24,toolkit_unavailable=25,toolkit_failed=26,toolkit_cancelled=27,toolkit_unconfigured=28,"
+                + "toolkit_source=29,toolkit_requirements=30,toolkit_path=31,toolkit_runtime=32,toolkit_official_version=33,toolkit_probe_output=34; }"
                 + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400;}"
@@ -197,7 +221,10 @@ public final class TurnUiRegressionTest {
                 + "static final String INPUT_METHOD_SERVICE=\"input\"; TextView prompt=new TextView();View currentFocus=prompt,mainRoot=new View();"
                 + "android.view.inputmethod.InputMethodManager keyboard=new android.view.inputmethod.InputMethodManager();"
                 + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return mainRoot;}"
-                + "static List<Runnable> posted=new ArrayList<Runnable>(); List<Runnable> uiTasks=new ArrayList<Runnable>();"
+                + "static List<Runnable> posted=new ArrayList<Runnable>(); List<Runnable> uiTasks=Collections.synchronizedList(new ArrayList<Runnable>());"
+                + "Object approvalLock=new Object();List<ApprovalRequest> approvals=new LinkedList<ApprovalRequest>();volatile boolean activityDestroyed;"
+                + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newCachedThreadPool();"
+                + "List<ToolkitOperation> toolkitOperations=new ArrayList<ToolkitOperation>();"
                 + "static class QueuedReader { List<Runnable> tasks=new ArrayList<Runnable>(); void execute(Runnable r){tasks.add(r);} }"
                 + "static class ChatStore { static class MessagePage { List<Message> messages,trailingResults=new ArrayList<Message>(); String requestBefore=\"\"; Message leadingAssistant; long firstId,earlierCount;"
                 + "MessagePage(List<Message> m){messages=m;} } MessagePage nextPage; int reads; long sid,before; int limit;"
@@ -244,6 +271,9 @@ public final class TurnUiRegressionTest {
         source.append("Runnable transcriptTouchStart=").append(METHODS.get("transcriptTouchStart")).append(';');
         source.append(METHODS.get("Flow"));
         source.append(METHODS.get("ReplayCursor"));
+        source.append(METHODS.get("ApprovalRequest"));
+        source.append(METHODS.get("ToolkitOperation"));
+        source.append(METHODS.get("ToolkitResult"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {
             check(METHODS.containsKey(name), "Missing UI constant " + name);
             source.append(METHODS.get(name));
@@ -253,6 +283,10 @@ public final class TurnUiRegressionTest {
                 "loadEarlierPage", "insertEarlierPage", "resetHistoryLoading", "stripCompactionAsks", "host", "autoScroll",
                 "stuckAtEnd", "latestScrollY", "updateLatestButton", "scrollToLatest", "jumpToLatest", "cancelLatestJumpAnimation",
                 "pinLastMessage",
+                "childDetails", "childStatus", "shortChildText",
+                "approve", "approvalCurrent", "showApproval", "cancelApprovals", "prettyArgs",
+                "requestToolkit", "cancelToolkitOperation", "closeToolkitSession", "toolkitArguments",
+                "toolkitState", "toolkitDetails", "validToolkitPath",
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive",
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
@@ -267,8 +301,11 @@ public final class TurnUiRegressionTest {
             files.add(new Source("android.view.inputmethod.InputMethodManager",
                     "package android.view.inputmethod; public class InputMethodManager {"
                     + "public Object target;public int hides; public boolean hideSoftInputFromWindow(Object t,int f){target=t;hides++;return true;} }"));
+            files.add(new Source("android.content.DialogInterface", "package android.content;public interface DialogInterface{"
+                    + "interface OnClickListener{void onClick(DialogInterface d,int w);}interface OnDismissListener{void onDismiss(DialogInterface d);}}"));
             for (JavaFileObject file : fm.getJavaFileObjects(
-                    root.resolve("app/src/main/java/com/mkei/backcast/ui/TurnTrace.java").toFile())) files.add(file);
+                    root.resolve("app/src/main/java/com/mkei/backcast/ui/TurnTrace.java").toFile(),
+                    root.resolve("app/src/main/java/com/mkei/backcast/tool/ToolCatalog.java").toFile())) files.add(file);
             check(COMPILER.getTask(null, fm, null, Arrays.asList("-proc:none", "-encoding", "UTF-8",
                     "-source", "8", "-target", "8", "-Xlint:-options", "-classpath",
                     System.getProperty("java.class.path"), "-d", build.toString()), null, files).call(),
@@ -960,6 +997,228 @@ public final class TurnUiRegressionTest {
         check(METHODS.get("hideWorkSheet").contains("resetSheetDetails"), "Sheet retains detail views after dismissal");
         pass("uiTokenWiringIsComplete");
     }
+    private static void childDetailsArePagedBoundedAndHideSystemMessages() throws Exception {
+        Object view=fixture();
+        SubAgentManager.Record record=new SubAgentManager.Record();
+        record.name="child name";record.id="child_1";record.task="inspect module";record.status=SubAgentManager.RUNNING;
+        record.result="result evidence";record.error="error detail";
+        record.history.put(Message.system("HIDDEN_SYSTEM_SENTINEL").toCheckpointJson());
+        for(int i=0;i<100;i++) record.history.put(Message.assistant("PAGE_SENTINEL_"+i+"_END",null).toCheckpointJson());
+        Method details=viewType.getDeclaredMethod("childDetails",SubAgentManager.Record.class,int.class,int.class);
+        details.setAccessible(true);
+        String latest=(String)details.invoke(view,record,61,101), earlier=(String)details.invoke(view,record,21,61);
+        check(latest.contains("PAGE_SENTINEL_99_END") && latest.contains("PAGE_SENTINEL_60_END")
+                && !latest.contains("PAGE_SENTINEL_59_END") && !latest.contains("HIDDEN_SYSTEM_SENTINEL"),
+                "Child details rendered outside the selected page or displayed a system message");
+        check(earlier.contains("PAGE_SENTINEL_59_END") && !earlier.contains("PAGE_SENTINEL_99_END")
+                && earlier.contains("inspect module") && earlier.contains("result evidence") && earlier.contains("error detail"),
+                "An earlier child page lost task/evidence details or showed the wrong history");
+        StringBuilder longText=new StringBuilder();for(int i=0;i<100000;i++)longText.append('x');
+        record.history=new JSONArray();for(int i=0;i<40;i++)record.history.put(Message.assistant(longText.toString(),null).toCheckpointJson());
+        String bounded=(String)details.invoke(view,record,0,40);
+        check(bounded.length()<40000,"A child detail page can still expand to unbounded tool output");
+        pass("childDetailsPageHistoryAndBoundLongOutputWithoutDisclosingSystemMessages");
+    }
+    private static void childUiReadsAndStopsOffTheUiThread() {
+        String list=METHODS.get("loadSubAgents"), detail=METHODS.get("loadSubAgent");
+        check(METHODS.get("showModelPopup").contains("showSubAgents()"),"Current-session child UI has no actual entry");
+        check(list.indexOf("childReader.execute")<list.indexOf("manager.records()")
+                && detail.indexOf("childReader.execute")<detail.indexOf("manager.find(id)")
+                && detail.indexOf("childReader.execute")<detail.indexOf("manager.close("),
+                "Child reads or stopping a process can block the UI thread");
+        check(list.contains("source != loop") && list.contains("sid != sessionId")
+                && detail.contains("source != loop") && detail.contains("sid != sessionId"),
+                "Child dialog applies an old session's asynchronous result");
+        check(METHODS.get("onDestroy").contains("childReader.shutdownNow()"),"Child UI executor survives the activity");
+        pass("childUiHasARealEntryAndPerSessionAsynchronousReadAndStopOwnership");
+    }
+    private static Class<?> dialogType() {
+        for(Class<?> type:viewType.getDeclaredClasses()) if(type.getSimpleName().equals("AlertDialog"))return type;
+        throw new AssertionError("Missing approval dialog fixture");
+    }
+    private static List<?> dialogs() throws Exception {
+        Field dialogs=dialogType().getDeclaredField("dialogs");dialogs.setAccessible(true);return (List<?>)dialogs.get(null);
+    }
+    private static Thread approvalWorker(final Object view, final AgentLoop source, final boolean[] result,
+            final Throwable[] error) throws Exception {
+        source.setApprovalGate((ApprovalGate)view);
+        Thread thread=new Thread(new Runnable(){@Override public void run(){
+            try {
+                Field field=AgentLoop.class.getDeclaredField("APPROVAL_SOURCE");field.setAccessible(true);
+                @SuppressWarnings("unchecked") ThreadLocal<AgentLoop> current=(ThreadLocal<AgentLoop>)field.get(null);
+                current.set(source);
+                try {result[0]=(Boolean)invoke(view,"approve","shell",new JSONObject().put("command","true"));}
+                finally {current.remove();}
+            } catch(Throwable failure) {error[0]=failure;}
+        }});
+        thread.setDaemon(true);thread.start();return thread;
+    }
+    private static void awaitUi(Object view) throws Exception {
+        long deadline=System.nanoTime()+2000000000L;
+        while(((List<?>)get(view,"uiTasks")).isEmpty() && System.nanoTime()<deadline)Thread.sleep(5);
+        check(!((List<?>)get(view,"uiTasks")).isEmpty(),"Approval did not post its UI action");
+    }
+    private static void awaitApprovalCount(Object view,int count) throws Exception {
+        long deadline=System.nanoTime()+2000000000L;
+        while(System.nanoTime()<deadline) {
+            synchronized(get(view,"approvalLock")) {if(((List<?>)get(view,"approvals")).size()==count)return;}
+            Thread.sleep(5);
+        }
+        throw new AssertionError("Approval queue did not reach "+count);
+    }
+    private static void joined(Thread thread,Throwable[] error) throws Exception {
+        thread.join(2000);check(!thread.isAlive() && error[0]==null,"Approval worker remained blocked or failed: "+error[0]);
+    }
+    private static void approvalQueueSerializesChildrenAndNamesTheCaller() throws Exception {
+        Object view=fixture();dialogs().clear();AgentLoop first=running(100000,-1),second=running(100000,-1);
+        boolean[] a={false},b={false};Throwable[] errorA={null},errorB={null};
+        Thread one=approvalWorker(view,first,a,errorA),two=null;
+        try {
+            awaitUi(view);drain(view,"uiTasks");
+            two=approvalWorker(view,second,b,errorB);awaitApprovalCount(view,2);drain(view,"uiTasks");
+            check(dialogs().size()==1 && (Boolean)get(dialogs().get(0),"showing"),"Concurrent child approvals opened overlapping dialogs");
+            check(((String)get(dialogs().get(0),"title")).contains("child_fixture")
+                    && ((String)get(dialogs().get(0),"title")).contains("shell"),"Approval title omitted its source child or tool");
+            call(dialogs().get(0),"approve");joined(one,errorA);drain(view,"uiTasks");
+            awaitUi(view);drain(view,"uiTasks");
+            check(dialogs().size()==2 && !(Boolean)get(dialogs().get(0),"showing")
+                    && (Boolean)get(dialogs().get(1),"showing"),"The second child did not wait for dismissal of the first");
+            call(dialogs().get(1),"dismiss");joined(two,errorB);drain(view,"uiTasks");
+            check(a[0] && !b[0],"Serial approval mixed decisions between child callers");
+        } finally {first.cancel();second.cancel();call(view,"cancelApprovals");drain(view,"uiTasks");one.join(2000);if(two!=null)two.join(2000);}
+        pass("childApprovalsUseOneFifoDialogAndKeepTheCallerAndDecisionSeparate");
+    }
+    private static void stoppingDisplayedOrQueuedChildUnblocksApproval() throws Exception {
+        Object view=fixture();dialogs().clear();AgentLoop first=running(100000,-1),second=running(100000,-1);
+        boolean[] a={false},b={false};Throwable[] errorA={null},errorB={null};
+        Thread one=approvalWorker(view,first,a,errorA),two=null;
+        try {
+            awaitUi(view);drain(view,"uiTasks");
+            two=approvalWorker(view,second,b,errorB);awaitApprovalCount(view,2);
+            second.cancel();joined(two,errorB);drain(view,"uiTasks");
+            check(dialogs().size()==1 && !b[0],"Cancelling a queued child still showed its dialog or accepted the call");
+            first.cancel();joined(one,errorA);drain(view,"uiTasks");
+            check(!a[0] && !(Boolean)get(dialogs().get(0),"showing"),"Stopping a displayed child left its approval blocked or dialog open");
+        } finally {first.cancel();second.cancel();call(view,"cancelApprovals");drain(view,"uiTasks");one.join(2000);if(two!=null)two.join(2000);}
+        pass("stoppingDisplayedAndQueuedChildrenRejectsAndUnblocksTheirApprovals");
+    }
+    private static void staleUiAndDestroyedActivityRejectPendingApprovals() throws Exception {
+        Object view=fixture();dialogs().clear();AgentLoop source=running(100000,-1);
+        boolean[] result={false};Throwable[] error={null};Thread worker=approvalWorker(view,source,result,error);
+        awaitUi(view);source.cancel();drain(view,"uiTasks");joined(worker,error);drain(view,"uiTasks");
+        check(dialogs().isEmpty() && !result[0],"A stale posted UI action opened an approval for an already stopped child");
+        view=fixture();dialogs().clear();source=running(100000,-1);result=new boolean[]{false};error=new Throwable[]{null};
+        worker=approvalWorker(view,source,result,error);awaitUi(view);drain(view,"uiTasks");
+        field(view,"activityDestroyed",true);call(view,"cancelApprovals");joined(worker,error);drain(view,"uiTasks");
+        check(!result[0] && !(Boolean)get(dialogs().get(0),"showing") && ((List<?>)get(view,"approvals")).isEmpty(),
+                "Activity destruction kept an approval window, queue or worker alive");
+        pass("staleUiCallbacksAndDestroyedActivitiesReleaseApprovalWaiters");
+    }
+    private static Class<?> fixtureType(String name) {
+        for(Class<?> type:viewType.getDeclaredClasses())if(type.getSimpleName().equals(name))return type;
+        throw new AssertionError("Missing fixture type "+name);
+    }
+    private static void staticField(Class<?> type,String name,Object value) throws Exception {
+        Field field=type.getDeclaredField(name);field.setAccessible(true);field.set(null,value);
+    }
+    private static List<?> toolkitSessions() throws Exception {
+        Field field=fixtureType("RunHub").getDeclaredField("sessions");field.setAccessible(true);return (List<?>)field.get(null);
+    }
+    private static Object toolkitRequest(Object view,Object dialog,JSONObject args,final List<JSONObject> responses) throws Exception {
+        Class<?> callbackType=fixtureType("ToolkitResult");
+        Object callback=java.lang.reflect.Proxy.newProxyInstance(viewType.getClassLoader(),new Class<?>[]{callbackType},
+                (proxy,method,values)->{if(method.getName().equals("apply"))responses.add((JSONObject)values[0]);return null;});
+        Method request=viewType.getDeclaredMethod("requestToolkit",dialogType(),JSONObject.class,callbackType);
+        request.setAccessible(true);return request.invoke(view,dialog,args,callback);
+    }
+    private static Object toolkitDialog(Object view) throws Exception {
+        Object dialog=nested(view,"AlertDialog",new Class[0]);call(dialog,"show");return dialog;
+    }
+    private static void stopToolkitExecutor(Object view) throws Exception {
+        java.util.concurrent.ExecutorService executor=(java.util.concurrent.ExecutorService)get(view,"toolkitReader");
+        executor.shutdownNow();check(executor.awaitTermination(2,java.util.concurrent.TimeUnit.SECONDS),"Toolkit fixture leaked a background worker");
+    }
+    private static void toolkitCatalogDetailsPreserveSourcesDependenciesAndRealState() throws Exception {
+        Object view=fixture();
+        JSONArray catalog=(JSONArray)viewType.getClassLoader().loadClass("com.mkei.backcast.tool.ToolCatalog")
+                .getMethod("list").invoke(null);
+        for(int i=0;i<catalog.length();i++) {
+            JSONObject entry=catalog.getJSONObject(i);
+            entry.put("state","configured_not_probed").put("configuration",new JSONObject().put("path","/installed/"+entry.getString("id")));
+            String text=(String)invoke(view,"toolkitDetails",entry);
+            check(text.contains(entry.getString("source")) && text.contains(entry.getString("requirements"))
+                    && text.contains("/installed/"+entry.getString("id")) && text.startsWith("23"),
+                    "Tool details lost catalog provenance/dependencies or advertised an unprobed binding as ready");
+            if(entry.optBoolean("download_available"))check(text.contains("SHA-256:") && text.contains("releases/download"),
+                    "Installable tool details omitted pinned release provenance");
+        }
+        JSONObject args=(JSONObject)invoke(view,"toolkitArguments","configure","apktool");
+        check("configure".equals(args.getString("action")) && "apktool".equals(args.getString("tool")),
+                "UI toolkit command arguments were flattened into shell text");
+        for(String path:new String[]{"relative","/path\nother","/path\0other"})
+            check(!(Boolean)invoke(view,"validToolkitPath",path),"UI accepted a malformed binding path");
+        check((Boolean)invoke(view,"validToolkitPath","/installed/java"),"UI rejected an absolute runtime");
+        check(METHODS.get("showModelPopup").contains("showToolkit()") && METHODS.get("showToolkitEntry").contains("download_available")
+                && METHODS.get("showToolkitEntry").contains("\"apktool\".equals(id) || \"radare2\".equals(id)"),
+                "Toolkit UI has no actual menu entry or exposes an unsupported official installer");
+        stopToolkitExecutor(view);
+        pass("toolkitUiDisplaysRealCatalogProvenanceRequirementsAndUnprobedState");
+    }
+    private static void toolkitRequestsUseIndependentOwnerCleanedSessions() throws Exception {
+        Object view=fixture(),dialog=toolkitDialog(view);toolkitSessions().clear();
+        staticField(fixtureType("RunHub"),"block",false);staticField(fixtureType("RunHub"),"failCleanup",false);
+        List<JSONObject> responses=java.util.Collections.synchronizedList(new ArrayList<JSONObject>());
+        try {
+            toolkitRequest(view,dialog,new JSONObject().put("action","status").put("tool","apktool"),responses);
+            awaitUi(view);drain(view,"uiTasks");
+            toolkitRequest(view,dialog,new JSONObject().put("action","clear").put("tool","apktool"),responses);
+            awaitUi(view);drain(view,"uiTasks");
+            check(toolkitSessions().size()==2 && responses.size()==2,"UI reused an agent runner or lost a completed toolkit request");
+            for(Object session:toolkitSessions()) {
+                check((Integer)get(session,"closes")==1 && get(session,"owner")!=Thread.currentThread(),
+                        "Toolkit operation failed to clean its lease on the creating background thread");
+            }
+            check(((List<?>)get(view,"toolkitOperations")).isEmpty(),"Completed toolkit operations stayed registered");
+        } finally {stopToolkitExecutor(view);}
+        pass("toolkitRequestsCreateIndependentSessionsAndCleanTheirOwnerLeasesOffUi");
+    }
+    private static void cancellingToolkitDoesNotChangeAgentOrApplyLateUiResult() throws Exception {
+        Object view=fixture(),dialog=toolkitDialog(view);toolkitSessions().clear();
+        staticField(fixtureType("RunHub"),"block",true);staticField(fixtureType("RunHub"),"failCleanup",false);
+        AgentLoop root=running(100000,-1);field(view,"loop",root);int token=root.runToken();
+        List<JSONObject> responses=java.util.Collections.synchronizedList(new ArrayList<JSONObject>());
+        Object operation=toolkitRequest(view,dialog,new JSONObject().put("action","install").put("tool","apktool"),responses);
+        try {
+            long deadline=System.nanoTime()+2000000000L;
+            while(toolkitSessions().isEmpty() && System.nanoTime()<deadline)Thread.sleep(5);
+            check(!toolkitSessions().isEmpty(),"Toolkit install fixture did not start");
+            invoke(view,"cancelToolkitOperation",operation);
+            Object session=toolkitSessions().get(0);
+            while((Integer)get(session,"closes")==0 && System.nanoTime()<deadline)Thread.sleep(5);
+            drain(view,"uiTasks");
+            check((Integer)get(session,"closes")==1 && (Boolean)get(operation,"cancelled")
+                    && responses.isEmpty() && root.runToken()==token && root.busy(),
+                    "Cancelling the UI toolkit altered the agent or skipped owner cleanup/applied a stale result");
+            check(METHODS.get("showToolkit").contains("setOnDismissListener")
+                    && METHODS.get("showToolkitEntry").contains("setOnDismissListener")
+                    && METHODS.get("onDestroy").contains("cancelToolkitOperation"),
+                    "Window close or activity destruction does not cancel toolkit work");
+        } finally {staticField(fixtureType("RunHub"),"block",false);stopToolkitExecutor(view);}
+        pass("toolkitCancellationLeavesTheAgentUntouchedAndDropsLateResultsAfterOwnerCleanup");
+    }
+    private static void toolkitCleanupFailureReachesTheUiCallback() throws Exception {
+        Object view=fixture(),dialog=toolkitDialog(view);toolkitSessions().clear();
+        staticField(fixtureType("RunHub"),"block",false);staticField(fixtureType("RunHub"),"failCleanup",true);
+        List<JSONObject> responses=java.util.Collections.synchronizedList(new ArrayList<JSONObject>());
+        try {
+            toolkitRequest(view,dialog,new JSONObject().put("action","status").put("tool","apktool"),responses);
+            awaitUi(view);drain(view,"uiTasks");
+            check(responses.size()==1 && "error".equals(responses.get(0).optString("state"))
+                    && responses.get(0).optString("error").contains("cleanup_failed"),
+                    "Temporary cleanup failure stranded the UI in a busy state or concealed the failure");
+        } finally {staticField(fixtureType("RunHub"),"failCleanup",false);stopToolkitExecutor(view);}
+        pass("toolkitTemporaryCleanupFailureIsReportedAndReleasesUiBusyState");
+    }
 
     /** 续跑接在回放那一行上，不另开「工作了」。 */
     private static void continuationReusesOneWorkRow() {
@@ -1025,6 +1284,15 @@ public final class TurnUiRegressionTest {
                 bufferedCallbacksYieldAndRejectOldSessions();
                 liveCallbacksRespectSnapshotBoundaryAndSource();
                 wiring();
+                childDetailsArePagedBoundedAndHideSystemMessages();
+                childUiReadsAndStopsOffTheUiThread();
+                approvalQueueSerializesChildrenAndNamesTheCaller();
+                stoppingDisplayedOrQueuedChildUnblocksApproval();
+                staleUiAndDestroyedActivityRejectPendingApprovals();
+                toolkitCatalogDetailsPreserveSourcesDependenciesAndRealState();
+                toolkitRequestsUseIndependentOwnerCleanedSessions();
+                cancellingToolkitDoesNotChangeAgentOrApplyLateUiResult();
+                toolkitCleanupFailureReachesTheUiCallback();
                 continuationReusesOneWorkRow();
                 compactionKeepsTheWorkRow();
             }

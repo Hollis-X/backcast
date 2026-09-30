@@ -224,6 +224,89 @@ public final class ResponsePreferencesRegressionTest {
         }
     }
 
+    private static int concurrency(Object settings) throws Exception {
+        return (Integer) settingsType.getMethod("agentConcurrency").invoke(settings);
+    }
+    private static void concurrency(Object settings, int value) throws Exception {
+        settingsType.getMethod("setAgentConcurrency", int.class).invoke(settings, value);
+    }
+    private static void childDefaultsAndEveryChoicePersist() throws Exception {
+        Object context=context(), settings=settings(context);
+        check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3,
+                "Fresh settings do not choose manual mode and three children");
+        for(String mode:new String[]{"off","manual","ultra"}) {
+            set(settings,"setAgentMode",mode);
+            check(mode.equals(get(settings(context),"agentMode")),"Agent mode did not persist");
+        }
+        for(int count=1;count<=4;count++) {
+            concurrency(settings,count);
+            check(concurrency(settings(context))==count,"Child concurrency did not persist");
+        }
+        for(String effort:new String[]{"off","low","medium","high","max"}) {
+            set(settings,"setReasoningEffort",effort);
+            check(effort.equals(get(settings(context),"reasoningEffort")),"Reasoning effort did not persist");
+        }
+    }
+    private static void invalidChildAndEffortValuesReturnDefaults() throws Exception {
+        Object settings=settings(context());
+        for(String invalid:new String[]{null,"","all","ULTRA","<script>"}) {
+            set(settings,"setAgentMode",invalid);
+            set(settings,"setReasoningEffort",invalid);
+            check("manual".equals(get(settings,"agentMode")),"Invalid child mode escaped normalization");
+            check("low".equals(get(settings,"reasoningEffort")),"Invalid API reasoning value escaped normalization");
+        }
+        for(int invalid:new int[]{-1,0,5,Integer.MAX_VALUE}) {
+            concurrency(settings,invalid);
+            check(concurrency(settings)==3,"Invalid child count escaped normalization");
+        }
+    }
+    @SuppressWarnings("unchecked")
+    private static void malformedStoredChildSettingsReturnDefaults() throws Exception {
+        Object context=context(),settings=settings(context);
+        java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
+        for(String key:new String[]{"agent_mode","agent_concurrency","reasoning_effort"}) values.put(key,"invalid");
+        check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3
+                && "low".equals(get(settings,"effectiveReasoningEffort")),"Malformed persisted settings escaped validation");
+    }
+    private static void ultraUsesMaxWhilePreservingUserOffAndLanguage() throws Exception {
+        Object settings=settings(context());
+        set(settings,"setReasoningEffort","off");set(settings,"setOutputLanguage","ja");
+        for(String mode:new String[]{"manual","ultra","off","ultra","manual"}) {
+            set(settings,"setAgentMode",mode);
+            check("off".equals(get(settings,"reasoningEffort")),"Mode switch destroyed the user's effort choice");
+            String expected="ultra".equals(mode)?"max":"off";
+            check(expected.equals(get(settings,"effectiveReasoningEffort")),"Ultra sent a mode name or ignored max override");
+            boolean enabled=(Boolean)settingsType.getMethod("reasoningEnabled").invoke(settings);
+            check(enabled=="ultra".equals(mode),"Effective off compatibility is inconsistent");
+            check("ja".equals(get(settings,"outputLanguage")) && get(settings,"fullSystemPrompt")
+                    .contains(policy("languageInstruction","ja")),"Mode switch changed the output language");
+        }
+    }
+    private static void childPoliciesRequireEvidenceReviewAndSelectiveDelegation() throws Exception {
+        Object settings=settings(context());
+        set(settings,"setAgentMode","ultra");concurrency(settings,4);
+        String ultra=get(settings,"fullSystemPrompt");
+        check(ultra.contains("At most 4 child agents") && ultra.contains("Proactively identify independent subtasks")
+                && ultra.contains("Reuse an existing child") && ultra.contains("review and verify")
+                && ultra.contains("simple question or indivisible task does not require a child"),
+                "Ultra lacks limits, reuse, independence or parent evidence review");
+        set(settings,"setAgentMode","manual");
+        check(!get(settings,"fullSystemPrompt").contains("Proactively identify independent subtasks")
+                && get(settings,"fullSystemPrompt").contains("model judges it useful"),"Manual inherited ultra delegation");
+        set(settings,"setAgentMode","off");
+        check(get(settings,"fullSystemPrompt").contains("Coordination tools are disabled")
+                && !get(settings,"fullSystemPrompt").contains("At most 4 child agents"),"Off inherited child execution policy");
+    }
+    private static void unsavedModePreviewDoesNotPersistOrAlterPrompt() throws Exception {
+        Object settings=settings(context());String raw=get(settings,"systemPrompt");
+        String preview=(String)settingsType.getMethod("environmentContext",boolean.class,String.class,int.class)
+                .invoke(settings,false,"ultra",2);
+        check(preview.contains("Subagent mode: ultra") && preview.contains("At most 2 child agents"),
+                "Preview ignored unsaved mode and concurrency");
+        check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3 && raw.equals(get(settings,"systemPrompt")),
+                "Unsaved preview contaminated preferences or editable prompt");
+    }
+
     private static void run(String name) throws Exception {
         try { ResponsePreferencesRegressionTest.class.getDeclaredMethod(name).invoke(null); }
         catch (java.lang.reflect.InvocationTargetException failure) {
@@ -240,7 +323,10 @@ public final class ResponsePreferencesRegressionTest {
                     "malformedSettersReturnDefaults", "malformedStoredValuesReturnDefaults",
                     "customEnglishPromptCannotOverrideSelectedChinese", "selectedEnglishOverridesDefaultChineseInstruction",
                     "languageSwitchReplacesPolicyWithoutAccumulation", "verbositySwitchPreservesLanguageAndCustomPrompt",
-                    "languageRulesCoverAllVisibleTextAndConflictingPrompts"}) run(name);
+                    "languageRulesCoverAllVisibleTextAndConflictingPrompts", "childDefaultsAndEveryChoicePersist",
+                    "invalidChildAndEffortValuesReturnDefaults", "malformedStoredChildSettingsReturnDefaults",
+                    "ultraUsesMaxWhilePreservingUserOffAndLanguage", "childPoliciesRequireEvidenceReviewAndSelectiveDelegation",
+                    "unsavedModePreviewDoesNotPersistOrAlterPrompt"}) run(name);
             System.out.println(passed + " response preference tests passed");
         } finally {
             try (java.util.stream.Stream<Path> paths = Files.walk(build)) {

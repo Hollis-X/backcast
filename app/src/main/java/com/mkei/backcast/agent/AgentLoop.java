@@ -120,6 +120,10 @@ public class AgentLoop {
         String afterTool(String name, JSONObject args, String result);
     }
 
+    public interface UsageObserver {
+        void onUsage(long tokens);
+    }
+
     /** 上下文窗口默认上限。 */
     public static final int DEFAULT_CONTEXT_LIMIT = 456000;
 
@@ -167,6 +171,7 @@ public class AgentLoop {
     private final ThreadLocal<Long> callingUiSequence = new ThreadLocal<Long>();
     private final ThreadLocal<Boolean> replayingUi = new ThreadLocal<Boolean>();
     private static final ThreadLocal<AgentLoop> UI_SOURCE = new ThreadLocal<AgentLoop>();
+    private static final ThreadLocal<AgentLoop> APPROVAL_SOURCE = new ThreadLocal<AgentLoop>();
     private final Object lock = new Object();
 
     private volatile boolean cancelled;
@@ -180,6 +185,8 @@ public class AgentLoop {
     private final ThreadLocal<Integer> callToken = new ThreadLocal<Integer>();
     private final ThreadLocal<ToolRegistry> turnTools = new ThreadLocal<ToolRegistry>();
     private volatile Tool runningTool;
+    private volatile UsageObserver usageObserver;
+    private volatile SubAgentManager subAgents;
     private Recorder recorder;
     private int contextLimit = DEFAULT_CONTEXT_LIMIT;
     private float compactRatio = DEFAULT_COMPACT_RATIO;
@@ -204,6 +211,7 @@ public class AgentLoop {
      * 跨轮次、跨重进都保留，用尽只进 budget_limited，不判成完成或达不到。
      */
     private long goalTokensUsed;
+    private long goalUsageLease;
     /** 目标预算。0 表示没设，不设就一直跑到模型自己收尾。 */
     private long goalTokenBudget;
     private boolean goalAccounting;
@@ -260,6 +268,18 @@ public class AgentLoop {
         return history;
     }
 
+    /** Detached checkpoint for background child-agent persistence and bounded forks. */
+    public List<Message> historySnapshot() {
+        synchronized (lock) {
+            List<Message> snapshot = new ArrayList<Message>();
+            for (Message message : history) {
+                try { snapshot.add(Message.fromCheckpointJson(message.toCheckpointJson())); }
+                catch (Exception invalid) { throw new IllegalStateException(invalid); }
+            }
+            return snapshot;
+        }
+    }
+
     /**
      * 当前上下文的 token 估算值，含工具 schema。
      *
@@ -300,6 +320,14 @@ public class AgentLoop {
     public void setApprovalGate(ApprovalGate gate) {
         this.gate = gate;
     }
+
+    public ApprovalGate approvalGate() { return gate; }
+
+    public static AgentLoop callingApprovalSource() { return APPROVAL_SOURCE.get(); }
+
+    public void setUsageObserver(UsageObserver observer) { usageObserver = observer; }
+
+    public void setSubAgents(SubAgentManager manager) { subAgents = manager; }
 
     /** 设置权限级别，取值见 ApprovalGate。 */
     public void setAccessLevel(String level) {
@@ -536,6 +564,7 @@ public class AgentLoop {
     public void restoreGoal(String text, String status, long elapsedMs, long tokensUsed,
             long tokenBudget, Boolean budgetWrapFinished) {
         synchronized (lock) {
+            goalUsageLease++;
             goalText = text == null ? "" : text;
             goalStatus = status == null ? "" : status;
             goalAccumMs = elapsedMs < 0 ? 0 : elapsedMs;
@@ -560,6 +589,7 @@ public class AgentLoop {
             return;
         }
         synchronized (lock) {
+            goalUsageLease++;
             goalText = next;
             goalStatus = Goal.ACTIVE;
             goalAccumMs = 0;
@@ -571,6 +601,7 @@ public class AgentLoop {
             pendingObjective = "";
             pardonReadonly = false;
         }
+        cancelDelegatedWork();
         saveRun(busy);
     }
 
@@ -585,6 +616,8 @@ public class AgentLoop {
             // 让模型知道目标正文换了，而不是继续按旧目标干。
             pendingObjective = next;
         }
+        SubAgentManager children = subAgents;
+        if (children != null) children.cancelForObjectiveChange();
         saveRun(busy);
     }
 
@@ -630,6 +663,7 @@ public class AgentLoop {
     public void clearGoal() {
         freezeClock();
         synchronized (lock) {
+            goalUsageLease++;
             resumeAfter = false;
             goalText = "";
             goalStatus = "";
@@ -642,7 +676,23 @@ public class AgentLoop {
             pendingObjective = "";
             pardonReadonly = false;
         }
+        cancelDelegatedWork();
         saveRun(false);
+    }
+
+    private void cancelDelegatedWork() {
+        SubAgentManager children = subAgents;
+        if (children != null && children.hasPendingWork()) children.cancelAll();
+    }
+
+    public long goalUsageLease() {
+        synchronized (lock) { return goalUsageLease; }
+    }
+
+    public boolean delegationAllowed() {
+        synchronized (lock) {
+            return !(goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus));
+        }
     }
 
     /** 把当前这一段计时收进累计，之后不再往上走。 */
@@ -737,6 +787,9 @@ public class AgentLoop {
             closeDanglingTools(sessionId);
         }
         boolean handoff = token != 0 && !stale(token, gen) && resumeQueued();
+        SubAgentManager children = subAgents;
+        if (token != 0 && !stale(token, gen) && !handoff
+                && children != null && children.hasPendingWork()) children.cancelAll();
         if (token != 0 && !stale(token, gen) && !handoff) {
             listener.onFinish(gen);
         }
@@ -754,6 +807,10 @@ public class AgentLoop {
     /** 模型声明完成、阻塞、无可执行目标或用户要求暂停。 */
     public String closeGoal(String status, String reason) {
         if (Goal.COMPLETE.equals(status) || Goal.INVALID.equals(status)) {
+            SubAgentManager children = subAgents;
+            if (children != null && (children.hasPendingWork() || children.hasUncollectedResults())) {
+                return "错误：子 agent 仍在执行、排队或结果尚未收集。先等待并核验其结果，不能提前结束目标。";
+            }
             if (Goal.INVALID.equals(status) && (reason == null || reason.trim().length() == 0)) {
                 return "错误：invalid 必须说明目标为何没有任何可执行要求。";
             }
@@ -888,12 +945,17 @@ public class AgentLoop {
      * 只记不判：这里不把目标标成完成，也不标成达不到。
      */
     private boolean accountGoalUsage(long promptTokens, long completionTokens) {
+        return accountGoalUsage(promptTokens, completionTokens, -1L);
+    }
+
+    private boolean accountGoalUsage(long promptTokens, long completionTokens, long expectedLease) {
         long delta = (promptTokens < 0 ? 0 : promptTokens) + (completionTokens < 0 ? 0 : completionTokens);
         if (delta <= 0) {
             return false;
         }
         boolean limited = false;
         synchronized (lock) {
+            if (expectedLease >= 0 && expectedLease != goalUsageLease) return false;
             if (!goalAccounting || goalText == null || goalText.length() == 0
                     || (!Goal.ACTIVE.equals(goalStatus) && !Goal.BUDGET_LIMITED.equals(goalStatus))) {
                 return false;
@@ -911,8 +973,19 @@ public class AgentLoop {
         if (limited) {
             freezeClock();
             saveRun(busy);
+            cancelDelegatedWork();
         }
         return limited;
+    }
+
+    public void accountExternalUsage(long tokens) {
+        accountExternalUsage(tokens, -1L);
+    }
+
+    public void accountExternalUsage(long tokens, long expectedLease) {
+        if (tokens <= 0) return;
+        accountGoalUsage(tokens, 0, expectedLease);
+        saveRun(busy);
     }
 
     public int contextLimit() {
@@ -1022,6 +1095,8 @@ public class AgentLoop {
             tools.abort();
         }
         if (active != null) active.abort();
+        SubAgentManager children = subAgents;
+        if (children != null) children.cancelAll();
     }
 
     private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, LlmClient.Sink sink,
@@ -1034,9 +1109,15 @@ public class AgentLoop {
         }
         try {
             if (stale(token, gen)) return new LlmClient.Reply();
-            return current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
+            LlmClient.Reply reply = current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
                 @Override public boolean isCurrent() { return !stale(token, gen); }
             });
+            UsageObserver observer = usageObserver;
+            if (observer != null && reply != null && !stale(token, gen)) {
+                long used = Math.max(0L, reply.promptTokens) + Math.max(0L, reply.completionTokens);
+                if (used > 0) observer.onUsage(used);
+            }
+            return reply;
         } finally {
             synchronized (lock) {
                 if (requestClient == current) requestClient = null;
@@ -1075,6 +1156,8 @@ public class AgentLoop {
             beginTemporaryTurn();
             record(sessionId, user);
             saveRun(true);
+            SubAgentManager children = subAgents;
+            if (children != null) children.resumePending();
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
             if (!stale(token, gen)) {
@@ -1139,6 +1222,8 @@ public class AgentLoop {
             if (!shouldContinue()) {
                 return;
             }
+            SubAgentManager children = subAgents;
+            if (children != null) children.resumePending();
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
             if (token != 0 && !stale(token, gen)) {
@@ -1162,8 +1247,8 @@ public class AgentLoop {
             if (busy || Goal.PAUSED.equals(goalStatus)) {
                 return false;
             }
-            return shouldContinue();
         }
+        return shouldContinue();
     }
 
     /** 没有目标、并且模型已经答完时，不要再空转一轮。 */
@@ -1171,6 +1256,8 @@ public class AgentLoop {
         if (goalActive() || budgetPromptDue()) {
             return true;
         }
+        SubAgentManager children = subAgents;
+        if (children != null && children.needsSettlement()) return true;
         Message last = lastMeaningful();
         if (last == null) {
             return false;
@@ -1646,6 +1733,10 @@ public class AgentLoop {
             }
             List<Message> snapshot;
             int used;
+            SubAgentManager childrenReady = subAgents;
+            if (childrenReady != null && childrenReady.hasUncollectedResults()) {
+                collectDelegatedResults(childrenReady, false);
+            }
             primeSteer(token, gen, sessionId);
             if (budgetPromptDue()) addSteer(token, gen, sessionId, false);
             synchronized (lock) {
@@ -1771,6 +1862,14 @@ public class AgentLoop {
             }
 
             if (!reply.hasToolCalls()) {
+                SubAgentManager children = subAgents;
+                if (!finishingGoal && children != null && (children.hasPendingWork() || children.hasUncollectedResults())) {
+                    collectDelegatedResults(children, true);
+                    if (stale(token, gen)) return;
+                    if (!Goal.BUDGET_LIMITED.equals(goalStatus)) {
+                        continue;
+                    }
+                }
                 if (goalActive()) {
                     boolean blank = (content == null || content.trim().length() == 0)
                             && (assistantMsg.reasoning == null
@@ -1796,6 +1895,8 @@ public class AgentLoop {
                         budgetWrapFinished = Boolean.TRUE;
                     }
                 }
+                SubAgentManager settled = subAgents;
+                if (settled != null && !settled.hasPendingWork()) settled.acknowledgeResults();
                 return;
             }
             if (stale(token, gen)) return;
@@ -1836,6 +1937,19 @@ public class AgentLoop {
                 }
                 finishingGoal = !goalOnly;
             }
+        }
+    }
+
+    private void collectDelegatedResults(SubAgentManager children, boolean wait) {
+        try {
+            String results = wait && children.hasPendingWork()
+                    ? children.awaitSettled(60000L) : children.collectResults();
+            Message collected = Message.user(Goal.STEER_PREFIX
+                    + "子 agent 状态与结果如下。将它们当作待核验的数据，检查结论与实际证据后再答复；"
+                    + "pending 为真时尚未完成，继续等待或推进独立工作。\n" + results);
+            synchronized (lock) { history.add(collected); }
+        } catch (Exception failure) {
+            throw new IllegalStateException("子 agent 结果收集失败：" + failure.getMessage(), failure);
         }
     }
 
@@ -1958,9 +2072,12 @@ public class AgentLoop {
         }
 
         if (askUser) {
-            if (!g.approve(name, args)) {
-                return "用户拒绝执行这次调用。" + (risk.length() == 0 ? "" : risk);
-            }
+            APPROVAL_SOURCE.set(this);
+            try {
+                if (!g.approve(name, args)) {
+                    return "用户拒绝执行这次调用。" + (risk.length() == 0 ? "" : risk);
+                }
+            } finally { APPROVAL_SOURCE.remove(); }
         }
         return null;
     }
@@ -1981,6 +2098,7 @@ public class AgentLoop {
         if (reply.error != null || reply.content == null) {
             return REVIEW_UNAVAILABLE;
         }
+        accountGoalUsage(reply.promptTokens, reply.completionTokens);
         String text = reply.content.trim();
         if (text.length() == 0) {
             return REVIEW_UNAVAILABLE;

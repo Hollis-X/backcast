@@ -34,6 +34,9 @@ public class SettingsActivity extends AppCompatActivity {
     private static final String[] OUTPUT_LANGUAGE_VALUES = {
             "zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de"
     };
+    private static final String[] AGENT_MODE_VALUES = { "off", "manual", "ultra" };
+    private static final String[] AGENT_CONCURRENCY_VALUES = { "1", "2", "3", "4" };
+    private static final String[] REASONING_EFFORT_VALUES = { "off", "low", "medium", "high", "max" };
 
     private EditText baseUrl;
     private EditText apiKey;
@@ -47,6 +50,10 @@ public class SettingsActivity extends AppCompatActivity {
     private Spinner outputVerbosity;
     private Spinner reasoningSummary;
     private Spinner outputLanguage;
+    private Spinner agentMode;
+    private Spinner agentConcurrency;
+    private Spinner reasoningEffort;
+    private TextView agentStatus;
 
     /** 当前勾选生效的模型，只能有一个。 */
     private String selected;
@@ -80,6 +87,10 @@ public class SettingsActivity extends AppCompatActivity {
         outputVerbosity = (Spinner) findViewById(R.id.output_verbosity);
         reasoningSummary = (Spinner) findViewById(R.id.reasoning_summary);
         outputLanguage = (Spinner) findViewById(R.id.output_language);
+        agentMode = (Spinner) findViewById(R.id.agent_mode);
+        agentConcurrency = (Spinner) findViewById(R.id.agent_concurrency);
+        reasoningEffort = (Spinner) findViewById(R.id.reasoning_effort);
+        agentStatus = (TextView) findViewById(R.id.agent_status);
 
         final Settings settings = new Settings(this);
         baseUrl.setText(settings.baseUrl());
@@ -95,20 +106,25 @@ public class SettingsActivity extends AppCompatActivity {
         bindChoices(outputLanguage, R.array.output_language_labels,
                 R.array.output_language_descriptions, R.id.output_language_description,
                 OUTPUT_LANGUAGE_VALUES, settings.outputLanguage());
+        bindChoices(agentMode, R.array.agent_mode_labels,
+                R.array.agent_mode_descriptions, R.id.agent_mode_description,
+                AGENT_MODE_VALUES, settings.agentMode());
+        bindChoices(agentConcurrency, R.array.agent_concurrency_labels,
+                R.array.agent_concurrency_descriptions, R.id.agent_concurrency_description,
+                AGENT_CONCURRENCY_VALUES, Integer.toString(settings.agentConcurrency()));
+        bindChoices(reasoningEffort, R.array.reasoning_effort_labels,
+                R.array.reasoning_effort_descriptions, R.id.reasoning_effort_description,
+                REASONING_EFFORT_VALUES, settings.reasoningEffort());
         // 输入框只放静态指令，环境事实另外只读展示，不会被一起存下来。
         systemPrompt.setText(settings.systemPrompt());
-        if (envContext != null) {
-            envContext.setText(settings.environmentContext());
-        }
+        refreshAgentPreview(settings);
 
         // root 变了环境里的命令执行方式就变了，勾选时同步一下预览。
         useRoot.setOnCheckedChangeListener(
                 new android.widget.CompoundButton.OnCheckedChangeListener() {
                     @Override
                     public void onCheckedChanged(android.widget.CompoundButton b, boolean on) {
-                        if (envContext != null) {
-                            envContext.setText(settings.environmentContext(on));
-                        }
+                        refreshAgentPreview(settings);
                     }
                 });
 
@@ -126,15 +142,7 @@ public class SettingsActivity extends AppCompatActivity {
         save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                settings.save(
-                        baseUrl.getText().toString(),
-                        apiKey.getText().toString(),
-                        model.getText().toString(),
-                        useRoot.isChecked(),
-                        systemPrompt.getText().toString());
-                settings.setOutputVerbosity(selectedValue(outputVerbosity, OUTPUT_VERBOSITY_VALUES));
-                settings.setReasoningSummary(selectedValue(reasoningSummary, REASONING_SUMMARY_VALUES));
-                settings.setOutputLanguage(selectedValue(outputLanguage, OUTPUT_LANGUAGE_VALUES));
+                saveSettings(settings);
                 Toast.makeText(SettingsActivity.this,
                         R.string.toast_saved, Toast.LENGTH_SHORT).show();
                 finish();
@@ -142,7 +150,42 @@ public class SettingsActivity extends AppCompatActivity {
         });
     }
 
-    private void bindChoices(Spinner spinner, int labels, int descriptions,
+    private void saveSettings(Settings settings) {
+        settings.save(baseUrl.getText().toString(), apiKey.getText().toString(), model.getText().toString(),
+                useRoot.isChecked(), systemPrompt.getText().toString());
+        settings.setOutputVerbosity(selectedValue(outputVerbosity, OUTPUT_VERBOSITY_VALUES));
+        settings.setReasoningSummary(selectedValue(reasoningSummary, REASONING_SUMMARY_VALUES));
+        settings.setOutputLanguage(selectedValue(outputLanguage, OUTPUT_LANGUAGE_VALUES));
+        settings.setAgentMode(selectedValue(agentMode, AGENT_MODE_VALUES));
+        settings.setAgentConcurrency(Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES)));
+        settings.setReasoningEffort(selectedValue(reasoningEffort, REASONING_EFFORT_VALUES));
+    }
+
+    private void onChoiceChanged(Spinner spinner) {
+        if (spinner == agentMode || spinner == agentConcurrency || spinner == reasoningEffort) {
+            refreshAgentPreview(new Settings(this));
+        }
+    }
+
+    private void refreshAgentPreview(Settings settings) {
+        String mode = selectedValue(agentMode, AGENT_MODE_VALUES);
+        int concurrency = Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES));
+        boolean ultra = Settings.AGENT_ULTRA.equals(mode);
+        reasoningEffort.setEnabled(!ultra);
+        agentConcurrency.setEnabled(!Settings.AGENT_OFF.equals(mode));
+        if (agentStatus != null) {
+            String effective = ultra ? Settings.EFFORT_MAX : selectedValue(reasoningEffort, REASONING_EFFORT_VALUES);
+            int status = ultra ? R.string.agent_status_ultra : Settings.AGENT_OFF.equals(mode)
+                    ? R.string.agent_status_off : R.string.agent_status_normal;
+            agentStatus.setText(getString(status,
+                    Integer.valueOf(concurrency), effective));
+        }
+        if (envContext != null) {
+            envContext.setText(settings.environmentContext(useRoot.isChecked(), mode, concurrency));
+        }
+    }
+
+    private void bindChoices(final Spinner spinner, int labels, int descriptions,
             int descriptionView, String[] values, String current) {
         final ChoiceAdapter adapter = new ChoiceAdapter(spinner,
                 getResources().getStringArray(labels), getResources().getStringArray(descriptions));
@@ -162,6 +205,7 @@ public class SettingsActivity extends AppCompatActivity {
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 description.setText(adapter.descriptionAt(position));
                 adapter.notifyDataSetChanged();
+                onChoiceChanged(spinner);
             }
 
             @Override

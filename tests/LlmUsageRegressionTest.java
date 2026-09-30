@@ -81,6 +81,7 @@ public final class LlmUsageRegressionTest {
             }
             byte[] body = response.body.getBytes("UTF-8");
             exchange.getResponseHeaders().set("Content-Type", response.contentType);
+            exchange.getResponseHeaders().set("Connection", "close");
             try {
                 exchange.sendResponseHeaders(response.status, body.length);
                 OutputStream output = exchange.getResponseBody();

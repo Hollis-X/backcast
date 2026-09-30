@@ -4,6 +4,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.Closeable;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -264,6 +265,8 @@ public class LlmClient {
             return reply;
         }
         HttpURLConnection conn = null;
+        InputStream response = null;
+        OutputStream request = null;
         try {
             JSONObject body = new JSONObject();
             body.put("model", config.model);
@@ -323,14 +326,16 @@ public class LlmClient {
 
             byte[] payload = body.toString().getBytes("UTF-8");
             conn.setFixedLengthStreamingMode(payload.length);
-            OutputStream os = conn.getOutputStream();
-            os.write(payload);
-            os.flush();
-            os.close();
+            request = conn.getOutputStream();
+            request.write(payload);
+            request.flush();
+            request.close();
+            request = null;
 
             int code = conn.getResponseCode();
             if (code < 200 || code >= 300) {
-                String text = readAll(conn.getErrorStream());
+                response = conn.getErrorStream();
+                String text = readAll(response);
                 reply.raw = text;
                 reply.error = "HTTP " + code + ": " + trim(text, 500);
                 return reply;
@@ -338,12 +343,15 @@ public class LlmClient {
             if (mine.dead) {
                 return reply;
             }
-            readStream(conn.getInputStream(), reply, mine, sink, config.timeoutMs);
+            response = conn.getInputStream();
+            readStream(response, reply, mine, sink, config.timeoutMs);
         } catch (Exception e) {
             if (!mine.dead) {
                 reply.error = e.getClass().getSimpleName() + ": " + e.getMessage();
             }
         } finally {
+            closeQuietly(request);
+            closeQuietly(response);
             if (active == conn) {
                 active = null;
             }
@@ -368,7 +376,7 @@ public class LlmClient {
         JSONObject displayPart;
     }
 
-private static void readStream(InputStream in, Reply reply, Attempt mine, Sink sink, long idleMs)
+    private static void readStream(InputStream in, Reply reply, Attempt mine, Sink sink, long idleMs)
             throws Exception {
         if (in == null) {
             reply.error = "响应为空。";
@@ -413,8 +421,8 @@ private static void readStream(InputStream in, Reply reply, Attempt mine, Sink s
                 }
                 return;
             }
-            consumeSse(first.text, reply, calls, sink);
-            while (reply.error == null && !mine.dead) {
+            boolean more = consumeSse(first.text, reply, calls, sink);
+            while (more && reply.error == null && !mine.dead) {
                 Pulled next = pullLine(reader, raw, mine, clock);
                 if (next.idle) {
                     reply.raw = raw.toString();
@@ -434,7 +442,7 @@ private static void readStream(InputStream in, Reply reply, Attempt mine, Sink s
             }
         } finally {
             reply.finishText();
-            reader.close();
+            closeQuietly(reader);
         }
     }
 
@@ -705,6 +713,7 @@ private static void readStream(InputStream in, Reply reply, Attempt mine, Sink s
     public static ModelsResult fetchModels(String baseUrl, String apiKey) {
         ModelsResult result = new ModelsResult();
         HttpURLConnection conn = null;
+        InputStream response = null;
         try {
             Config cfg = new Config(baseUrl, apiKey, "");
             String url = cfg.modelsUrl();
@@ -717,9 +726,9 @@ private static void readStream(InputStream in, Reply reply, Attempt mine, Sink s
             conn.setRequestProperty("Accept", "application/json");
 
             int code = conn.getResponseCode();
-            InputStream in = (code >= 200 && code < 300)
+            response = (code >= 200 && code < 300)
                     ? conn.getInputStream() : conn.getErrorStream();
-            String text = readAll(in);
+            String text = readAll(response);
 
             if (code < 200 || code >= 300) {
                 result.error = "HTTP " + code + "（" + url + "）：" + trim(text, 300);
@@ -749,6 +758,7 @@ private static void readStream(InputStream in, Reply reply, Attempt mine, Sink s
         } catch (Exception e) {
             result.error = e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
+            closeQuietly(response);
             if (conn != null) {
                 conn.disconnect();
             }
@@ -762,12 +772,20 @@ private static void readStream(InputStream in, Reply reply, Attempt mine, Sink s
         }
         StringBuilder sb = new StringBuilder();
         BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            sb.append(line).append('\n');
+        try {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            return sb.toString();
+        } finally {
+            closeQuietly(reader);
         }
-        reader.close();
-        return sb.toString();
+    }
+
+    private static void closeQuietly(Closeable stream) {
+        if (stream == null) return;
+        try { stream.close(); } catch (Exception ignored) { }
     }
 
     static String trim(String s, int max) {

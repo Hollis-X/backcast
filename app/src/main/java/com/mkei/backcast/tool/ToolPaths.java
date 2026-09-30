@@ -153,6 +153,124 @@ final class ToolPaths {
         }
     }
 
+    static void checkProgram(String workDir, String id, List<String> arguments,
+            TemporaryWorkspace temporary, boolean temporaryCommand) throws Exception {
+        ToolCatalog.get(id);
+        if (arguments.size() > 128) throw new IllegalArgumentException("工具参数过多。");
+        String cwd = temporaryCommand && temporary != null ? temporary.directory().getPath() : workDir;
+        if (temporaryCommand && temporary == null) throw new IllegalArgumentException("当前没有临时材料管理器。");
+        for (int i = 0; i < arguments.size(); i++) {
+            String value = arguments.get(i);
+            if (value == null || value.length() > 16000 || value.indexOf('\0') >= 0 || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
+                throw new IllegalArgumentException("工具参数不合法。");
+            }
+            if ("binutils".equals(ToolCatalog.get(id).group) && value.startsWith("@")) {
+                throw new IllegalArgumentException("当前入口不接受 GNU @响应文件，请把每个参数明确列在 arguments 中。");
+            }
+            if (("radare2".equals(id) || "rabin2".equals(id)) && ("-w".equals(value) || value.startsWith("-i")
+                    || value.startsWith("-I") || value.startsWith("-p") || value.startsWith("-P")
+                    || value.startsWith("-e"))) {
+                throw new IllegalArgumentException("当前入口只允许二进制读取与分析，不能原地写入、加载命令脚本或保存项目。");
+            }
+            if ("radare2".equals(id) && value.startsWith("-c")) {
+                String program = value.length() > 2 ? value.substring(2) : ++i < arguments.size() ? arguments.get(i) : "";
+                if (program.length() == 0 || !program.matches("[A-Za-z0-9 _.,:;?@/+=*\\[\\]()-]+")) throw new IllegalArgumentException("radare2 命令包含不允许的执行或写入语法。");
+                for (String part : program.split(";")) {
+                    String text = part.trim();
+                    String operation = text.split("\\s+")[0];
+                    if (text.length() > 0 && !(operation.matches("a[a-zA-Z?]*") || operation.matches("i[a-zA-Z?]*")
+                            || operation.matches("p[a-zA-Z?]*") || operation.equals("s") || operation.equals("q")
+                            || operation.equals("?") || operation.equals("f") || operation.equals("fj"))) {
+                        throw new IllegalArgumentException("radare2 -c 只允许分析、读取、定位和退出命令。");
+                    }
+                }
+                continue;
+            }
+            int equal = value.indexOf('=');
+            String path = equal >= 0 ? value.substring(equal + 1) : value;
+            if (path.startsWith("/") || path.startsWith("../") || path.contains("/../") || path.endsWith("/..")) {
+                resolve(workDir, absolute(cwd, path).getPath(), temporary);
+            }
+        }
+        boolean probe = arguments.size() == 1 && ("--version".equals(arguments.get(0)) || "--help".equals(arguments.get(0)));
+        if (!probe && ("objcopy".equals(id) || "ar".equals(id) || "strip".equals(id))) {
+            if (!temporaryCommand) throw new IllegalArgumentException("二进制修改须在 temporary=true 的本轮临时目录中完成，再用 toolkit export 交付。");
+            String output = null;
+            if ("objcopy".equals(id)) {
+                List<String> operands = new ArrayList<String>();
+                boolean options = true;
+                String flags = "|--strip-all|--strip-debug|--strip-unneeded|--only-keep-debug|--weaken|--localize-hidden|--preserve-dates|--verbose|-S|-g|-p|-v|";
+                String values = "|--input-target|--output-target|--target|--binary-architecture|--only-section|--remove-section|--strip-symbol|--keep-symbol|--localize-symbol|--weaken-symbol|-I|-O|-F|-B|-j|-R|-N|-K|-L|-W|";
+                for (int i = 0; i < arguments.size(); i++) {
+                    String arg = arguments.get(i);
+                    if (options && "--".equals(arg)) { options = false; continue; }
+                    if (options && arg.startsWith("-")) {
+                        int equal = arg.indexOf('=');
+                        String option = equal < 0 ? arg : arg.substring(0, equal);
+                        if (values.contains("|" + option + "|")) {
+                            if (equal < 0 && ++i >= arguments.size()) throw new IllegalArgumentException("objcopy 选项缺少参数。");
+                        } else if (!(flags.contains("|" + arg + "|") || (arg.length() > 2 && !arg.startsWith("--")
+                                && "IOFBjRNKLW".indexOf(arg.charAt(1)) >= 0))) {
+                            throw new IllegalArgumentException("当前 objcopy 入口不支持该选项，请用标准输入、输出和 section/符号选项：" + arg);
+                        }
+                    } else operands.add(arg);
+                }
+                if (operands.size() != 2) throw new IllegalArgumentException("objcopy 必须明确指定一个输入和一个临时输出，不能原地修改。");
+                output = operands.get(1);
+            } else if ("strip".equals(id)) {
+                for (int i = 0; i < arguments.size(); i++) {
+                    String arg = arguments.get(i);
+                    if ("-o".equals(arg) && ++i < arguments.size()) output = arguments.get(i);
+                    else if (arg.startsWith("--output=")) output = arg.substring(9);
+                }
+                if (output == null) throw new IllegalArgumentException("strip 必须用 -o 指定临时输出文件，不能原地修改项目输入。");
+            } else {
+                if (arguments.size() < 2 || !arguments.get(0).matches("-?[drqtpmxs][a-z]*")
+                        || arguments.get(0).indexOf('a') >= 0 || arguments.get(0).indexOf('b') >= 0
+                        || arguments.get(0).indexOf('i') >= 0) {
+                    throw new IllegalArgumentException("ar 请先给完整操作标志，再给临时归档路径；不支持会改变归档参数位置的 a/b/i 或前置选项。");
+                }
+                output = arguments.get(1);
+                for (int i = 2; i < arguments.size(); i++) {
+                    if (arguments.get(i).startsWith("-")) throw new IllegalArgumentException("ar 成员路径不能夹带额外选项，请把修饰符合并到第一项操作标志。");
+                }
+            }
+            temporaryOutput(temporary.directory().getPath(), new ShellLocation(cwd), output);
+        }
+        if (("objdump".equals(id) || "objcopy".equals(id)) && !probe) {
+            for (String arg : arguments) {
+                if (arg.startsWith("--dump-section") || arg.startsWith("--add-section") || arg.startsWith("--update-section")) {
+                    throw new IllegalArgumentException("当前入口不支持含隐式文件路径的 section 操作，请使用明确的临时副本工作流。");
+                }
+            }
+        }
+        if ("apktool".equals(id) && !arguments.isEmpty()
+                && !(arguments.get(0).equals("--version") || arguments.get(0).equals("--help"))) {
+            String mode = arguments.get(0);
+            if (!"d".equals(mode) && !"decode".equals(mode) && !"b".equals(mode) && !"build".equals(mode)) {
+                throw new IllegalArgumentException("Apktool 仅开放 decode/build，其他操作请使用官方入口。");
+            }
+            boolean output = false;
+            for (int i = 1; i < arguments.size(); i++) {
+                String arg = arguments.get(i), path = null;
+                if (arg.startsWith("--frame-path") || "-p".equals(arg)) {
+                    throw new IllegalArgumentException("Apktool 框架缓存由本轮私有临时目录管理，不接受外部 frame-path。");
+                }
+                if ("-o".equals(arg) || "--output".equals(arg) || "-p".equals(arg) || "--frame-path".equals(arg)) {
+                    if (++i >= arguments.size()) throw new IllegalArgumentException("Apktool 输出选项缺少路径。");
+                    path = arguments.get(i);
+                    if ("-o".equals(arg) || "--output".equals(arg)) output = true;
+                } else if (arg.startsWith("--output=")) { path = arg.substring(9); output = true; }
+                else if (arg.startsWith("--frame-path=")) path = arg.substring(13);
+                if (path != null) {
+                    if (!temporaryCommand) throw new IllegalArgumentException("Apktool 输出须在 temporary=true 的本轮临时目录；交付时再明确写入项目。");
+                    temporaryOutput(temporary.directory().getPath(), new ShellLocation(cwd), path);
+                }
+            }
+            if (!output) throw new IllegalArgumentException("Apktool 必须用 -o 指定本轮临时目录内的输出路径。");
+        }
+    }
+
     /** Check literal output arguments while allowing project paths as command inputs. */
     static void checkTemporaryCommand(String temporaryDir, String command) {
         checkTemporaryCommand(temporaryDir, new ShellLocation(temporaryDir), command);

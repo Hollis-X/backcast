@@ -26,6 +26,8 @@ public class Settings {
     private static final String KEY_OUTPUT_VERBOSITY = "output_verbosity";
     private static final String KEY_REASONING_SUMMARY = "reasoning_summary";
     private static final String KEY_OUTPUT_LANGUAGE = "output_language";
+    private static final String KEY_AGENT_MODE = "agent_mode";
+    private static final String KEY_AGENT_CONCURRENCY = "agent_concurrency";
 
     /**
      * 权限级别。决定工具调用要不要人工放行。
@@ -53,6 +55,12 @@ public class Settings {
     public static final String EFFORT_LOW = "low";
     public static final String EFFORT_MEDIUM = "medium";
     public static final String EFFORT_HIGH = "high";
+    public static final String EFFORT_MAX = "max";
+
+    public static final String AGENT_OFF = "off";
+    public static final String AGENT_MANUAL = "manual";
+    public static final String AGENT_ULTRA = "ultra";
+    public static final int DEFAULT_AGENT_CONCURRENCY = 3;
 
     public static final String DEFAULT_REASONING_EFFORT = EFFORT_LOW;
 
@@ -314,6 +322,11 @@ public class Settings {
 
     /** 预览用：勾选还没保存时，按界面上的 root 开关现拼。 */
     public String environmentContext(boolean root) {
+        return environmentContext(root, agentMode(), agentConcurrency());
+    }
+
+    /** Unsaved settings preview shares the same mode rules as a real request. */
+    public String environmentContext(boolean root, String mode, int concurrency) {
         StringBuilder sb = new StringBuilder();
         sb.append("- 设备：Android ").append(android.os.Build.VERSION.RELEASE).append('\n');
         sb.append("- 工作目录：").append(workDir()).append('\n');
@@ -347,8 +360,70 @@ public class Settings {
                 + "正式测试长期保留，归类到项目已有测试目录或 tests/；"
                 + "一次性验证脚本不是正式测试，禁止为逃避清理把临时材料标成 test 或 deliverable。"
                 + "不按文件名猜测删除用户文件，只清理本轮明确创建并登记的临时材料。"
-                + "可用工具以本轮 tools 列表为准，不沿用历史里的工具清单。");
+                + "可用工具以本轮 tools 列表为准，不沿用历史里的工具清单。\n");
+        sb.append("- 逆向工具目录：toolkit list 查看官方来源、依赖和已有绑定；toolkit status 实际探测工具。"
+                + "仅目录存在或 configured_not_probed 不能宣称可运行，只有真实 probe 成功才可报告 ready。"
+                + "toolkit install 只安装固定官方来源并校验摘要；toolkit configure 绑定已有的绝对可执行路径，"
+                + "Apktool JAR 还需真实设备 JVM，Objection/Frida 与 binutils 也需匹配设备的运行时和依赖。"
+                + "toolkit run 使用 arguments 字符串数组，不拼接 shell 语法；项目输入使用绝对路径。"
+                + "临时输出在本轮 App 私有目录，必须在轮末清理前用 toolkit export 将需要保留的结果导出到项目内，"
+                + "purpose=deliverable 或 test；正式测试归类到已有测试目录或 tests/，不要依靠临时目录长期保留交付物。");
+        sb.append("\n\n").append(agentInstructions(mode, concurrency));
         return sb.toString();
+    }
+
+    private static String normalizeAgentMode(String mode) {
+        if (AGENT_OFF.equals(mode) || AGENT_ULTRA.equals(mode)) return mode;
+        return AGENT_MANUAL;
+    }
+
+    private static int normalizeAgentConcurrency(int concurrency) {
+        return concurrency >= 1 && concurrency <= 4 ? concurrency : DEFAULT_AGENT_CONCURRENCY;
+    }
+
+    public String agentMode() {
+        return normalizeAgentMode(prefs.getString(KEY_AGENT_MODE, AGENT_MANUAL));
+    }
+
+    public void setAgentMode(String mode) {
+        prefs.edit().putString(KEY_AGENT_MODE, normalizeAgentMode(mode)).apply();
+    }
+
+    public int agentConcurrency() {
+        try {
+            return normalizeAgentConcurrency(Integer.parseInt(prefs.getString(KEY_AGENT_CONCURRENCY, "3")));
+        } catch (RuntimeException invalid) {
+            return DEFAULT_AGENT_CONCURRENCY;
+        }
+    }
+
+    public void setAgentConcurrency(int concurrency) {
+        prefs.edit().putString(KEY_AGENT_CONCURRENCY,
+                Integer.toString(normalizeAgentConcurrency(concurrency))).apply();
+    }
+
+    private static String agentInstructions(String rawMode, int rawConcurrency) {
+        String mode = normalizeAgentMode(rawMode);
+        int concurrency = normalizeAgentConcurrency(rawConcurrency);
+        if (AGENT_OFF.equals(mode)) {
+            return "Subagent mode: off. Coordination tools are disabled. Complete the task in the parent agent; "
+                    + "do not invent or call subagent tools from earlier history.";
+        }
+        String policy = "Subagent mode: " + mode + ". At most " + concurrency
+                + " child agents may run concurrently. Use only coordination tools registered for this request. "
+                + "Reuse an existing child when its task and context remain suitable. Give each child a concrete, "
+                + "independent task and explicit file ownership; avoid concurrent edits to the same files. "
+                + "The parent must collect the children's evidence, review and verify their results, "
+                + "and take responsibility for the final answer and goal status. "
+                + "Do not mark the goal complete while required child work or review remains unfinished. ";
+        if (AGENT_ULTRA.equals(mode)) {
+            return policy + "Proactively identify independent subtasks and delegate them in parallel when doing so "
+                    + "improves quality or saves time. Decide whether tasks are independent before spawning. "
+                    + "A simple question or indivisible task does not require a child. Reasoning effort for "
+                    + "this mode is max; ultra is a coordination mode, never an API reasoning_effort value.";
+        }
+        return policy + "Delegate when the task needs a child and the model judges it useful. "
+                + "This mode permits delegation without forcing it for every request.";
     }
 
     /** 每轮真正发给模型的：静态指令 + 现拼的环境事实。 */
@@ -387,8 +462,19 @@ public class Settings {
 
     /** 思考强度；未设置时返回默认值。 */
     public String reasoningEffort() {
-        String s = prefs.getString(KEY_REASONING_EFFORT, "");
-        return s == null || s.length() == 0 ? DEFAULT_REASONING_EFFORT : s;
+        return normalizeReasoningEffort(prefs.getString(KEY_REASONING_EFFORT, ""));
+    }
+
+    private static String normalizeReasoningEffort(String effort) {
+        String value = effort == null ? "" : effort.trim();
+        if (EFFORT_OFF.equals(value) || EFFORT_LOW.equals(value) || EFFORT_MEDIUM.equals(value)
+                || EFFORT_HIGH.equals(value) || EFFORT_MAX.equals(value)) return value;
+        return DEFAULT_REASONING_EFFORT;
+    }
+
+    /** Ultra changes the request value, preserving the user's choice for other modes. */
+    public String effectiveReasoningEffort() {
+        return AGENT_ULTRA.equals(agentMode()) ? EFFORT_MAX : reasoningEffort();
     }
 
     /** 压缩触发比例，默认与 Codex 一致（到窗口九成开始压）。 */
@@ -446,12 +532,10 @@ public class Settings {
 
     /** off 表示请求里不带 reasoning_effort 参数。 */
     public boolean reasoningEnabled() {
-        return !EFFORT_OFF.equals(reasoningEffort());
+        return !EFFORT_OFF.equals(effectiveReasoningEffort());
     }
 
     public void setReasoningEffort(String effort) {
-        String v = effort == null ? "" : effort.trim();
-        prefs.edit().putString(KEY_REASONING_EFFORT,
-                v.length() == 0 ? DEFAULT_REASONING_EFFORT : v).apply();
+        prefs.edit().putString(KEY_REASONING_EFFORT, normalizeReasoningEffort(effort)).apply();
     }
 }
