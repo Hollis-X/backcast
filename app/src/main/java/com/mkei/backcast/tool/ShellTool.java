@@ -131,7 +131,7 @@ public class ShellTool implements Tool {
             return "错误：command 为空。";
         }
 
-        try { ToolPaths.checkCommand(workDir, command, temporary); }
+        try { ToolPaths.checkCommand(workDir, command, temporary, args.optBoolean("temporary", false)); }
         catch (IllegalArgumentException error) { return "错误：" + error.getMessage(); }
         int timeoutSec = args.optInt("timeout_sec", DEFAULT_TIMEOUT_SEC);
         if (timeoutSec < 1) {

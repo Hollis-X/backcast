@@ -24,8 +24,11 @@ public class GoalTool implements Tool {
     @Override
     public String description() {
         return "更新当前目标的状态。只有用户设了目标时才能用。"
-                + "status 只能是 complete、blocked 或 paused。"
+                + "status 只能是 complete、blocked、paused 或 invalid。"
+                + "先判定目标是否含可执行要求。仅问候、闲聊或没有任何任务时，立即用 invalid 并说明原因，"
+                + "不适用三轮阻塞审计，不检查目录寻找无关任务。实际任务因权限、依赖或细节不确定而暂时受阻不能用 invalid。"
                 + "只有整个目标确实达成、每条要求均有当前证据且没有剩余必需工作时，才用 complete。"
+                + "直接问答的答案可作为完成证据，无需调用 shell 或读取文件来核验简单常识、算术或问答。"
                 + "只有同一阻塞条件连续至少三轮重复出现（含用户发起轮和自动续跑轮），"
                 + "且没有用户输入或外部状态变化就无法取得实质进展时，才用 blocked；reason 写明阻塞。"
                 + "用户恢复 blocked 目标后重新开始三轮阻塞审计。工作难、慢、不确定、未完成或希望澄清，"
@@ -39,13 +42,14 @@ public class GoalTool implements Tool {
         try {
             JSONObject status = new JSONObject();
             status.put("type", "string");
-            status.put("enum", new JSONArray().put("complete").put("blocked").put("paused"));
+            status.put("enum", new JSONArray().put("complete").put("blocked").put("paused").put("invalid"));
             status.put("description", "complete 仅在目标全部完成且已验证时使用；blocked 要求同一阻塞连续至少三轮；"
-                    + "paused 必须有用户明确的暂停要求");
+                    + "paused 必须有用户明确的暂停要求；invalid 仅用于没有任何可执行要求的目标，首次确认立即停止");
 
             JSONObject reason = new JSONObject();
             reason.put("type", "string");
-            reason.put("description", "blocked 时必填：连续至少三轮重复出现的阻塞条件及为何无法继续取得实质进展");
+            reason.put("description", "blocked 或 invalid 时必填：blocked 说明连续三轮的真实阻塞；"
+                    + "invalid 说明目标为何没有任何可执行要求，不以实际任务困难或缺细节为由");
 
             JSONObject props = new JSONObject();
             props.put("status", status);

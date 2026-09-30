@@ -7,8 +7,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.StringReader;
-import java.io.StreamTokenizer;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
@@ -138,53 +136,79 @@ final class ToolPaths {
     }
 
     static void checkCommand(String workDir, String command, TemporaryWorkspace temporary) {
+        checkCommand(workDir, command, temporary, false);
+    }
+
+    static void checkCommand(String workDir, String command, TemporaryWorkspace temporary, boolean temporaryCommand) {
         if (command == null || command.indexOf('\0') >= 0) {
             throw new IllegalArgumentException("命令不合法。");
         }
         try {
-            scanCommand(workDir, command, temporary);
-        } catch (IOException error) {
+            String cwd = temporaryCommand && temporary != null ? temporary.directory().getPath() : workDir;
+            scanCommand(workDir, new ShellLocation(cwd), shellWords(command), temporary, temporaryCommand);
+        } catch (IllegalArgumentException error) {
+            throw error;
+        } catch (Exception error) {
             throw new IllegalArgumentException("命令无法解析：" + command);
         }
     }
 
     /** Check literal output arguments while allowing project paths as command inputs. */
     static void checkTemporaryCommand(String temporaryDir, String command) {
-        try {
-            StreamTokenizer words = new StreamTokenizer(new StringReader(command));
-            words.resetSyntax();
-            words.wordChars(33, 65535);
-            words.whitespaceChars(0, 32);
-            words.quoteChar('\''); words.quoteChar('"');
-            for (char separator : "|;&()<>`".toCharArray()) words.ordinaryChar(separator);
-            words.eolIsSignificant(true);
-            List<String> arguments = new ArrayList<String>();
-            int type;
-            while ((type = words.nextToken()) != StreamTokenizer.TT_EOF) {
-                if (type == '|' || type == ';' || type == '&' || type == '(' || type == ')'
-                        || type == StreamTokenizer.TT_EOL) {
-                    checkTemporaryArguments(temporaryDir, arguments);
-                    arguments.clear();
-                } else if (words.sval != null) arguments.add(words.sval);
-            }
-            checkTemporaryArguments(temporaryDir, arguments);
-        } catch (IOException error) {
-            throw new IllegalArgumentException("无法确认临时命令的输出路径。");
-        }
+        checkTemporaryCommand(temporaryDir, new ShellLocation(temporaryDir), command);
     }
 
-    private static void checkTemporaryArguments(String temporaryDir, List<String> arguments) {
+    private static void checkTemporaryCommand(String temporaryDir, ShellLocation initial, String command) {
+        List<ShellWord> words = shellWords(command);
+        List<String> arguments = new ArrayList<String>();
+        List<ShellLocation> parents = new ArrayList<ShellLocation>();
+        ShellLocation location = new ShellLocation(initial);
+        for (int i = 0; i < words.size(); i++) {
+            ShellWord word = words.get(i);
+            for (String sub : word.substitutions) checkTemporaryCommand(temporaryDir, location, sub);
+            if (word.syntax && redirect(word.text)) {
+                if (++i >= words.size() || words.get(i).syntax) throw new IllegalArgumentException("重定向缺少目标。");
+                for (String sub : words.get(i).substitutions) checkTemporaryCommand(temporaryDir, location, sub);
+                String target = words.get(i).text;
+                if (!descriptorRedirect(word.text) && word.text.indexOf('>') >= 0 && !"/dev/null".equals(target)) {
+                    temporaryOutput(temporaryDir, location, target);
+                }
+            } else if (word.syntax) {
+                checkTemporaryArguments(temporaryDir, location, arguments);
+                arguments.clear();
+                if ("(".equals(word.text)) parents.add(new ShellLocation(location));
+                if (")".equals(word.text) && !parents.isEmpty()) location = parents.remove(parents.size() - 1);
+            } else if (!allDigits(word.text) || i + 1 >= words.size() || !redirect(words.get(i + 1).text)) {
+                arguments.add(word.text);
+            }
+        }
+        checkTemporaryArguments(temporaryDir, location, arguments);
+    }
+
+    private static void checkTemporaryArguments(String temporaryDir, ShellLocation location, List<String> arguments) {
         if (arguments.isEmpty()) return;
-        String tool = new File(arguments.get(0)).getName();
+        int start = 0;
+        while (start < arguments.size() && arguments.get(start).matches("[A-Za-z_][A-Za-z0-9_]*=.*")) start++;
+        if (start == arguments.size()) return;
+        String tool = new File(arguments.get(start++)).getName();
+        if ("cd".equals(tool)) {
+            if (arguments.size() - start != 1 || arguments.get(start).indexOf('$') >= 0) {
+                throw new IllegalArgumentException("cd 必须给出明确路径。");
+            }
+            location.changeTo(arguments.get(start));
+            return;
+        }
         boolean each = "touch".equals(tool) || "mkdir".equals(tool) || "mkfifo".equals(tool)
-                || "truncate".equals(tool) || "rm".equals(tool) || "rmdir".equals(tool) || "cd".equals(tool);
+                || "truncate".equals(tool) || "rm".equals(tool) || "rmdir".equals(tool);
         boolean destination = "cp".equals(tool) || "mv".equals(tool) || "ln".equals(tool) || "install".equals(tool);
         boolean compiler = "cc".equals(tool) || "gcc".equals(tool) || "g++".equals(tool)
                 || "clang".equals(tool) || "clang++".equals(tool) || "c++".equals(tool);
         String last = null;
         boolean targetDirectory = false;
+        boolean outputSpecified = false, compileReadOnly = false;
+        List<String> javaSources = new ArrayList<String>();
         boolean positionalOnly = false;
-        for (int i = 1; i < arguments.size(); i++) {
+        for (int i = start; i < arguments.size(); i++) {
             String value = arguments.get(i);
             if ("--".equals(value) && !positionalOnly) { positionalOnly = true; continue; }
             if (!positionalOnly && value.startsWith("-")) {
@@ -194,13 +218,17 @@ final class ToolPaths {
                         || ("tar".equals(tool) && "-C".equals(value));
                 if (output) {
                     if (++i >= arguments.size()) throw new IllegalArgumentException("临时输出选项缺少路径。");
-                    temporaryOutput(temporaryDir, arguments.get(i));
+                    temporaryOutput(temporaryDir, location, arguments.get(i));
+                    outputSpecified = true;
                     if (destination) targetDirectory = true;
                 } else if (destination && value.startsWith("--target-directory=")) {
-                    temporaryOutput(temporaryDir, value.substring(value.indexOf('=') + 1));
+                    temporaryOutput(temporaryDir, location, value.substring(value.indexOf('=') + 1));
                     targetDirectory = true;
                 } else if (compiler && value.startsWith("-o") && value.length() > 2) {
-                    temporaryOutput(temporaryDir, value.substring(2));
+                    temporaryOutput(temporaryDir, location, value.substring(2));
+                    outputSpecified = true;
+                } else if (compiler && ("-E".equals(value) || "-fsyntax-only".equals(value))) {
+                    compileReadOnly = true;
                 } else if (("mkdir".equals(tool) || "mkfifo".equals(tool) || "install".equals(tool))
                         && ("-m".equals(value) || "--mode".equals(value))) {
                     i++;
@@ -213,79 +241,250 @@ final class ToolPaths {
                 continue;
             }
             last = value;
-            if (each) temporaryOutput(temporaryDir, value);
+            if ("javac".equals(tool) && value.endsWith(".java")) javaSources.add(value);
+            if (each) temporaryOutput(temporaryDir, location, value);
         }
-        if (destination && !targetDirectory && last != null) temporaryOutput(temporaryDir, last);
+        if (destination && !targetDirectory && last != null) temporaryOutput(temporaryDir, location, last);
+        if (compiler && !outputSpecified && !compileReadOnly) temporaryOutput(temporaryDir, location, "a.out");
+        if ("javac".equals(tool) && !outputSpecified) {
+            for (String source : javaSources) temporaryOutput(temporaryDir, location, source.substring(0, source.length() - 5) + ".class");
+        }
     }
 
-    private static void temporaryOutput(String temporaryDir, String path) {
+    private static void temporaryOutput(String temporaryDir, ShellLocation location, String path) {
         String expanded = path.replace("${TMPDIR}", temporaryDir).replace("$TMPDIR", temporaryDir);
         if (expanded.indexOf('$') >= 0 || expanded.indexOf('`') >= 0) {
             throw new IllegalArgumentException("临时输出请使用 temporary 返回的明确路径，不能使用未知变量。");
         }
-        try { resolve(temporaryDir, expanded); }
+        try {
+            for (String cwd : location.directories) {
+                File output = resolve(temporaryDir, absolute(cwd, expanded).getPath());
+                if (".backcast-owner".equals(output.getName())) throw new IllegalArgumentException("不能修改临时目录所有权标记。");
+            }
+        }
         catch (IllegalArgumentException outside) {
             throw new IllegalArgumentException("临时命令只能写入专用临时目录：" + path
                     + "。请把输出放在 " + temporaryDir + "，正式测试或交付物请明确分类。");
         }
     }
 
-    private static void scanCommand(String workDir, String command, TemporaryWorkspace temporary) throws IOException {
-        StreamTokenizer words = new StreamTokenizer(new StringReader(command));
-        words.resetSyntax();
-        words.wordChars(33, 65535);
-        words.whitespaceChars(0, 32);
-        words.quoteChar('\''); words.quoteChar('"');
-        for (char separator : "|;&()<>`".toCharArray()) words.ordinaryChar(separator);
-        words.eolIsSignificant(true);
-        boolean executable = true, changeDir = false, writeRedirect = false, readRedirect = false;
-        String tool = "";
-        int type;
-        while ((type = words.nextToken()) != StreamTokenizer.TT_EOF) {
-            if (type == '`') {
-                throw new IllegalArgumentException("无法确认命令替换里的路径，请直接给出工作目录内的路径。");
-            }
-            if (type == '<') { readRedirect = true; continue; }
-            if (type == '>') { writeRedirect = true; continue; }
-            if (type == '|' || type == ';' || type == '&' || type == '(' || type == ')'
-                    || type == StreamTokenizer.TT_EOL) {
-                executable = true; changeDir = false; writeRedirect = false; readRedirect = false;
-                continue;
-            }
-            if (words.sval == null) continue;
-            String value = words.sval;
-            if (readRedirect || writeRedirect) {
-                if (writeRedirect && !value.startsWith("/dev/")) {
-                    throw new IllegalArgumentException("不要用 shell 重定向写文件，"
-                            + "请使用 write 或 edit，并把文件留在工作目录内。");
+    private static void scanCommand(String workDir, ShellLocation initial, List<ShellWord> words,
+            TemporaryWorkspace temporary, boolean temporaryCommand) {
+        List<String> arguments = new ArrayList<String>();
+        List<ShellLocation> parents = new ArrayList<ShellLocation>();
+        ShellLocation location = new ShellLocation(initial);
+        for (int i = 0; i < words.size(); i++) {
+            ShellWord word = words.get(i);
+            for (String sub : word.substitutions) scanCommand(workDir, location, shellWords(sub), temporary, temporaryCommand);
+            if (word.syntax && redirect(word.text)) {
+                if (++i >= words.size() || words.get(i).syntax) throw new IllegalArgumentException("重定向缺少目标。");
+                for (String sub : words.get(i).substitutions) scanCommand(workDir, location, shellWords(sub), temporary, temporaryCommand);
+                String target = words.get(i).text;
+                if (descriptorRedirect(word.text)) {
+                    if (!allDigits(target) && !"-".equals(target)) throw new IllegalArgumentException("文件描述符复制必须指定数字或 -。");
+                } else if (!"/dev/null".equals(target)) {
+                    boolean writing = word.text.indexOf('>') >= 0;
+                    if (writing && !temporaryCommand) throw new IllegalArgumentException("不要用 shell 重定向写项目文件，请使用 write 或 edit；临时输出请用 temporary=true。");
+                    if (target.indexOf('$') < 0) {
+                        for (String cwd : location.directories) resolve(workDir, absolute(cwd, target).getPath(), temporary);
+                    }
                 }
-                if (value.startsWith("/")) resolve(workDir, value, temporary);
-                readRedirect = false; writeRedirect = false;
-                continue;
-            }
-            if (executable) {
-                // 2>/dev/null 这类文件描述符前缀不是命令名。
-                if (allDigits(value)) continue;
-                tool = new File(value).getName();
-                if ("tee".equals(tool)) {
-                    throw new IllegalArgumentException("写文件请使用 write 或 edit，不要使用 tee。");
-                }
-                changeDir = "cd".equals(tool);
-                executable = false;
-                continue;
-            }
-            if ("sed".equals(tool) && (value.startsWith("-i") || value.startsWith("--in-place"))) {
-                throw new IllegalArgumentException("改文件请使用 edit，不要用 sed 原地改写。");
-            }
-            int equal = value.indexOf('=');
-            String path = equal >= 0 ? value.substring(equal + 1) : value;
-            if (path.startsWith("/") || path.equals("..") || path.startsWith("../")) {
-                resolve(workDir, path, temporary);
+            } else if (word.syntax) {
+                checkArguments(workDir, location, arguments, temporary);
+                arguments.clear();
+                if ("(".equals(word.text)) parents.add(new ShellLocation(location));
+                if (")".equals(word.text) && !parents.isEmpty()) location = parents.remove(parents.size() - 1);
+            } else if (!allDigits(word.text) || i + 1 >= words.size() || !redirect(words.get(i + 1).text)) {
+                arguments.add(word.text);
             }
         }
-        if (changeDir) {
-            throw new IllegalArgumentException("cd 必须给出工作目录内的明确路径。");
+        checkArguments(workDir, location, arguments, temporary);
+    }
+
+    private static void checkArguments(String workDir, ShellLocation location, List<String> arguments, TemporaryWorkspace temporary) {
+        if (arguments.isEmpty()) return;
+        int start = 0;
+        while (start < arguments.size() && arguments.get(start).matches("[A-Za-z_][A-Za-z0-9_]*=.*")) {
+            checkPath(workDir, location, arguments.get(start++), temporary);
         }
+        if (start == arguments.size()) return;
+        String executable = arguments.get(start++);
+        checkPath(workDir, location, executable, temporary);
+        String tool = new File(executable).getName();
+        if ("tee".equals(tool)) throw new IllegalArgumentException("写文件请使用 write 或 edit，不要使用 tee。");
+        if ("cd".equals(tool)) {
+            if (arguments.size() - start != 1 || arguments.get(start).indexOf('$') >= 0) {
+                throw new IllegalArgumentException("cd 必须给出工作目录内的明确路径。");
+            }
+            for (String cwd : location.directories) resolve(workDir, absolute(cwd, arguments.get(start)).getPath(), temporary);
+            location.changeTo(arguments.get(start));
+            return;
+        }
+        boolean grep = "grep".equals(tool) || "egrep".equals(tool) || "fgrep".equals(tool);
+        boolean sed = "sed".equals(tool);
+        boolean awk = "awk".equals(tool) || "gawk".equals(tool) || "mawk".equals(tool) || "nawk".equals(tool);
+        boolean expression = false, literalNext = false, pathNext = false, options = true;
+        for (int i = start; i < arguments.size(); i++) {
+            String value = arguments.get(i);
+            if (literalNext) { literalNext = false; continue; }
+            if (pathNext) { checkPath(workDir, location, value, temporary); pathNext = false; continue; }
+            if (options && "--".equals(value)) { options = false; continue; }
+            if (options && value.startsWith("-")) {
+                int operand = shortArgumentIndex(value, grep ? "efABCm" : sed ? "ef" : awk ? "efFv" : "");
+                if (sed && (value.startsWith("--in-place") || (!value.startsWith("--")
+                        && value.substring(1, operand < 0 ? value.length() : operand).indexOf('i') >= 0))) {
+                    throw new IllegalArgumentException("改文件请使用 edit，不要用 sed 原地改写。");
+                }
+                if (operand > 0) {
+                    char flag = value.charAt(operand);
+                    String attached = value.substring(operand + 1);
+                    if (flag == 'e' || flag == 'f') expression = true;
+                    if (flag == 'f') {
+                        if (attached.length() == 0) pathNext = true;
+                        else checkPath(workDir, location, attached, temporary);
+                    } else if (attached.length() == 0) {
+                        literalNext = true;
+                    }
+                } else if (((grep || sed) && ("--regexp".equals(value) || "--expression".equals(value)))
+                        || (awk && "--source".equals(value))) {
+                    expression = true; literalNext = true;
+                } else if ((grep || sed || awk) && "--file".equals(value)) {
+                    expression = true; pathNext = true;
+                } else if (grep && ("--after-context".equals(value)
+                            || "--before-context".equals(value) || "--context".equals(value)
+                            || "--max-count".equals(value))) {
+                    literalNext = true;
+                } else if (((grep || sed) && (value.startsWith("--regexp=") || value.startsWith("--expression=")))
+                        || (awk && value.startsWith("--source="))) {
+                    expression = true;
+                } else if ((grep || sed || awk) && value.startsWith("--file=")) {
+                    expression = true; checkPath(workDir, location, value, temporary);
+                } else {
+                    checkPath(workDir, location, value, temporary);
+                }
+                continue;
+            }
+            if ((grep || sed || awk) && !expression) { expression = true; continue; }
+            if (!"echo".equals(tool) && !"printf".equals(tool)) checkPath(workDir, location, value, temporary);
+        }
+    }
+
+    private static int shortArgumentIndex(String option, String argumentFlags) {
+        if (option.startsWith("--")) return -1;
+        for (int i = 1; i < option.length(); i++) {
+            if (argumentFlags.indexOf(option.charAt(i)) >= 0) return i;
+        }
+        return -1;
+    }
+
+    private static void checkPath(String workDir, ShellLocation location, String value, TemporaryWorkspace temporary) {
+        int equal = value.indexOf('=');
+        String path = equal >= 0 ? value.substring(equal + 1) : value;
+        if ("/dev/null".equals(path)) return;
+        if (path.startsWith("/") || path.equals("..") || path.startsWith("../")
+                || path.contains("/../") || path.endsWith("/..")) {
+            for (String cwd : location.directories) resolve(workDir, absolute(cwd, path).getPath(), temporary);
+        }
+    }
+
+    // cd may fail, so later relative paths must be valid from every possible directory.
+    private static final class ShellLocation {
+        final List<String> directories = new ArrayList<String>();
+        ShellLocation(String cwd) { directories.add(cwd); }
+        ShellLocation(ShellLocation other) { directories.addAll(other.directories); }
+        void changeTo(String path) {
+            List<String> before = new ArrayList<String>(directories);
+            for (String cwd : before) {
+                String target = absolute(cwd, path).getPath();
+                if (!directories.contains(target)) directories.add(target);
+                if (directories.size() > 128) {
+                    throw new IllegalArgumentException("多次相对 cd 的执行目录无法确认，请拆分命令并使用明确的绝对路径。");
+                }
+            }
+        }
+    }
+
+    private static File absolute(String cwd, String path) {
+        File target = new File(path);
+        if (!target.isAbsolute() && cwd != null) target = new File(cwd, path);
+        try { return target.getCanonicalFile(); }
+        catch (IOException error) { throw new IllegalArgumentException("无法确认路径：" + path, error); }
+    }
+
+    private static boolean redirect(String value) { return value.startsWith("<") || value.startsWith(">"); }
+    private static boolean descriptorRedirect(String value) { return "<&".equals(value) || ">&".equals(value); }
+
+    private static final class ShellWord {
+        final String text;
+        final boolean syntax;
+        final List<String> substitutions;
+        ShellWord(String text, boolean syntax) { this(text, syntax, new ArrayList<String>()); }
+        ShellWord(String text, boolean syntax, List<String> substitutions) {
+            this.text = text; this.syntax = syntax; this.substitutions = new ArrayList<String>(substitutions);
+        }
+    }
+
+    /** Preserve complete quoted arguments, including newlines and adjacent quote segments. */
+    private static List<ShellWord> shellWords(String command) {
+        List<ShellWord> words = new ArrayList<ShellWord>();
+        StringBuilder word = new StringBuilder();
+        List<String> substitutions = new ArrayList<String>();
+        boolean started = false;
+        char quote = 0;
+        for (int i = 0; i < command.length(); i++) {
+            char c = command.charAt(i);
+            if (c == '\\' && quote != '\'' && i + 1 < command.length()) {
+                char next = command.charAt(++i);
+                if (next != '\n') {
+                    if (quote == '"' && "\\\"$`".indexOf(next) < 0) word.append('\\');
+                    word.append(next); started = true;
+                }
+            } else if (quote != '\'' && c == '$' && i + 1 < command.length() && command.charAt(i + 1) == '(') {
+                int end = substitutionEnd(command, i + 1);
+                if (i + 2 < command.length() && command.charAt(i + 2) != '(') substitutions.add(command.substring(i + 2, end));
+                word.append(command.substring(i, end + 1)); started = true; i = end;
+            } else if (quote != '\'' && c == '`') {
+                throw new IllegalArgumentException("无法确认反引号命令替换里的路径，请使用明确路径或临时脚本。");
+            } else if (quote != 0) {
+                if (c == quote) quote = 0; else word.append(c);
+            } else if (c == '\'' || c == '"') {
+                quote = c; started = true;
+            } else if (Character.isWhitespace(c) || "|;&()<>".indexOf(c) >= 0) {
+                if (started) { words.add(new ShellWord(word.toString(), false, substitutions)); word.setLength(0); substitutions.clear(); started = false; }
+                if (Character.isWhitespace(c) && c != '\n') continue;
+                String op = String.valueOf(c);
+                if (i + 1 < command.length()) {
+                    char next = command.charAt(i + 1);
+                    if ((c == '<' || c == '>') && next == '(') throw new IllegalArgumentException("设备使用 sh，不支持 <(...) 或 >(...)；请用 App 私有临时文件或管道。");
+                    if (next == c || ((c == '<' || c == '>') && (next == '&' || next == '|'))
+                            || (c == '<' && next == '>')) { op += next; i++; }
+                }
+                if ("<<".equals(op)) throw new IllegalArgumentException("多行临时脚本请用 write(purpose=temporary)，再用 shell 执行。");
+                words.add(new ShellWord(op, true));
+            } else if (c == '#' && !started) {
+                while (i < command.length() && command.charAt(i) != '\n') i++;
+                words.add(new ShellWord("\n", true));
+            } else {
+                word.append(c); started = true;
+            }
+        }
+        if (quote != 0) throw new IllegalArgumentException("命令引号没有闭合。");
+        if (started) words.add(new ShellWord(word.toString(), false, substitutions));
+        return words;
+    }
+
+    private static int substitutionEnd(String command, int begin) {
+        int depth = 0;
+        char quote = 0;
+        for (int i = begin; i < command.length(); i++) {
+            char c = command.charAt(i);
+            if (c == '\\' && quote != '\'') { i++; continue; }
+            if (quote != 0) { if (c == quote) quote = 0; continue; }
+            if (c == '\'' || c == '"') { quote = c; continue; }
+            if (c == '(') depth++;
+            if (c == ')' && --depth == 0) return i;
+        }
+        throw new IllegalArgumentException("命令替换括号没有闭合。");
     }
 
     private static boolean allDigits(String value) {

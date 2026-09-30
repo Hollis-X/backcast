@@ -8,6 +8,7 @@ import com.mkei.backcast.agent.ToolRegistry;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.MethodTree;
+import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.VariableTree;
 import com.sun.source.util.JavacTask;
@@ -115,6 +116,13 @@ public final class TurnUiRegressionTest {
                     }
                     new TreeScanner<Void, Void>() {
                         @Override
+                        public Void visitMethodInvocation(MethodInvocationTree node, Void unused) {
+                            if (node.getMethodSelect().toString().equals("scroll.setOnTouchStartListener")) {
+                                METHODS.put("transcriptTouchStart", node.getArguments().get(0).toString());
+                            }
+                            return super.visitMethodInvocation(node, unused);
+                        }
+                        @Override
                         public Void visitMethod(MethodTree node, Void unused) {
                             String name = node.getName().toString();
                             if (!METHODS.containsKey(name)) {
@@ -140,19 +148,23 @@ public final class TurnUiRegressionTest {
                 + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt; int turnUiToken=-1;"
                 + "interface ViewParent {}"
                 + "static class View implements ViewParent { static final int VISIBLE=0,GONE=8;"
-                + "ViewGroup parent; Object tag; CharSequence description; int visibility,top,height=10; boolean enabled=true,focused; float alpha=1f,translationY;"
+                + "ViewGroup parent; Object tag; CharSequence description; int visibility,top,height=10; boolean enabled=true,focused; float alpha=1f,translationY; Animator animator;"
                 + "ViewParent getParent(){return parent;} Object getTag(){return tag;} void setTag(Object t){tag=t;}"
                 + "CharSequence getContentDescription(){return description;} void setContentDescription(CharSequence d){description=d;}"
                 + "void setVisibility(int v){visibility=v;} int getVisibility(){return visibility;}"
                 + "void setEnabled(boolean v){enabled=v;} int getTop(){return top;} int getBottom(){return top+getHeight();} int getHeight(){return height;}"
-                + "Object getWindowToken(){return this;} void clearFocus(){focused=false;} void requestFocus(){focused=true;} void setPadding(int a,int b,int c,int d){}"
-                + "void setAlpha(float v){alpha=v;} void setTranslationY(float v){translationY=v;} Animator animate(){return new Animator(this);}"
+                + "Object getWindowToken(){return this;} Object getLayoutParams(){return new ViewGroup.MarginLayoutParams();}"
+                + "void clearFocus(){focused=false;} void requestFocus(){focused=true;} void setPadding(int a,int b,int c,int d){}"
+                + "void setAlpha(float v){alpha=v;} void setTranslationY(float v){translationY=v;} Animator animate(){if(animator==null)animator=new Animator(this);return animator;}"
                 + "void post(Runnable r){posted.add(r);} void postOnAnimation(Runnable r){posted.add(r);} }"
-                + "static class Animator { View view; long duration; Animator(View v){view=v;} void cancel(){}"
+                + "static class AnimatorListenerAdapter { public void onAnimationEnd(Animator animation){} }"
+                + "static class Animator { View view; long duration; AnimatorListenerAdapter listener; Animator(View v){view=v;} void cancel(){}"
                 + "Animator translationY(float v){view.translationY=v;return this;} Animator alpha(float v){view.alpha=v;return this;}"
-                + "Animator setDuration(long v){duration=v;lastAnimationDuration=v;return this;} Animator setInterpolator(Object v){return this;} void start(){} }"
-                + "static class DecelerateInterpolator {} static long lastAnimationDuration;"
+                + "Animator setDuration(long v){duration=v;lastAnimationDuration=v;return this;} Animator setInterpolator(Object v){return this;}"
+                + "Animator setListener(AnimatorListenerAdapter l){listener=l;return this;} void start(){lastAnimationStarts++;} void finish(){if(listener!=null)listener.onAnimationEnd(this);} }"
+                + "static class DecelerateInterpolator {} static long lastAnimationDuration; static int lastAnimationStarts;"
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
+                + "static class MarginLayoutParams { int bottomMargin; }"
                 + "int getChildCount(){return children.size();} View getChildAt(int i){return children.get(i);}"
                 + "void addView(View v,Object p){children.add(v);v.parent=this;}"
                 + "void addView(View v){addView(v,null);}"
@@ -171,9 +183,12 @@ public final class TurnUiRegressionTest {
                 + "List<OnPreDrawListener> listeners=new ArrayList<OnPreDrawListener>();"
                 + "void addOnPreDrawListener(OnPreDrawListener l){listeners.add(l);} void removeOnPreDrawListener(OnPreDrawListener l){listeners.remove(l);}"
                 + "void fire(){for(OnPreDrawListener l:new ArrayList<OnPreDrawListener>(listeners))l.onPreDraw();} }"
-                + "static class ScrollView extends ViewGroup { int y,paddingBottom=20,calls; ViewTreeObserver observer=new ViewTreeObserver();"
+                + "static class ScrollView extends ViewGroup { int y,paddingBottom=20,calls,stops; boolean flinging; ViewTreeObserver observer=new ViewTreeObserver();"
                 + "int getScrollY(){return y;} int getPaddingBottom(){return paddingBottom;} int getHeight(){return height;}"
-                + "void scrollTo(int x,int to){y=to;calls++;} ViewTreeObserver getViewTreeObserver(){return observer;} }"
+                + "int getPaddingLeft(){return 0;} int getPaddingRight(){return 0;} int getPaddingTop(){return 0;}"
+                + "void setPadding(int a,int b,int c,int d){paddingBottom=d;}"
+                + "void stopScroll(){flinging=false;stops++;} void nativeFrame(){if(flinging)y-=40;}"
+                + "void scrollTo(int x,int to){if(y!=to){y=to;calls++;}} ViewTreeObserver getViewTreeObserver(){return observer;} }"
                 + "static class R { static class string { static final int history_loading=1,history_retry=2,earlier_messages=3; }"
                 + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
@@ -188,9 +203,10 @@ public final class TurnUiRegressionTest {
                 + "MessagePage(List<Message> m){messages=m;} } MessagePage nextPage; int reads; long sid,before; int limit;"
                 + "MessagePage messagePage(long s,long b,int l){reads++;sid=s;before=b;limit=l;return nextPage;} }"
                 + "QueuedReader historyReader=new QueuedReader(); ChatStore chatStore=new ChatStore();"
-                + "int historyToken,scrollActionToken; long historySequence=-1,sessionId=7,earlierBeforeId; boolean sessionOpening,earlierLoading,initialHistoryLoading,historyInserting,followLatest=true,autoScrollQueued,finishing;"
+                + "int historyToken,scrollActionToken; long historySequence=-1,sessionId=7,earlierBeforeId; boolean sessionOpening,earlierLoading,initialHistoryLoading,historyInserting,followLatest=true,autoScrollQueued,finishing,latestJumpAnimating;"
                 + "List<Runnable> historyEvents=new ArrayList<Runnable>(); LinearLayout stream=new LinearLayout(),renderHost; TextView earlierRow; ImageView latestButton=new ImageView();"
                 + "ScrollView scroll=new ScrollView(); View send=new View(); void setBusy(boolean value){} void maybeContinue(){} {scroll.height=100;scroll.addView(stream,null);}"
+                + "View composerDock,inputBar; void positionLatestButton(int footer){}"
                 + "boolean immediateUi; boolean isFinishing(){return finishing;} void ui(Runnable r){uiTasks.add(r);}"
                 + "void runOnUiThread(Runnable r){if(immediateUi)r.run();else uiTasks.add(r);} int dp(int v){return v;}"
                 + "String getString(int id,Object...args){return args.length==0?String.valueOf(id):\"Earlier \"+args[0];} void scheduleFrost(){}"
@@ -225,6 +241,7 @@ public final class TurnUiRegressionTest {
                 + "TextView text=new TextView();text.setText(s);bodySlot(f).addView(text,null);"
                 + "TurnTrace t=((TurnTrace.Range)r.getTag()).trace;if(t.bodyAt<0)t.bodyAt=t.order.size();SystemClock.advance(renderCost);}"
                 + "void addAgentText(String s){bodies.add(s);TextView t=new TextView();t.setText(s);host().addView(t,null);SystemClock.advance(renderCost);}");
+        source.append("Runnable transcriptTouchStart=").append(METHODS.get("transcriptTouchStart")).append(';');
         source.append(METHODS.get("Flow"));
         source.append(METHODS.get("ReplayCursor"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {
@@ -234,7 +251,8 @@ public final class TurnUiRegressionTest {
         for (String name : Arrays.asList("loopTurnStart", "loopFirstEvent", "adoptLoopClock",
                 "liveOrigin", "liveFirst", "renderRange", "renderSlice", "renderPage", "seedReplayTools",
                 "loadEarlierPage", "insertEarlierPage", "resetHistoryLoading", "stripCompactionAsks", "host", "autoScroll",
-                "stuckAtEnd", "latestScrollY", "updateLatestButton", "scrollToLatest", "jumpToLatest",
+                "stuckAtEnd", "latestScrollY", "updateLatestButton", "scrollToLatest", "jumpToLatest", "cancelLatestJumpAnimation",
+                "pinLastMessage",
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive",
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
@@ -726,6 +744,101 @@ public final class TurnUiRegressionTest {
                 "Bottom jump did not complete the local animation or hide its button");
         pass("scrollingKeepsReadersInPlaceAndBottomJumpUsesOnePositionChange");
     }
+    private static void repeatedBottomJumpStopsInertiaWithoutRestartingAnimation() throws Exception {
+        Object view = fixture();
+        prepareEarlier(view, new ArrayList<Message>(), 1000);
+        Object scroll = get(view, "scroll"), stream = get(view, "stream");
+        field(scroll, "y", 400);
+        field(scroll, "flinging", true);
+        field(view, "lastAnimationStarts", 0);
+        call(view, "jumpToLatest");
+        int bottom = (Integer) call(view, "latestScrollY");
+        check((Integer) get(scroll, "y") == bottom && !(Boolean) get(scroll, "flinging"),
+                "Bottom jump waited for a posted callback or left inertia running");
+        call(scroll, "nativeFrame");
+        call(view, "jumpToLatest");
+        call(view, "jumpToLatest");
+        call(scroll, "nativeFrame");
+        drain(view, "posted");
+        check((Integer) get(scroll, "y") == bottom && (Integer) get(scroll, "calls") == 1
+                && (Integer) get(scroll, "stops") == 3,
+                "Repeated clicks let an old fling or posted scroll move the viewport");
+        check((Integer) get(view, "lastAnimationStarts") == 1 && (Boolean) get(view, "latestJumpAnimating"),
+                "Repeated clicks restarted the visual jump animation");
+        call(get(stream, "animator"), "finish");
+        check(!(Boolean) get(view, "latestJumpAnimating"), "Finished jump retained animation ownership");
+        pass("bottomJumpStopsActiveInertiaAndRepeatedClicksShareOneAnimation");
+    }
+    private static void userTouchAndSessionSwitchCancelJumpAnimation() throws Exception {
+        Object view = fixture();
+        prepareEarlier(view, new ArrayList<Message>(), 1000);
+        Object scroll = get(view, "scroll"), stream = get(view, "stream");
+        call(view, "jumpToLatest");
+        field(stream, "translationY", 12f);
+        field(stream, "alpha", 0.8f);
+        ((Runnable) get(view, "transcriptTouchStart")).run();
+        check(!(Boolean) get(view, "latestJumpAnimating") && (Float) get(stream, "translationY") == 0f
+                && (Float) get(stream, "alpha") == 1f && get(get(stream, "animator"), "listener") == null,
+                "A user's gesture inherited the bottom jump's visual offset or callback");
+        String create = METHODS.get("onCreate");
+        check(create.contains("setOnTouchStartListener") && create.contains("cancelLatestJumpAnimation()"),
+                "Real transcript touch-down does not cancel the jump animation");
+        field(scroll, "flinging", true);
+        call(view, "resetHistoryLoading");
+        check(!(Boolean) get(scroll, "flinging"), "A previous session's fling survived the history reset");
+        pass("touchDownAndSessionSwitchCancelOldScrollAndJumpAnimation");
+    }
+    private static void touchDownRejectsQueuedStreamingFollow() throws Exception {
+        Object view = fixture();
+        prepareEarlier(view, new ArrayList<Message>(), 1000);
+        Object scroll = get(view, "scroll");
+        int reading = (Integer) call(view, "latestScrollY");
+        field(scroll, "y", reading);
+        call(view, "autoScroll");
+        Object tail = children(get(view, "stream")).get(1);
+        field(tail, "height", 1060);
+        ((Runnable) get(view, "transcriptTouchStart")).run();
+        check((Boolean) get(view, "followLatest"), "Fixture changed follow before exercising the pending frame");
+        drain(view, "posted");
+        check((Integer) get(scroll, "y") == reading && (Integer) get(scroll, "calls") == 0
+                && !(Boolean) get(view, "autoScrollQueued"),
+                "An already queued streaming frame moved the transcript after the user's touch-down");
+        field(view, "followLatest", false);
+        call(view, "autoScroll");
+        drain(view, "posted");
+        check((Integer) get(scroll, "y") == reading, "Dropping a stale frame broke subsequent reading protection");
+        pass("realTouchDownRejectsAnAlreadyQueuedStreamingBottomFollow");
+    }
+    private static void touchDownAndSessionSwitchRejectQueuedLayoutPin() throws Exception {
+        for (boolean newSession : new boolean[]{false,true}) {
+            Object view = fixture();
+            prepareEarlier(view, new ArrayList<Message>(), 1000);
+            Object scroll = get(view, "scroll");
+            int reading = (Integer) call(view, "latestScrollY");
+            field(scroll, "y", reading);
+            call(view, "pinLastMessage");
+            check(((List<?>) get(view, "posted")).size()==1, "Footer resizing did not queue its layout pin");
+            if (newSession) call(view,"resetHistoryLoading");
+            else ((Runnable) get(view, "transcriptTouchStart")).run();
+            drain(view, "posted");
+            check((Integer) get(scroll, "y") == reading && (Integer) get(scroll, "calls") == 0,
+                    "An old footer layout pin moved the transcript after touch-down or session switch");
+        }
+        pass("queuedFooterPinsRespectTheNewTouchAndSessionOwnership");
+    }
+    private static void touchDownRejectsQueuedExplicitJumpCorrection() throws Exception {
+        Object view = fixture();
+        prepareEarlier(view, new ArrayList<Message>(), 1000);
+        Object scroll = get(view, "scroll");
+        call(view, "jumpToLatest");
+        ((Runnable) get(view, "transcriptTouchStart")).run();
+        int reading = (Integer) call(view, "latestScrollY") - 40;
+        field(scroll, "y", reading);
+        drain(view, "posted");
+        check((Integer) get(scroll, "y") == reading && !(Boolean) get(view, "latestJumpAnimating"),
+                "A posted explicit jump correction overrode the next real gesture");
+        pass("realTouchDownCancelsTheExplicitJumpsPendingLayoutCorrection");
+    }
     private static List<String> texts(Object view) throws Exception {
         List<String> out = new ArrayList<>();
         if (view.getClass().getSimpleName().equals("TextView")) out.add((String) get(view, "text"));
@@ -902,6 +1015,11 @@ public final class TurnUiRegressionTest {
                 staleHistoryCallbacksAreIgnored();
                 explicitJumpWinsPendingAnchor();
                 scrollingRespectsReadingAndJumpsDirectly();
+                repeatedBottomJumpStopsInertiaWithoutRestartingAnimation();
+                userTouchAndSessionSwitchCancelJumpAnimation();
+                touchDownRejectsQueuedStreamingFollow();
+                touchDownAndSessionSwitchRejectQueuedLayoutPin();
+                touchDownRejectsQueuedExplicitJumpCorrection();
                 userBubbleShowsOnlyTheMessage();
                 keyboardHideClearsStaleInputFocus();
                 bufferedCallbacksYieldAndRejectOldSessions();

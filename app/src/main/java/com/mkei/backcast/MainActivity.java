@@ -29,7 +29,6 @@ import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -42,7 +41,6 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupWindow;
-import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AlertDialog;
@@ -66,6 +64,7 @@ import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
 import com.mkei.backcast.ui.SlashInput;
 import com.mkei.backcast.ui.SweepText;
+import com.mkei.backcast.ui.TranscriptScrollView;
 import com.mkei.backcast.ui.TurnTrace;
 import com.mkei.backcast.ui.WorkTimeline;
 
@@ -91,7 +90,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 用户气泡最大宽度占屏宽比例。 */
     private static final float BUBBLE_MAX_RATIO = 0.82f;
 
-    private ScrollView scroll;
+    private TranscriptScrollView scroll;
     private LinearLayout stream;
     private SlashInput prompt;
     private Button send;
@@ -149,6 +148,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private boolean followLatest = true;
     private boolean autoScrollQueued;
     private int scrollActionToken;
+    private boolean latestJumpAnimating;
 
     private static class ReplayCursor {
         TurnTrace turn;
@@ -312,7 +312,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
         configureSystemBars();
 
-        scroll = (ScrollView) findViewById(R.id.scroll);
+        scroll = (TranscriptScrollView) findViewById(R.id.scroll);
         stream = (LinearLayout) findViewById(R.id.stream);
         if (stream != null) {
             stream.setClipChildren(false);
@@ -346,10 +346,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             });
         }
         if (scroll != null) {
-            scroll.setOnTouchListener(new View.OnTouchListener() {
-                @Override public boolean onTouch(View v, MotionEvent event) {
-                    if (event.getActionMasked() == MotionEvent.ACTION_DOWN) scrollActionToken++;
-                    return false;
+            scroll.setOnTouchStartListener(new Runnable() {
+                @Override public void run() {
+                    scrollActionToken++;
+                    cancelLatestJumpAnimation();
                 }
             });
         }
@@ -1212,9 +1212,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 scroll.getPaddingRight(), footer);
         positionLatestButton(footer);
         if (follow) {
+            final int token = historyToken;
+            final int action = scrollActionToken;
             scroll.post(new Runnable() {
                 @Override
                 public void run() {
+                    if (token != historyToken || action != scrollActionToken) return;
                     if (followLatest && !historyInserting) scroll.scrollTo(0, latestScrollY());
                     updateLatestButton();
                 }
@@ -1258,16 +1261,36 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void jumpToLatest() {
+        if (scroll == null) return;
         scrollActionToken++;
+        int before = scroll.getScrollY();
+        scroll.stopScroll();
         followLatest = true;
+        scroll.scrollTo(0, latestScrollY());
+        updateLatestButton();
         scrollToLatest();
-        if (stream != null) {
-            stream.animate().cancel();
+        if (stream != null && !latestJumpAnimating && before != scroll.getScrollY()) {
+            cancelLatestJumpAnimation();
+            latestJumpAnimating = true;
             stream.setTranslationY(dp(24));
             stream.setAlpha(0.65f);
             stream.animate().translationY(0f).alpha(1f).setDuration(180)
-                    .setInterpolator(new DecelerateInterpolator()).start();
+                    .setInterpolator(new DecelerateInterpolator())
+                    .setListener(new AnimatorListenerAdapter() {
+                        @Override public void onAnimationEnd(Animator animation) {
+                            latestJumpAnimating = false;
+                            stream.animate().setListener(null);
+                        }
+                    }).start();
         }
+    }
+
+    private void cancelLatestJumpAnimation() {
+        latestJumpAnimating = false;
+        if (stream == null) return;
+        stream.animate().setListener(null).cancel();
+        stream.setAlpha(1f);
+        stream.setTranslationY(0f);
     }
 
     private void scheduleFrost() {
@@ -3587,6 +3610,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         historyToken++;
         scrollActionToken++;
+        if (scroll != null) scroll.stopScroll();
         initialHistoryLoading = false;
         sessionOpening = false;
         earlierLoading = false;
@@ -3597,11 +3621,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         earlierBeforeId = 0;
         renderHost = null;
         followLatest = true;
-        if (stream != null) {
-            stream.animate().cancel();
-            stream.setAlpha(1f);
-            stream.setTranslationY(0f);
-        }
+        cancelLatestJumpAnimation();
     }
 
     private void loadLatestHistory(final ChatStore.MessagePage page, final Runnable pendingReplay) {
@@ -4591,11 +4611,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (scroll == null || renderHost != null || historyInserting || autoScrollQueued) return;
         autoScrollQueued = true;
         final int token = historyToken;
+        final int action = scrollActionToken;
         scroll.postOnAnimation(new Runnable() {
             @Override
             public void run() {
                 autoScrollQueued = false;
-                if (token != historyToken) return;
+                if (token != historyToken || action != scrollActionToken) return;
                 if (followLatest && !initialHistoryLoading && !historyInserting)
                     scroll.scrollTo(0, latestScrollY());
                 updateLatestButton();

@@ -247,6 +247,384 @@ public final class GoalContractRegressionTest {
         check(!fixture.loop.needsResume(), "Explicitly completed goal remained resumable");
     }
 
+    private static void invalidGoalStopsWithoutWorkspaceWork() throws Exception {
+        Fixture fixture = new Fixture();
+        final int[] reads = new int[1];
+        fixture.onRead = new Runnable() {
+            @Override public void run() { reads[0]++; }
+        };
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) {
+                    check(notes(messages).contains("invalid"), "First request lacks goal admission instructions");
+                    LlmClient.Reply reply = call("update_goal", "{\"status\":\"invalid\","
+                            + "\"reason\":\"Greeting has no requested task\"}");
+                    reply.promptTokens = 30L;
+                    reply.completionTokens = 10L;
+                    return reply;
+                }
+                check(f.client.calls == 2, "Invalid goal kept requesting continuation turns");
+                check(tools == null || tools.length() == 0, "Invalid final answer can start tools");
+                JSONObject result = new JSONObject(last(messages).content);
+                check(Goal.INVALID.equals(result.getJSONObject("goal").getString("status")),
+                        "Invalid result omitted its terminal state");
+                check("Greeting has no requested task".equals(result.getString("invalidReason")),
+                        "Invalid result lost the model's assessment");
+                return text("Hello.");
+            }
+        };
+        fixture.loop.setGoal("bonjour");
+        fixture.submit("bonjour");
+        check(fixture.client.calls == 2 && reads[0] == 0 && fixture.steers == 0,
+                "Invalid goal did unrelated workspace work or waited for three rounds");
+        check(Goal.INVALID.equals(fixture.loop.goalStatus()) && !fixture.loop.goalOpen()
+                && !fixture.loop.goalActive() && !fixture.loop.needsResume(), "Invalid goal stayed open");
+        check(fixture.loop.goalTokensUsed() == 40L && "bonjour".equals(fixture.loop.goalText()),
+                "Invalid goal discarded its objective or ledger");
+        JSONObject report = new JSONObject(fixture.registry.get("get_goal").run(new JSONObject()));
+        check(Goal.INVALID.equals(report.getJSONObject("goal").getString("status")),
+                "get_goal lost the invalid state");
+    }
+
+    private static void invalidGoalRequiresAnAssessment() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.setGoal("unspecified request");
+        String result = fixture.registry.get("update_goal").run(new JSONObject().put("status", "invalid"));
+        check(!result.startsWith("{"), "Invalid goal accepted a missing assessment");
+        check(Goal.ACTIVE.equals(fixture.loop.goalStatus()), "Rejected invalid call closed the active goal");
+        JSONObject accepted = new JSONObject(fixture.registry.get("update_goal").run(new JSONObject()
+                .put("status", "invalid").put("reason", "纯问候")));
+        check(Goal.INVALID.equals(accepted.getJSONObject("goal").getString("status")),
+                "Concise Chinese assessment was rejected by an arbitrary character limit");
+    }
+
+    private static void invalidGoalSkipsOtherToolsInItsBatch() throws Exception {
+        Fixture fixture = new Fixture();
+        final int[] reads = new int[1];
+        fixture.onRead = new Runnable() {
+            @Override public void run() { reads[0]++; }
+        };
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) {
+                    LlmClient.Reply reply = call("update_goal", "{\"status\":\"invalid\","
+                            + "\"reason\":\"Only a greeting, no task\"}");
+                    reply.toolCalls.put(new JSONObject().put("id", "unrelated-read").put("type", "function")
+                            .put("function", new JSONObject().put("name", "read").put("arguments", "{}")));
+                    return reply;
+                }
+                check(f.client.calls == 2 && (tools == null || tools.length() == 0),
+                        "Invalid batch did not enter its final answer");
+                int paired = 0;
+                for (Message message : messages) {
+                    if (Message.TOOL.equals(message.role) && "unrelated-read".equals(message.toolCallId)) {
+                        paired++;
+                        check(!"fixture file contents".equals(message.content), "Unrelated batch tool actually ran");
+                    }
+                }
+                check(paired == 1, "Skipped invalid-batch tool lost its result pairing");
+                return text("Hello.");
+            }
+        };
+        fixture.loop.setGoal("greeting");
+        fixture.submit("greeting");
+        check(reads[0] == 0 && !fixture.loop.needsResume(), "Invalid batch did unrelated work");
+    }
+
+    private static void invalidRecoveryOnlyFinishesThePendingAnswer() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("greeting", Goal.INVALID, 3000L, 40L, 100L);
+        List<Message> history = new ArrayList<Message>();
+        history.add(Message.user("greeting"));
+        history.add(Message.assistant("", call("update_goal", "{\"status\":\"invalid\","
+                + "\"reason\":\"No requested task\"}").toolCalls));
+        history.add(Message.toolResult("fixture-call", fixture.loop.goalReport()));
+        fixture.loop.loadHistory("You are a local fixture assistant.", history);
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                check(f.client.calls == 1 && (tools == null || tools.length() == 0),
+                        "Invalid recovery resumed substantive tools");
+                return text("Hello.");
+            }
+        };
+        fixture.loop.resume(1L, 1);
+        check(fixture.errors.isEmpty() && fixture.client.calls == 1 && fixture.steers == 0,
+                "Invalid recovery did not finish exactly once");
+        check(Goal.INVALID.equals(fixture.loop.goalStatus()) && fixture.loop.goalTokensUsed() == 40L,
+                "Invalid recovery changed its terminal state or usage");
+        check(!fixture.loop.needsResume(), "Invalid recovery remained resumable after its final answer");
+        fixture.loop.resume(1L, 2);
+        check(fixture.client.calls == 1, "Already answered invalid goal resumed again");
+    }
+
+    private static void ordinaryChatAfterInvalidDoesNotContinueTheGoal() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) {
+                    LlmClient.Reply reply = call("update_goal", "{\"status\":\"invalid\","
+                            + "\"reason\":\"Only a greeting, no task\"}");
+                    reply.promptTokens = 20L;
+                    reply.completionTokens = 5L;
+                    return reply;
+                }
+                LlmClient.Reply reply = text(f.client.calls == 2 ? "Hello." : "Ordinary answer.");
+                reply.promptTokens = 50L;
+                reply.completionTokens = 10L;
+                return reply;
+            }
+        };
+        fixture.loop.setGoal("hello there");
+        fixture.submit("hello there");
+        fixture.submit("a separate ordinary question");
+        check(fixture.client.calls == 3 && fixture.steers == 0 && fixture.loop.goalTokensUsed() == 25L,
+                "Ordinary chat continued or charged the invalid goal");
+        check(Goal.INVALID.equals(fixture.loop.goalStatus()) && !fixture.loop.needsResume(),
+                "Ordinary chat reopened the invalid goal");
+    }
+
+    private static void persistedTerminalBeforeItsToolResultRestoresOnlyTheAnswer() throws Exception {
+        for (String status : new String[]{Goal.INVALID, Goal.COMPLETE, Goal.BLOCKED}) {
+            Fixture fixture = new Fixture();
+            fixture.loop.restoreGoal("the original request", status, 3000L, 40L, 100L);
+            List<Message> history = new ArrayList<Message>();
+            history.add(Message.user("the original request"));
+            LlmClient.Reply pending = call("update_goal", "{\"status\":\"" + status
+                    + "\",\"reason\":\"The model's assessment\"}");
+            pending.toolCalls.put(new JSONObject().put("id", "pending-read").put("type", "function")
+                    .put("function", new JSONObject().put("name", "read").put("arguments", "{}")));
+            history.add(Message.assistant("", pending.toolCalls));
+            fixture.loop.loadHistory("You are a local fixture assistant.", history);
+            JSONObject restored = new JSONObject(fixture.recorded.get(0).content);
+            check(status.equals(restored.getJSONObject("goal").getString("status")),
+                    "Repair lost a persisted " + status + " transition");
+            if (Goal.INVALID.equals(status)) {
+                check("The model's assessment".equals(restored.getString("invalidReason")),
+                        "Repair lost the invalid reason saved in the pending call");
+            }
+            check(fixture.recorded.size() == 2, "Pending closure batch lost tool-result pairing");
+            fixture.client.script = new Script() {
+                @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                    check(f.client.calls == 1 && (tools == null || tools.length() == 0),
+                            "Crash between goal save and tool result reopened substantive tools");
+                    return text("final answer");
+                }
+            };
+            fixture.loop.resume(1L, 1);
+            check(fixture.errors.isEmpty() && fixture.client.calls == 1 && fixture.steers == 0,
+                    "Interrupted closure did not produce exactly one final answer");
+            check(status.equals(fixture.loop.goalStatus()) && fixture.loop.goalTokensUsed() == 40L,
+                    "Interrupted closure changed the saved state or ledger");
+            check(!fixture.loop.needsResume(), "Interrupted closure stayed resumable after answering");
+            fixture.loop.resume(1L, 2);
+            check(fixture.client.calls == 1, "Recovered closure answered more than once");
+        }
+    }
+
+    private static void persistedPauseBeforeItsToolResultRemainsPaused() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("paused request", Goal.PAUSED, 3000L, 40L, 100L);
+        List<Message> history = new ArrayList<Message>();
+        history.add(Message.user("pause the current goal"));
+        history.add(Message.assistant("", call("update_goal", "{\"status\":\"paused\"}").toolCalls));
+        fixture.loop.loadHistory("You are a local fixture assistant.", history);
+        check(Goal.PAUSED.equals(new JSONObject(fixture.recorded.get(0).content)
+                .getJSONObject("goal").getString("status")), "Repair lost the persisted pause");
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                throw new AssertionError("Recovery restarted a user-paused goal");
+            }
+        };
+        fixture.loop.resume(1L, 1);
+        check(fixture.client.calls == 0 && !fixture.loop.needsResume()
+                && Goal.PAUSED.equals(fixture.loop.goalStatus()), "Paused recovery started work or an answer");
+    }
+
+    private static void pendingOldGoalResultDoesNotRestrictLaterOrdinaryTools() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("old greeting", Goal.INVALID, 3000L, 40L, 100L);
+        List<Message> history = new ArrayList<Message>();
+        history.add(Message.user("old greeting"));
+        history.add(Message.assistant("", call("update_goal", "{\"status\":\"invalid\","
+                + "\"reason\":\"Only a greeting, no task\"}").toolCalls));
+        history.add(Message.user("read the new ordinary file"));
+        history.add(Message.assistant("", call("read", "{}").toolCalls));
+        fixture.loop.loadHistory("You are a local fixture assistant.", history);
+        check(!fixture.recorded.get(0).content.startsWith("{"),
+                "An older pending goal batch was inferred as the current closure");
+        final int[] reads = new int[1];
+        fixture.onRead = new Runnable() {
+            @Override public void run() { reads[0]++; }
+        };
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                check(tools != null && tools.toString().contains("read"),
+                        "Old closure removed tools from the later ordinary task");
+                if (f.client.calls == 1) return call("read", "{\"path\":\"next-evidence.txt\"}");
+                return text("new ordinary file read");
+            }
+        };
+        fixture.loop.resume(1L, 1);
+        check(fixture.errors.isEmpty() && fixture.client.calls == 2 && reads[0] == 1,
+                "Later ordinary task did not execute its tools");
+        check(Goal.INVALID.equals(fixture.loop.goalStatus()) && fixture.loop.goalTokensUsed() == 40L,
+                "Later ordinary task changed the old invalid ledger");
+    }
+
+    private static void mismatchedPendingGoalStatusIsNotReconstructed() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("greeting", Goal.INVALID, 3000L, 40L, 100L);
+        List<Message> history = new ArrayList<Message>();
+        history.add(Message.user("greeting"));
+        history.add(Message.assistant("", call("update_goal", "{\"status\":\"complete\"}").toolCalls));
+        fixture.loop.loadHistory("You are a local fixture assistant.", history);
+        check(!fixture.recorded.get(0).content.startsWith("{"),
+                "Repair invented success for a call that disagrees with the saved status");
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                check(tools != null && tools.length() > 0, "Mismatched status was treated as a successful closure");
+                return text("the interrupted call was not confirmed");
+            }
+        };
+        fixture.loop.resume(1L, 1);
+        check(fixture.errors.isEmpty() && fixture.client.calls == 1
+                && Goal.INVALID.equals(fixture.loop.goalStatus()), "Mismatched recovery changed the saved status");
+    }
+
+    private static void pendingInvalidResultPreservesBudgetPriority() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("greeting", Goal.BUDGET_LIMITED, 3000L, 100L, 100L, Boolean.TRUE);
+        List<Message> history = new ArrayList<Message>();
+        history.add(Message.user("greeting"));
+        history.add(Message.assistant("", call("update_goal", "{\"status\":\"invalid\","
+                + "\"reason\":\"Only a greeting, no task\"}").toolCalls));
+        fixture.loop.loadHistory("You are a local fixture assistant.", history);
+        JSONObject repaired = new JSONObject(fixture.recorded.get(0).content);
+        check(Goal.BUDGET_LIMITED.equals(repaired.getJSONObject("goal").getString("status"))
+                && "Only a greeting, no task".equals(repaired.getString("invalidReason")),
+                "Interrupted invalid call replaced the budget status or lost its reason");
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                check(f.client.calls == 1 && (tools == null || tools.length() == 0),
+                        "Budget-prioritized invalid closure reopened tools");
+                return text("No actionable request.");
+            }
+        };
+        fixture.loop.resume(1L, 1);
+        check(fixture.errors.isEmpty() && fixture.client.calls == 1 && fixture.steers == 0
+                && !fixture.loop.needsResume() && Goal.BUDGET_LIMITED.equals(fixture.loop.goalStatus()),
+                "Budget-prioritized invalid recovery did not stop after its answer");
+    }
+
+    private static void rejectedUpdateDoesNotHideALaterPersistedClosure() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("the completed request", Goal.COMPLETE, 3000L, 40L, 100L);
+        List<Message> history = new ArrayList<Message>();
+        history.add(Message.user("the completed request"));
+        LlmClient.Reply pending = call("update_goal", "{\"status\":\"invalid\"}");
+        pending.toolCalls.put(new JSONObject().put("id", "actual-close").put("type", "function")
+                .put("function", new JSONObject().put("name", "update_goal")
+                        .put("arguments", "{\"status\":\"complete\"}")));
+        history.add(Message.assistant("", pending.toolCalls));
+        history.add(Message.toolResult("fixture-call", "invalid requires a reason"));
+        fixture.loop.loadHistory("You are a local fixture assistant.", history);
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                check(f.client.calls == 1 && (tools == null || tools.length() == 0),
+                        "A rejected earlier update hid the later persisted closure");
+                return text("completed");
+            }
+        };
+        fixture.loop.resume(1L, 1);
+        check(fixture.errors.isEmpty() && fixture.client.calls == 1 && !fixture.loop.needsResume(),
+                "Later successful closure reopened work");
+    }
+
+    private static void directQuestionCompletesWithoutWorkspaceTools() throws Exception {
+        Fixture fixture = new Fixture();
+        final int[] reads = new int[1];
+        fixture.onRead = new Runnable() {
+            @Override public void run() { reads[0]++; }
+        };
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) {
+                    check(notes(messages).contains("答案本身"), "Goal prompt requires external proof for direct answers");
+                    return call("update_goal", "{\"status\":\"complete\"}");
+                }
+                check(f.client.calls == 2 && (tools == null || tools.length() == 0),
+                        "Direct answer did not enter the final response");
+                return text("2");
+            }
+        };
+        fixture.loop.setGoal("1+1");
+        fixture.submit("1+1");
+        check(Goal.COMPLETE.equals(fixture.loop.goalStatus()) && reads[0] == 0 && fixture.steers == 0,
+                "Direct question was treated as invalid or forced workspace work");
+    }
+
+    private static void substantiveGoalStillContinuesAfterAPlainTextReply() throws Exception {
+        Fixture fixture = new Fixture();
+        final int[] reads = new int[1];
+        fixture.onRead = new Runnable() {
+            @Override public void run() { reads[0]++; }
+        };
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) return text("I will inspect the requested file.");
+                if (f.client.calls == 2) {
+                    check(Goal.ACTIVE.equals(f.loop.goalStatus()), "Plain text silently invalidated a real task");
+                    return call("read", "{}");
+                }
+                if (f.client.calls == 3) return call("update_goal", "{\"status\":\"complete\"}");
+                return text("Inspection completed.");
+            }
+        };
+        fixture.loop.setGoal("Inspect the specified fixture file");
+        fixture.submit("Inspect the specified fixture file");
+        check(fixture.client.calls == 4 && reads[0] == 1 && fixture.steers == 1,
+                "Substantive task stopped on its first plain text reply");
+        check(Goal.COMPLETE.equals(fixture.loop.goalStatus()), "Substantive task failed to complete");
+    }
+
+    private static void actualTaskKeepsTheThreeRoundBlockedAudit() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls < 3) {
+                    check(Goal.ACTIVE.equals(f.loop.goalStatus()), "Actual blocker closed before three audit rounds");
+                    return text("The required external account is unavailable.");
+                }
+                if (f.client.calls == 3) return call("update_goal", "{\"status\":\"blocked\","
+                        + "\"reason\":\"Same unavailable external account for three rounds\"}");
+                return text("Blocked by the unavailable account.");
+            }
+        };
+        fixture.loop.setGoal("Inspect the user's external account state");
+        fixture.submit("Inspect the user's external account state");
+        check(fixture.client.calls == 4 && fixture.steers == 2 && Goal.BLOCKED.equals(fixture.loop.goalStatus()),
+                "Goal admission changed the real blocker audit");
+    }
+
+    private static void budgetLimitTakesPrecedenceOverInvalid() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.loop.restoreGoal("greeting", Goal.BUDGET_LIMITED, 3000L, 100L, 100L);
+        JSONObject result = new JSONObject(fixture.registry.get("update_goal").run(new JSONObject()
+                .put("status", "invalid").put("reason", "Only a greeting, no task")));
+        check(Goal.BUDGET_LIMITED.equals(fixture.loop.goalStatus())
+                && Goal.BUDGET_LIMITED.equals(result.getJSONObject("goal").getString("status")),
+                "Invalid replaced the budget-limited state");
+        check(!fixture.loop.goalActive() && !fixture.loop.needsResume(),
+                "Invalid at the budget limit restarted the goal");
+    }
+
     private static void laterChatDoesNotChargeTheCompletedGoal() throws Exception {
         Fixture fixture = new Fixture();
         fixture.client.script = new Script() {
@@ -522,7 +900,7 @@ public final class GoalContractRegressionTest {
     }
 
     private static void userResumeReopensToolsAfterAnOldGoalStatusResult() throws Exception {
-        for (String status : new String[]{Goal.COMPLETE, Goal.BLOCKED}) {
+        for (String status : new String[]{Goal.COMPLETE, Goal.BLOCKED, Goal.INVALID}) {
             Fixture fixture = new Fixture();
             fixture.loop.restoreGoal("goal explicitly resumed by user", status, 4000L, 90L, 1000L);
             List<Message> history = new ArrayList<Message>();
@@ -530,6 +908,7 @@ public final class GoalContractRegressionTest {
             history.add(Message.assistant("", call("update_goal", "{\"status\":\"" + status + "\"}").toolCalls));
             history.add(Message.toolResult("fixture-call", fixture.loop.goalReport()));
             fixture.loop.loadHistory("You are a local fixture assistant.", history);
+            if (Goal.INVALID.equals(status)) fixture.loop.renameGoal("Inspect the new fixture file");
             fixture.loop.markGoalActive();
             final int[] reads = new int[1];
             fixture.onRead = new Runnable() {
@@ -561,6 +940,7 @@ public final class GoalContractRegressionTest {
         JSONObject schema = fixture.registry.get("update_goal").parameters();
         JSONArray states = schema.getJSONObject("properties").getJSONObject("status").getJSONArray("enum");
         check(states.toString().contains("paused"), "update_goal schema omitted paused");
+        check(states.toString().contains("invalid"), "update_goal schema omitted invalid");
         check(fixture.registry.get("update_goal").description().contains("blocked"), "Blocked rule omitted");
         JSONObject empty = new JSONObject(fixture.registry.get("get_goal").run(new JSONObject()));
         check(empty.isNull("goal"), "Empty thread reported an existing goal");
@@ -622,6 +1002,15 @@ public final class GoalContractRegressionTest {
         String[] tests = {
             "firstGoalRequestHasRulesWithoutStartingAnotherTurn", "ordinaryToolRequestGetsItsFinalAnswer",
             "completedGoalReportsUsageAndStopsAfterFinalAnswer", "auditTextNeedsExplicitGoalCompletion",
+            "invalidGoalStopsWithoutWorkspaceWork", "invalidGoalRequiresAnAssessment",
+            "invalidGoalSkipsOtherToolsInItsBatch", "invalidRecoveryOnlyFinishesThePendingAnswer",
+            "ordinaryChatAfterInvalidDoesNotContinueTheGoal", "directQuestionCompletesWithoutWorkspaceTools",
+            "persistedTerminalBeforeItsToolResultRestoresOnlyTheAnswer",
+            "persistedPauseBeforeItsToolResultRemainsPaused", "pendingOldGoalResultDoesNotRestrictLaterOrdinaryTools",
+            "mismatchedPendingGoalStatusIsNotReconstructed", "pendingInvalidResultPreservesBudgetPriority",
+            "rejectedUpdateDoesNotHideALaterPersistedClosure",
+            "substantiveGoalStillContinuesAfterAPlainTextReply", "actualTaskKeepsTheThreeRoundBlockedAudit",
+            "budgetLimitTakesPrecedenceOverInvalid",
             "laterChatDoesNotChargeTheCompletedGoal", "budgetLimitTakesPrecedenceOverPause",
             "completedGoalRecoveryOnlyFinishesThePendingAnswer", "ordinaryChatAfterBudgetWrapUpDoesNotChargeTheOldGoal",
             "ordinaryToolsAfterBudgetWrapUpRunWithoutChargingTheOldGoal",

@@ -751,9 +751,12 @@ public class AgentLoop {
         }
     }
 
-    /** 模型声明完成或达不到。其它状态它改不了。 */
+    /** 模型声明完成、阻塞、无可执行目标或用户要求暂停。 */
     public String closeGoal(String status, String reason) {
-        if (Goal.COMPLETE.equals(status)) {
+        if (Goal.COMPLETE.equals(status) || Goal.INVALID.equals(status)) {
+            if (Goal.INVALID.equals(status) && (reason == null || reason.trim().length() == 0)) {
+                return "错误：invalid 必须说明目标为何没有任何可执行要求。";
+            }
             synchronized (lock) {
                 if ((!Goal.ACTIVE.equals(goalStatus) && !Goal.BUDGET_LIMITED.equals(goalStatus))
                         || goalText == null || goalText.length() == 0) {
@@ -764,7 +767,7 @@ public class AgentLoop {
             if (tools == null) tools = registry;
             String cleanup = tools == null ? null : tools.cleanupTemporary(false);
             if (cleanup != null) {
-                return "错误：临时材料尚未清理，目标不能标成完成：" + cleanup;
+                return "错误：临时材料尚未清理，目标不能结束：" + cleanup;
             }
         }
         synchronized (lock) {
@@ -780,7 +783,7 @@ public class AgentLoop {
             } else if ("blocked".equals(status)) {
                 String why = reason == null ? "" : reason.trim();
                 if (why.length() < 4) {
-                    return "错误：要说明目标为什么太泛或达不到。";
+                    return "错误：要说明实际任务连续三轮遇到的阻塞条件及为何无法继续推进。";
                 }
                 resumeAfter = false;
                 goalStatus = Goal.BLOCKED;
@@ -790,13 +793,28 @@ public class AgentLoop {
                     goalStatus = Goal.PAUSED;
                 }
                 budgetWrappedUp = true;
+            } else if (Goal.INVALID.equals(status)) {
+                resumeAfter = false;
+                if (!Goal.BUDGET_LIMITED.equals(goalStatus)) {
+                    goalStatus = Goal.INVALID;
+                }
+                budgetWrappedUp = true;
+                budgetWrapFinished = Boolean.TRUE;
             } else {
-                return "错误：只能标成 complete、blocked 或用户明确要求的 paused。";
+                return "错误：只能标成 complete、blocked、invalid 或用户明确要求的 paused。";
             }
         }
         freezeClock();
         saveRun(busy);
-        return goalReport();
+        String report = goalReport();
+        if (Goal.INVALID.equals(status)) {
+            try {
+                return new JSONObject(report).put("invalidReason", reason.trim()).toString();
+            } catch (Exception invalid) {
+                throw new IllegalStateException(invalid);
+            }
+        }
+        return report;
     }
 
     public String goalReport() {
@@ -809,6 +827,9 @@ public class AgentLoop {
                 JSONObject goal = new JSONObject();
                 goal.put("objective", goalText);
                 goal.put("status", goalStatus);
+                if (Goal.INVALID.equals(goalStatus)) {
+                    goal.put("statusExplanation", "目标未包含可执行要求，已停止自动续跑；等待用户提供具体任务。");
+                }
                 goal.put("tokensUsed", goalTokensUsed);
                 goal.put("tokenBudget", goalTokenBudget > 0 ? Long.valueOf(goalTokenBudget) : JSONObject.NULL);
                 goal.put("timeUsedSeconds", elapsedLocked() / 1000L);
@@ -1581,7 +1602,7 @@ public class AgentLoop {
                             JSONObject goal = new JSONObject(result.content).optJSONObject("goal");
                             if (goal != null && !Goal.ACTIVE.equals(goal.optString("status", Goal.ACTIVE))) return true;
                         } catch (Exception invalid) {
-                            return false;
+                            // A rejected earlier update must not hide a later successful one in this batch.
                         }
                     }
                 }
@@ -1787,8 +1808,7 @@ public class AgentLoop {
             progress.ranTools();
             executeToolCalls(reply.toolCalls, sessionId, gen, token, progress);
             if (stale(token, gen)) return;
-            finishingGoal = wasGoal && (Goal.COMPLETE.equals(goalStatus)
-                    || Goal.BLOCKED.equals(goalStatus) || Goal.PAUSED.equals(goalStatus)
+            finishingGoal = wasGoal && (Goal.isClosed(goalStatus)
                     || lastToolsClosedGoal());
             if (finishingGoal) continue;
             if (progress.reason().length() > 0) {
@@ -1884,8 +1904,8 @@ public class AgentLoop {
             }
 
             String result = invoke(name, args);
-            closed = goalAccounting && "update_goal".equals(name) && (Goal.COMPLETE.equals(goalStatus)
-                    || Goal.BLOCKED.equals(goalStatus) || Goal.PAUSED.equals(goalStatus));
+            closed = goalAccounting && "update_goal".equals(name) && (Goal.isClosed(goalStatus)
+                    || (Goal.BUDGET_LIMITED.equals(goalStatus) && budgetWrappedUp));
             progress.tool(name, args, result);
             if (stale(token, gen)) {
                 return;
@@ -2276,6 +2296,27 @@ public class AgentLoop {
         fillMissingTools(sessionId, "这次调用被中断，没有留下结果。");
     }
 
+    /** A persisted goal transition can precede its tool result when the process dies. */
+    private String restoredGoalResult(JSONObject call) {
+        JSONObject fn = call == null ? null : call.optJSONObject("function");
+        if (fn == null || !"update_goal".equals(fn.optString("name"))) return null;
+        try {
+            JSONObject args = new JSONObject(fn.optString("arguments", "{}"));
+            String status = args.optString("status", ""), reason = args.optString("reason", "").trim();
+            boolean sameStatus = Goal.isClosed(goalStatus) && goalStatus.equals(status);
+            boolean budgetPriority = Goal.BUDGET_LIMITED.equals(goalStatus) && budgetWrappedUp
+                    && (Goal.INVALID.equals(status) || Goal.PAUSED.equals(status));
+            if ((!sameStatus && !budgetPriority) || goalText().length() == 0) return null;
+            if ((Goal.INVALID.equals(status) && reason.length() == 0)
+                    || (Goal.BLOCKED.equals(status) && reason.length() < 4)) return null;
+            JSONObject report = new JSONObject(goalReport());
+            if (Goal.INVALID.equals(status)) report.put("invalidReason", reason);
+            return report.toString();
+        } catch (Exception invalid) {
+            return null;
+        }
+    }
+
     private void fillMissingTools(long sessionId, String note) {
         List<Message> repaired = new ArrayList<Message>();
         synchronized (lock) {
@@ -2289,9 +2330,11 @@ public class AgentLoop {
                 int need = message.toolCalls.length();
                 int have = 0;
                 int insertAt = i + 1;
+                boolean latestBatch = true;
                 for (int j = i + 1; j < history.size(); j++) {
                     Message next = history.get(j);
                     if (Message.USER.equals(next.role) || Message.ASSISTANT.equals(next.role)) {
+                        latestBatch = false;
                         break;
                     }
                     if (Message.TOOL.equals(next.role)) {
@@ -2302,7 +2345,8 @@ public class AgentLoop {
                 for (int k = have; k < need; k++) {
                     JSONObject call = message.toolCalls.optJSONObject(k);
                     String id = call == null ? "" : call.optString("id", "");
-                    Message toolMsg = Message.toolResult(id, note);
+                    String restored = latestBatch ? restoredGoalResult(call) : null;
+                    Message toolMsg = Message.toolResult(id, restored == null ? note : restored);
                     history.add(insertAt, toolMsg);
                     insertAt++;
                     repaired.add(toolMsg);

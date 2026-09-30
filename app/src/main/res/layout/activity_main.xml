@@ -16,7 +16,7 @@
 
     <requestFocus/>
 
-    <ScrollView
+    <com.mkei.backcast.ui.TranscriptScrollView
         android:id="@+id/scroll"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -35,7 +35,7 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"/>
 
-    </ScrollView>
+    </com.mkei.backcast.ui.TranscriptScrollView>
 
     <ImageView
         android:id="@+id/scroll_latest"
