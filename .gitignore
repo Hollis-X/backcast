@@ -1,0 +1,19 @@
+# 构建产物
+/build
+build/
+app/build/
+
+# 历史会话备份
+.backup/
+
+# 临时研究目录
+.tmp_research/
+
+# 本机构建环境
+local.properties
+.gradle/
+
+# 编辑器
+*.iml
+.idea/
+.DS_Store

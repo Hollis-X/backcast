@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#FFFFFF</color>
+    <color name="colorPrimaryDark">#EDEDED</color>
+    <color name="colorAccent">#2E6BE6</color>
+
+    <color name="bg_window">#FFFFFF</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="text_primary">#0D0D0D</color>
+    <color name="text_secondary">#8E8E93</color>
+    <color name="divider">#EFEFF1</color>
+    <color name="mono_bg">#F5F5F7</color>
+    <color name="code_bg">#F2F2F4</color>
+
+    <!-- 蓝色主题：用户气泡、发送按钮、选中态 -->
+    <color name="accent">#2E6BE6</color>
+    <!-- 提醒色：受限 / 限制访问的权限文字。 -->
+    <color name="warn_text">#C77700</color>
+    <color name="bubble_user">#E4EDFB</color>
+    <color name="chip_bg">#F5F5F7</color>
+    <color name="input_line">#E3E3E6</color>
+    <color name="shadow_soft">#0D000000</color>
+    <color name="shadow_mid">#14000000</color>
+    <color name="stop">#2E6BE6</color>
+    <!-- 失败 / 警告文字。不能用主题色，错误提示看着像强调。 -->
+    <color name="error_text">#C0392B</color>
+    <color name="drawer_scrim">#52000000</color>
+</resources>

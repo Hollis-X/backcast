@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 抽屉面板：白底 + 右侧 3dp 淡影（代替 elevation） -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape>
+            <solid android:color="@color/shadow_mid"/>
+            <corners
+                android:topRightRadius="28dp"
+                android:bottomRightRadius="28dp"/>
+        </shape>
+    </item>
+
+    <item android:right="3dp">
+        <shape>
+            <solid android:color="@color/surface"/>
+            <corners
+                android:topRightRadius="28dp"
+                android:bottomRightRadius="28dp"/>
+        </shape>
+    </item>
+
+</layer-list>

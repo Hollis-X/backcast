@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 指令弹层：细描边浅卡片，不用重阴影，避免贴在输入框上方显得发胖。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/surface"/>
+    <stroke android:width="1dp" android:color="@color/divider"/>
+    <corners android:radius="14dp"/>
+</shape>

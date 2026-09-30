@@ -1,0 +1,476 @@
+package com.mkei.backcast;
+
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
+
+import com.mkei.backcast.agent.Message;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 本地会话库。会话一行，消息按写入顺序追加。
+ * 系统提示词不入库，恢复时用当前设置重新塞到历史开头。
+ */
+public class ChatStore extends SQLiteOpenHelper {
+
+    public static class Session {
+        public long id;
+        public String title;
+    }
+
+    public static class Run {
+        public String goal = "";
+        public String status = "";
+        public long elapsedMs;
+        public boolean running;
+        /** 这一轮起点的开机时间。0 表示没有正在计的一轮。 */
+        public long turnAt;
+        /** 起点的墙钟，用来确认还是同一次开机。 */
+        public long turnWall;
+        /** 第一次有内容的开机时间。0 表示还没有。 */
+        public long seenAt;
+        /** 目标累计用掉的 token，跨重启保留。 */
+        public long tokensUsed;
+        /** 目标 token 预算，0 表示没设。 */
+        public long tokenBudget;
+    }
+
+    public ChatStore(Context context) {
+        super(context.getApplicationContext(), "backcast.db", null, 9);
+    }
+
+    @Override
+    public void onCreate(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE sessions ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "title TEXT NOT NULL,"
+                + "updated_at INTEGER NOT NULL)");
+        db.execSQL("CREATE TABLE messages ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "session_id INTEGER NOT NULL,"
+                + "role TEXT NOT NULL,"
+                + "content TEXT,"
+                + "reasoning TEXT,"
+                + "tool_calls TEXT,"
+                + "tool_call_id TEXT,"
+                + "elapsed_ms INTEGER DEFAULT 0,"
+                + "think_ms INTEGER DEFAULT 0,"
+                + "display_parts TEXT,"
+                + "work_dir TEXT)");
+        db.execSQL("CREATE INDEX idx_messages_session ON messages(session_id, id)");
+        createRuns(db);
+        createContext(db);
+    }
+
+    @Override
+    public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN elapsed_ms INTEGER DEFAULT 0");
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN think_ms INTEGER DEFAULT 0");
+        }
+        if (oldVersion < 4) {
+            createRuns(db);
+        }
+        if (oldVersion >= 4 && oldVersion < 5) {
+            db.execSQL("ALTER TABLE runs ADD COLUMN turn_at INTEGER NOT NULL DEFAULT 0");
+            db.execSQL("ALTER TABLE runs ADD COLUMN turn_wall INTEGER NOT NULL DEFAULT 0");
+            db.execSQL("ALTER TABLE runs ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
+        }
+        if (oldVersion < 6) {
+            createContext(db);
+        }
+        if (oldVersion < 7) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN display_parts TEXT");
+        }
+        if (oldVersion < 8) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN work_dir TEXT");
+        }
+        if (oldVersion < 9) {
+            db.execSQL("ALTER TABLE runs ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0");
+            db.execSQL("ALTER TABLE runs ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0");
+        }
+    }
+
+    /** 运行状态独立于聊天记录和模型窗口。 */
+    private static void createRuns(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS runs ("
+                + "session_id INTEGER PRIMARY KEY,"
+                + "running INTEGER NOT NULL DEFAULT 0,"
+                + "goal TEXT,"
+                + "status TEXT,"
+                + "elapsed_ms INTEGER NOT NULL DEFAULT 0,"
+                + "turn_at INTEGER NOT NULL DEFAULT 0,"
+                + "turn_wall INTEGER NOT NULL DEFAULT 0,"
+                + "seen_at INTEGER NOT NULL DEFAULT 0,"
+                + "tokens_used INTEGER NOT NULL DEFAULT 0,"
+                + "token_budget INTEGER NOT NULL DEFAULT 0)");
+    }
+
+    public synchronized long create(String title) {
+        ContentValues cv = new ContentValues();
+        cv.put("title", title == null || title.length() == 0 ? "新会话" : title);
+        cv.put("updated_at", System.currentTimeMillis());
+        return getWritableDatabase().insert("sessions", null, cv);
+    }
+
+    public synchronized void append(long sessionId, Message message) {
+        if (sessionId < 0 || message == null || Message.SYSTEM.equals(message.role)) {
+            return;
+        }
+        if (Message.USER.equals(message.role)
+                && (com.mkei.backcast.agent.Goal.isSteer(message.content)
+                || com.mkei.backcast.agent.Goal.isNote(message.content))) return;
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.insert("messages", null, valuesOf(sessionId, message));
+            db.update("sessions", touchValues(), "id=?",
+                    new String[]{String.valueOf(sessionId)});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    private static void createContext(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS context_windows ("
+                + "session_id INTEGER PRIMARY KEY,through_id INTEGER NOT NULL,window TEXT NOT NULL)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS reasoning_notes ("
+                + "cache_key TEXT PRIMARY KEY,summary TEXT NOT NULL)");
+    }
+
+    /** Save a model checkpoint without replacing the visible transcript. */
+    public synchronized void replaceAll(long sessionId, List<Message> messages) {
+        if (sessionId < 0) {
+            return;
+        }
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long through = 0;
+            Cursor tail = db.rawQuery("SELECT MAX(id) FROM messages WHERE session_id=?",
+                    new String[]{String.valueOf(sessionId)});
+            try {
+                if (tail.moveToFirst()) through = tail.getLong(0);
+            } finally {
+                tail.close();
+            }
+            JSONArray window = new JSONArray();
+            if (messages != null) {
+                for (int i = 0; i < messages.size(); i++) {
+                    Message m = messages.get(i);
+                    if (m == null || Message.SYSTEM.equals(m.role)) {
+                        continue;
+                    }
+                    if (com.mkei.backcast.agent.Goal.isSteer(m.content)
+                            || com.mkei.backcast.agent.Goal.isNote(m.content)) {
+                        continue;
+                    }
+                    window.put(m.toJson());
+                }
+            }
+            db.update("sessions", touchValues(), "id=?",
+                    new String[]{String.valueOf(sessionId)});
+            ContentValues checkpoint = new ContentValues();
+            checkpoint.put("session_id", Long.valueOf(sessionId));
+            checkpoint.put("through_id", Long.valueOf(through));
+            checkpoint.put("window", window.toString());
+            db.insertWithOnConflict("context_windows", null, checkpoint, SQLiteDatabase.CONFLICT_REPLACE);
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    private static ContentValues valuesOf(long sessionId, Message message) {
+        ContentValues cv = new ContentValues();
+        cv.put("session_id", Long.valueOf(sessionId));
+        cv.put("role", message.role);
+        cv.put("content", message.content == null ? "" : message.content);
+        cv.put("reasoning", message.reasoning == null ? "" : message.reasoning);
+        cv.put("tool_calls", message.toolCalls == null ? "" : message.toolCalls.toString());
+        cv.put("tool_call_id", message.toolCallId == null ? "" : message.toolCallId);
+        cv.put("elapsed_ms", Long.valueOf(message.elapsedMs));
+        cv.put("think_ms", Long.valueOf(message.thinkMs));
+        cv.put("display_parts", message.displayParts == null ? "" : message.displayParts.toString());
+        cv.put("work_dir", Message.USER.equals(message.role) ? message.workDir : "");
+        return cv;
+    }
+
+    private static ContentValues touchValues() {
+        ContentValues touch = new ContentValues();
+        touch.put("updated_at", Long.valueOf(System.currentTimeMillis()));
+        return touch;
+    }
+
+    public synchronized List<Session> sessions() {
+        List<Session> out = new ArrayList<Session>();
+        Cursor c = getReadableDatabase().query(
+                "sessions", new String[]{"id", "title"},
+                null, null, null, null, "updated_at DESC");
+        try {
+            while (c.moveToNext()) {
+                Session s = new Session();
+                s.id = c.getLong(0);
+                s.title = c.getString(1);
+                out.add(s);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    public synchronized String title(long id) {
+        Cursor c = getReadableDatabase().query(
+                "sessions", new String[]{"title"},
+                "id=?", new String[]{String.valueOf(id)},
+                null, null, null);
+        try {
+            if (!c.moveToFirst()) {
+                return "";
+            }
+            String title = c.getString(0);
+            return title == null ? "" : title;
+        } finally {
+            c.close();
+        }
+    }
+
+    /** 没有会话时返回 -1。 */
+    public synchronized long latestId() {
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT id FROM sessions ORDER BY updated_at DESC LIMIT 1", null);
+        try {
+            if (!c.moveToFirst()) {
+                return -1;
+            }
+            return c.getLong(0);
+        } finally {
+            c.close();
+        }
+    }
+
+    public synchronized List<Message> messages(long sessionId) {
+        return readMessages(sessionId, -1);
+    }
+
+    /** Restore the model checkpoint plus messages appended after it. */
+    public synchronized List<Message> contextMessages(long sessionId) {
+        List<Message> out = new ArrayList<Message>();
+        long through = -1;
+        Cursor c = getReadableDatabase().query("context_windows",
+                new String[]{"through_id", "window"}, "session_id=?",
+                new String[]{String.valueOf(sessionId)}, null, null, null);
+        try {
+            if (c.moveToFirst()) {
+                through = c.getLong(0);
+                JSONArray window = new JSONArray(c.getString(1));
+                for (int i = 0; i < window.length(); i++) {
+                    JSONObject item = window.getJSONObject(i);
+                    Message m = new Message(item.getString("role"), item.optString("content", ""));
+                    m.reasoning = item.optString("reasoning_content", "");
+                    m.toolCalls = item.optJSONArray("tool_calls");
+                    if (item.has("tool_call_id")) m.toolCallId = item.optString("tool_call_id", "");
+                    out.add(m);
+                }
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("Invalid saved context window", error);
+        } finally {
+            c.close();
+        }
+        out.addAll(readMessages(sessionId, through));
+        return out;
+    }
+
+    public synchronized String reasoningNote(String key) {
+        Cursor c = getReadableDatabase().query("reasoning_notes", new String[]{"summary"},
+                "cache_key=?", new String[]{key}, null, null, null);
+        try {
+            return c.moveToFirst() ? c.getString(0) : "";
+        } finally {
+            c.close();
+        }
+    }
+
+    public synchronized void saveReasoningNote(String key, String summary) {
+        ContentValues cv = new ContentValues();
+        cv.put("cache_key", key);
+        cv.put("summary", summary);
+        getWritableDatabase().insertWithOnConflict("reasoning_notes", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    private List<Message> readMessages(long sessionId, long after) {
+        List<Message> out = new ArrayList<Message>();
+        Cursor c = getReadableDatabase().query(
+                "messages",
+                new String[]{"role", "content", "reasoning", "tool_calls", "tool_call_id",
+                        "elapsed_ms", "think_ms", "display_parts", "work_dir"},
+                "session_id=? AND id>?", new String[]{String.valueOf(sessionId), String.valueOf(after)},
+                null, null, "id ASC");
+        try {
+            while (c.moveToNext()) {
+                Message m = new Message(c.getString(0), c.getString(1));
+                String reasoning = c.getString(2);
+                if (reasoning != null && reasoning.length() > 0) {
+                    m.reasoning = reasoning;
+                }
+                String calls = c.getString(3);
+                if (calls != null && calls.length() > 0) {
+                    try {
+                        m.toolCalls = new JSONArray(calls);
+                    } catch (Exception ignored) {
+                    }
+                }
+                String callId = c.getString(4);
+                if (callId != null && callId.length() > 0) {
+                    m.toolCallId = callId;
+                }
+                if (!c.isNull(5)) {
+                    m.elapsedMs = c.getLong(5);
+                }
+                if (!c.isNull(6)) {
+                    m.thinkMs = c.getLong(6);
+                }
+                String parts = c.getString(7);
+                if (parts != null && parts.length() > 0) {
+                    try { m.displayParts = new JSONArray(parts); } catch (Exception ignored) { }
+                }
+                String workDir = c.getString(8);
+                if (workDir != null && workDir.length() > 0) {
+                    m.workDir = workDir;
+                }
+                out.add(m);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    /**
+     * 把耗时记到本会话最后一条助手消息上，重开时还能显示。
+     * 已经记下的更长耗时不被更短的盖掉：界面重进后若只用自己的几秒收尾，
+     * 不能把这一轮真正等过的时间抹掉。
+     */
+    public synchronized void markElapsed(long sessionId, long elapsedMs, long thinkMs) {
+        if (sessionId < 0 || elapsedMs <= 0) {
+            return;
+        }
+        if (thinkMs < 0) {
+            thinkMs = 0;
+        }
+        Cursor c = getReadableDatabase().rawQuery(
+                "SELECT elapsed_ms, think_ms FROM messages WHERE session_id=? AND role=? "
+                        + "ORDER BY id DESC LIMIT 1",
+                new String[]{String.valueOf(sessionId), Message.ASSISTANT});
+        try {
+            if (c.moveToFirst()) {
+                long haveElapsed = c.getLong(0);
+                long haveThink = c.getLong(1);
+                if (haveElapsed > elapsedMs) {
+                    elapsedMs = haveElapsed;
+                }
+                if (haveThink > thinkMs) {
+                    thinkMs = haveThink;
+                }
+            }
+        } finally {
+            c.close();
+        }
+        if (thinkMs > elapsedMs) {
+            elapsedMs = thinkMs;
+        }
+        getWritableDatabase().execSQL(
+                "UPDATE messages SET elapsed_ms=?, think_ms=? WHERE id = ("
+                        + "SELECT MAX(id) FROM messages WHERE session_id=? AND role=?)",
+                new Object[]{Long.valueOf(elapsedMs), Long.valueOf(thinkMs),
+                        Long.valueOf(sessionId), Message.ASSISTANT});
+    }
+
+    public synchronized void delete(long sessionId) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.delete("messages", "session_id=?", new String[]{String.valueOf(sessionId)});
+            db.delete("runs", "session_id=?", new String[]{String.valueOf(sessionId)});
+            db.delete("context_windows", "session_id=?", new String[]{String.valueOf(sessionId)});
+            db.delete("sessions", "id=?", new String[]{String.valueOf(sessionId)});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** 记下这个会话还在不在跑，以及目标。进程被杀掉后靠它接上。 */
+    public synchronized void saveRun(long sessionId, boolean running, String goal,
+            String status, long elapsedMs, long turnAt, long turnWall, long seenAt,
+            long tokensUsed, long tokenBudget) {
+        if (sessionId < 0) {
+            return;
+        }
+        ContentValues cv = new ContentValues();
+        cv.put("session_id", Long.valueOf(sessionId));
+        cv.put("running", Integer.valueOf(running ? 1 : 0));
+        cv.put("goal", goal == null ? "" : goal);
+        cv.put("status", status == null ? "" : status);
+        cv.put("elapsed_ms", Long.valueOf(elapsedMs < 0 ? 0 : elapsedMs));
+        cv.put("turn_at", Long.valueOf(turnAt < 0 ? 0 : turnAt));
+        cv.put("turn_wall", Long.valueOf(turnWall < 0 ? 0 : turnWall));
+        cv.put("seen_at", Long.valueOf(seenAt < 0 ? 0 : seenAt));
+        cv.put("tokens_used", Long.valueOf(tokensUsed < 0 ? 0 : tokensUsed));
+        cv.put("token_budget", Long.valueOf(tokenBudget < 0 ? 0 : tokenBudget));
+        getWritableDatabase().insertWithOnConflict(
+                "runs", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+    public synchronized Run readRun(long sessionId) {
+        Run run = new Run();
+        Cursor c = getReadableDatabase().query(
+                "runs", new String[]{"running", "goal", "status", "elapsed_ms",
+                        "turn_at", "turn_wall", "seen_at", "tokens_used", "token_budget"},
+                "session_id=?", new String[]{String.valueOf(sessionId)},
+                null, null, null);
+        try {
+            if (!c.moveToFirst()) {
+                return run;
+            }
+            run.running = c.getInt(0) != 0;
+            run.goal = c.getString(1) == null ? "" : c.getString(1);
+            run.status = c.getString(2) == null ? "" : c.getString(2);
+            run.elapsedMs = c.getLong(3);
+            run.turnAt = c.getLong(4);
+            run.turnWall = c.getLong(5);
+            run.seenAt = c.getLong(6);
+            run.tokensUsed = c.getLong(7);
+            run.tokenBudget = c.getLong(8);
+            return run;
+        } finally {
+            c.close();
+        }
+    }
+
+    public synchronized List<Long> runningIds() {
+        List<Long> out = new ArrayList<Long>();
+        Cursor c = getReadableDatabase().query(
+                "runs", new String[]{"session_id"},
+                "running=1", null, null, null, null);
+        try {
+            while (c.moveToNext()) {
+                out.add(Long.valueOf(c.getLong(0)));
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+}

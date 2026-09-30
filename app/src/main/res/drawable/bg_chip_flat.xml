@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 输入条上方的扁平胶囊。没有阴影，避免和输入条抢一层。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#F4F4F5"/>
+    <corners android:radius="15dp"/>
+</shape>

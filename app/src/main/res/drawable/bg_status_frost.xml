@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 状态栏还没采到模糊帧时的兜底：顶上乳白，向下淡出。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:angle="270"
+        android:startColor="#F4FFFFFF"
+        android:centerColor="#8CFFFFFF"
+        android:endColor="#00FFFFFF"/>
+</shape>

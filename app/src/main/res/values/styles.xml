@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@color/bg_window</item>
+    </style>
+
+    <style name="SlashPopupAnimation">
+        <item name="android:windowEnterAnimation">@anim/slash_in</item>
+        <item name="android:windowExitAnimation">@anim/slash_out</item>
+    </style>
+    </resources>

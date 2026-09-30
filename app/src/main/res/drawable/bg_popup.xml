@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 弹出菜单：白底 + 底部 3dp 淡影，不用 elevation。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item>
+        <shape>
+            <solid android:color="@color/shadow_mid"/>
+            <corners android:radius="26dp"/>
+        </shape>
+    </item>
+
+    <item android:bottom="3dp">
+        <shape>
+            <solid android:color="@color/surface"/>
+            <corners android:radius="26dp"/>
+        </shape>
+    </item>
+
+</layer-list>

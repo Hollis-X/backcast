@@ -1,0 +1,500 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  主界面。会话铺满全屏，顶栏和输入条浮在上面。
+  阴影一律由 drawable 自绘，不使用 elevation。
+-->
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/main_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_window"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <ScrollView
+        android:id="@+id/scroll"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:paddingLeft="18dp"
+        android:paddingRight="18dp"
+        android:paddingTop="108dp"
+        android:paddingBottom="132dp"
+        android:clipToPadding="false"
+        android:scrollbarStyle="outsideOverlay"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:id="@+id/stream"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"/>
+
+    </ScrollView>
+
+    <!-- 时间和信号那一条：先用乳白渐变，采到画面后再换成轻微模糊。 -->
+    <ImageView
+        android:id="@+id/status_frost"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:layout_gravity="top"
+        android:background="@drawable/bg_status_frost"
+        android:scaleType="fitXY"
+        android:clickable="false"
+        android:focusable="false"/>
+
+    <LinearLayout
+        android:id="@+id/top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="8dp">
+
+            <TextView
+                android:id="@+id/action_menu"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@null"
+                android:gravity="center"
+                android:includeFontPadding="false"
+                android:text=""
+                android:textColor="@color/text_primary"/>
+
+            <LinearLayout
+                android:id="@+id/title_chip"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:layout_marginLeft="6dp"
+                android:layout_marginRight="6dp"
+                android:background="@drawable/bg_chip"
+                android:gravity="center_vertical"
+                android:orientation="vertical"
+                android:paddingLeft="14dp"
+                android:paddingRight="14dp">
+
+                <TextView
+                    android:id="@+id/session_title"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:includeFontPadding="false"
+                    android:text="@string/session_new"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp"/>
+
+                <TextView
+                    android:id="@+id/session_sub"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="middle"
+                    android:maxLines="1"
+                    android:includeFontPadding="false"
+                    android:text="@string/app_name"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp"/>
+
+            </LinearLayout>
+
+            <!-- 上下文圆环和更多合成一张卡片，右侧只剩这一块。 -->
+            <LinearLayout
+                android:id="@+id/top_card"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:background="@drawable/bg_chip"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingLeft="6dp"
+                android:paddingRight="2dp">
+
+                <com.mkei.backcast.ui.ContextMeter
+                    android:id="@+id/context_meter"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:contentDescription="@string/context_hint"/>
+
+                <TextView
+                    android:id="@+id/action_more"
+                    android:layout_width="34dp"
+                    android:layout_height="34dp"
+                    android:background="@null"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:text=""
+                    android:textColor="@color/text_primary"/>
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+    <!-- Codex：模型和权限在同一块输入条里，不另起一排芯片。 -->
+    <LinearLayout
+        android:id="@+id/composer_dock"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="vertical"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp"
+        android:layout_marginBottom="8dp">
+
+        <LinearLayout
+            android:id="@+id/input_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_input_bar"
+            android:paddingLeft="6dp"
+            android:paddingRight="8dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="6dp">
+
+            <LinearLayout
+                android:id="@+id/goal_bar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="34dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="2dp">
+
+                    <TextView
+                        android:id="@+id/goal_label"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:singleLine="true"
+                        android:textColor="@color/text_primary"
+                        android:textSize="14sp"/>
+
+                    <TextView
+                        android:id="@+id/goal_budget"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginLeft="8dp"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp"/>
+
+                    <TextView
+                        android:id="@+id/goal_time"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginLeft="8dp"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp"/>
+
+                    <ImageView
+                        android:id="@+id/goal_clear"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_marginLeft="4dp"
+                        android:background="@null"
+                        android:contentDescription="@string/goal_clear"
+                        android:scaleType="center"/>
+
+                    <ImageView
+                        android:id="@+id/goal_edit"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_marginLeft="4dp"
+                        android:background="@null"
+                        android:scaleType="center"/>
+
+                    <ImageView
+                        android:id="@+id/goal_toggle"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:background="@null"
+                        android:scaleType="center"/>
+
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:background="#E6E6E6"/>
+
+            </LinearLayout>
+
+            <com.mkei.backcast.ui.SlashInput
+                android:id="@+id/prompt"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="40dp"
+                android:maxHeight="150dp"
+                android:background="@null"
+                android:hint="@string/hint_prompt"
+                android:textColorHint="@color/text_secondary"
+                android:textColor="@color/text_primary"
+                android:textSize="16sp"
+                android:paddingLeft="10dp"
+                android:paddingRight="8dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="4dp"
+                android:gravity="center_vertical"
+                android:maxLines="6"
+                android:inputType="textMultiLine|textNoSuggestions|textCapSentences"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/action_plus"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="@null"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:text=""
+                    android:textColor="@color/text_primary"/>
+
+                <LinearLayout
+                    android:id="@+id/model_chip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingLeft="2dp"
+                    android:paddingRight="6dp">
+
+                    <TextView
+                        android:id="@+id/model_chip_text"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxWidth="148dp"
+                        android:maxLines="1"
+                        android:includeFontPadding="false"
+                        android:text="@string/status_no_model"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"/>
+
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/access_chip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:gravity="center_vertical"
+                    android:includeFontPadding="false"
+                    android:paddingLeft="4dp"
+                    android:paddingRight="4dp"
+                    android:text="@string/access_full"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp"/>
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1"/>
+
+                <FrameLayout
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_marginRight="2dp">
+
+                    <Button
+                        android:id="@+id/send"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:background="@drawable/bg_circle_accent"
+                        android:stateListAnimator="@null"
+                        android:elevation="0dp"
+                        android:text=""
+                        android:padding="0dp"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:includeFontPadding="false"/>
+
+                    <Button
+                        android:id="@+id/stop"
+                        android:layout_width="28dp"
+                        android:layout_height="28dp"
+                        android:background="@drawable/bg_circle_accent"
+                        android:stateListAnimator="@null"
+                        android:elevation="0dp"
+                        android:text=""
+                        android:padding="0dp"
+                        android:minWidth="0dp"
+                        android:minHeight="0dp"
+                        android:includeFontPadding="false"
+                        android:visibility="gone"/>
+
+                </FrameLayout>
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- 左侧抽屉：滑入 + 右侧遮罩淡入 -->
+    <FrameLayout
+        android:id="@+id/drawer_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <View
+            android:id="@+id/drawer_scrim"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/drawer_scrim"/>
+
+        <LinearLayout
+            android:id="@+id/drawer_panel"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="start"
+            android:orientation="vertical"
+            android:background="@drawable/bg_drawer"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingLeft="28dp"
+            android:paddingRight="24dp"
+            android:paddingTop="30dp"
+            android:paddingBottom="28dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/drawer_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/drawer_title"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"/>
+
+            <TextView
+                android:id="@+id/drawer_search"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@null"
+                android:gravity="center"
+                android:text=""
+                android:textColor="@color/text_primary"/>
+
+            <TextView
+                android:id="@+id/drawer_settings"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@null"
+                android:gravity="center"
+                android:text=""
+                android:textColor="@color/text_primary"/>
+
+            </LinearLayout>
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:layout_marginTop="18dp"
+                android:fillViewport="true"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/drawer_sessions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"/>
+
+            </ScrollView>
+
+            <TextView
+                android:id="@+id/drawer_chat"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:layout_gravity="right"
+                android:background="@drawable/bg_drawer_new"
+                android:gravity="center"
+                android:paddingLeft="20dp"
+                android:paddingRight="24dp"
+                android:text="@string/drawer_new"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"/>
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/sheet_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <View
+            android:id="@+id/sheet_scrim"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clickable="true"
+            android:background="@color/drawer_scrim"/>
+
+        <LinearLayout
+            android:id="@+id/sheet_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:background="@drawable/bg_sheet"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingLeft="20dp"
+            android:paddingRight="20dp"
+            android:paddingBottom="24dp">
+
+            <View
+                android:layout_width="36dp"
+                android:layout_height="4dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="10dp"
+                android:layout_marginBottom="14dp"
+                android:background="@drawable/bg_sheet_handle"/>
+
+            <ScrollView
+                android:id="@+id/sheet_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/sheet_body"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"/>
+
+            </ScrollView>
+
+        </LinearLayout>
+
+    </FrameLayout>
+</FrameLayout>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 指令条目：浅灰圆角块，和输入框里的指令块同一套观感。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/chip_bg"/>
+    <corners android:radius="10dp"/>
+</shape>

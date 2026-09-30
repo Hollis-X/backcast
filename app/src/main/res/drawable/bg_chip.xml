@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 顶栏卡片。浅灰圆角，没有投影。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/chip_bg"/>
+    <corners android:radius="22dp"/>
+</shape>
