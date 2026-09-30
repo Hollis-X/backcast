@@ -3,10 +3,12 @@ package com.mkei.backcast;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -17,8 +19,18 @@ import com.mkei.backcast.ui.Icons;
 
 import java.util.List;
 
-/** 设置界面：接口、密钥、模型（可拉取勾选）、root、系统提示词。思考强度在对话里切。 */
+/** 设置界面：接口、模型、回复偏好、root、系统提示词。思考强度在对话里切。 */
 public class SettingsActivity extends AppCompatActivity {
+
+    private static final String[] OUTPUT_VERBOSITY_VALUES = {
+            "default", "low", "medium", "high"
+    };
+    private static final String[] REASONING_SUMMARY_VALUES = {
+            "auto", "concise", "detailed", "none"
+    };
+    private static final String[] OUTPUT_LANGUAGE_VALUES = {
+            "zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de"
+    };
 
     private EditText baseUrl;
     private EditText apiKey;
@@ -29,6 +41,9 @@ public class SettingsActivity extends AppCompatActivity {
     private Button fetchModels;
     private TextView fetchStatus;
     private LinearLayout modelList;
+    private Spinner outputVerbosity;
+    private Spinner reasoningSummary;
+    private Spinner outputLanguage;
 
     /** 当前勾选生效的模型，只能有一个。 */
     private String selected;
@@ -59,12 +74,21 @@ public class SettingsActivity extends AppCompatActivity {
         fetchModels = (Button) findViewById(R.id.fetch_models);
         fetchStatus = (TextView) findViewById(R.id.fetch_status);
         modelList = (LinearLayout) findViewById(R.id.model_list);
+        outputVerbosity = (Spinner) findViewById(R.id.output_verbosity);
+        reasoningSummary = (Spinner) findViewById(R.id.reasoning_summary);
+        outputLanguage = (Spinner) findViewById(R.id.output_language);
 
         final Settings settings = new Settings(this);
         baseUrl.setText(settings.baseUrl());
         apiKey.setText(settings.apiKey());
         model.setText(settings.model());
         useRoot.setChecked(settings.useRoot());
+        bindChoices(outputVerbosity, R.array.output_verbosity_labels,
+                OUTPUT_VERBOSITY_VALUES, settings.outputVerbosity());
+        bindChoices(reasoningSummary, R.array.reasoning_summary_labels,
+                REASONING_SUMMARY_VALUES, settings.reasoningSummary());
+        bindChoices(outputLanguage, R.array.output_language_labels,
+                OUTPUT_LANGUAGE_VALUES, settings.outputLanguage());
         // 输入框只放静态指令，环境事实另外只读展示，不会被一起存下来。
         systemPrompt.setText(settings.systemPrompt());
         if (envContext != null) {
@@ -102,11 +126,33 @@ public class SettingsActivity extends AppCompatActivity {
                         model.getText().toString(),
                         useRoot.isChecked(),
                         systemPrompt.getText().toString());
+                settings.setOutputVerbosity(selectedValue(outputVerbosity, OUTPUT_VERBOSITY_VALUES));
+                settings.setReasoningSummary(selectedValue(reasoningSummary, REASONING_SUMMARY_VALUES));
+                settings.setOutputLanguage(selectedValue(outputLanguage, OUTPUT_LANGUAGE_VALUES));
                 Toast.makeText(SettingsActivity.this,
                         R.string.toast_saved, Toast.LENGTH_SHORT).show();
                 finish();
             }
         });
+    }
+
+    private void bindChoices(Spinner spinner, int labels, String[] values, String current) {
+        ArrayAdapter<CharSequence> adapter = ArrayAdapter.createFromResource(
+                this, labels, android.R.layout.simple_spinner_item);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        for (int i = 0; i < values.length; i++) {
+            if (values[i].equals(current)) {
+                spinner.setSelection(i);
+                return;
+            }
+        }
+        spinner.setSelection(0);
+    }
+
+    private String selectedValue(Spinner spinner, String[] values) {
+        int index = spinner.getSelectedItemPosition();
+        return index >= 0 && index < values.length ? values[index] : values[0];
     }
 
     /** 后台线程拉取模型列表，回来后渲染勾选项。 */

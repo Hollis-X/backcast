@@ -29,7 +29,25 @@ public final class ReasoningNotes {
         this.store = store;
     }
 
+    public boolean refreshPreference(TurnTrace.Piece piece) {
+        if (piece.think == null) return false;
+        String preference = settings.reasoningSummary() + "\n" + settings.outputLanguage();
+        if (preference.equals(piece.summaryPreference)) return false;
+        piece.summaryPreference = preference;
+        piece.summaryVersion++;
+        piece.summaryPending = false;
+        piece.summary = "";
+        piece.summaryError = "";
+        piece.summaryChars = 0;
+        piece.requestedChars = 0;
+        piece.summaryComplete = false;
+        return true;
+    }
+
     public void request(final TurnTrace.Piece piece, final Runnable changed) {
+        refreshPreference(piece);
+        final String mode = settings.reasoningSummary(), language = settings.outputLanguage();
+        if ("none".equals(mode)) return;
         if (!piece.sealed || piece.think == null || piece.think.length() == 0 || piece.summaryPending
                 || piece.summaryError.length() > 0) return;
         final int size = piece.think.length();
@@ -42,8 +60,11 @@ public final class ReasoningNotes {
         final String sample = ReasoningSummary.sample(piece.think);
         final boolean complete = piece.sealed;
         final int version = piece.summaryVersion;
+        final String preference = piece.summaryPreference;
+        final String summaryPrompt = ReasoningSummary.prompt(mode, language);
         final LlmClient.Config config = new LlmClient.Config(settings.baseUrl(), settings.apiKey(), settings.model());
-        config.maxTokens = 600;
+        config.responseInstructions = ResponsePreferences.languageInstruction(language);
+        config.maxTokens = ReasoningSummary.tokenLimit(mode);
         config.timeoutMs = 15000;
         config.totalTimeoutMs = 25000;
         config.maxResponseChars = 128000;
@@ -55,14 +76,15 @@ public final class ReasoningNotes {
                 public void run() {
                     String result = "", error = "";
                     try {
-                        String key = key(config.baseUrl + config.model + ReasoningSummary.PROMPT + complete + size + sample);
+                        String key = key(config.baseUrl + config.model + preference + summaryPrompt + complete + size + sample);
                         result = store.reasoningNote(key);
                         if (result.length() == 0) {
-                            LlmClient.Reply reply = new LlmClient(config).send(ReasoningSummary.request(sample, complete), null, null);
+                            LlmClient.Reply reply = new LlmClient(config).send(
+                                    ReasoningSummary.request(sample, complete, mode, language), null, null);
                             if (reply.error != null) throw new IllegalStateException(reply.error);
-                            result = ReasoningSummary.validate(reply.content);
+                            result = ReasoningSummary.validate(reply.content, mode);
                             result = PromptGuard.redact(result, instructions, environment,
-                                    ReasoningSummary.PROMPT + "\n" + Compactor.PROMPT);
+                                    summaryPrompt + "\n" + Compactor.PROMPT);
                             if (PromptGuard.REFUSAL.equals(result)) throw new IllegalStateException("Protected output");
                             store.saveReasoningNote(key, result);
                         }
@@ -72,6 +94,10 @@ public final class ReasoningNotes {
                     final String summary = result, problem = error;
                     ui.post(new Runnable() {
                         public void run() {
+                            if (refreshPreference(piece)) {
+                                changed.run();
+                                return;
+                            }
                             if (piece.summaryVersion != version || !piece.sealed || piece.think.length() != size) return;
                             piece.summaryPending = false;
                             piece.summary = summary;

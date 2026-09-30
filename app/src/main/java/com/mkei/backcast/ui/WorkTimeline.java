@@ -34,13 +34,18 @@ public final class WorkTimeline extends LinearLayout {
     public void bind(TurnTrace.Range range, boolean live) {
         int start = Math.max(0, range.start);
         int end = Math.min(range.end, range.trace.order.size());
-        int count = Math.max(0, end - start);
+        List<TurnTrace.Piece> visible = new ArrayList<TurnTrace.Piece>();
+        for (int i = start; i < end; i++) {
+            TurnTrace.Piece piece = range.trace.order.get(i);
+            if (range.trace.showReasoning || piece.think == null) visible.add(piece);
+        }
+        int count = visible.size();
         boolean reset = rows.size() > count;
         for (int i = 0; !reset && i < rows.size(); i++)
-            reset = rows.get(i).piece != range.trace.order.get(start + i);
+            reset = rows.get(i).piece != visible.get(i);
         if (reset) { rows.clear(); removeAllViews(); }
         while (rows.size() < count) {
-            Row row = new Row(range.trace.order.get(start + rows.size()));
+            Row row = new Row(visible.get(rows.size()));
             rows.add(row);
             addView(row.root, width());
         }

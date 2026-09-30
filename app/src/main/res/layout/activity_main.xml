@@ -10,7 +10,11 @@
     android:layout_height="match_parent"
     android:background="@color/bg_window"
     android:clipChildren="false"
-    android:clipToPadding="false">
+    android:clipToPadding="false"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+
+    <requestFocus/>
 
     <ScrollView
         android:id="@+id/scroll"
@@ -21,6 +25,7 @@
         android:paddingTop="108dp"
         android:paddingBottom="132dp"
         android:clipToPadding="false"
+        android:descendantFocusability="blocksDescendants"
         android:scrollbarStyle="outsideOverlay"
         android:fillViewport="true">
 
@@ -31,6 +36,20 @@
             android:orientation="vertical"/>
 
     </ScrollView>
+
+    <ImageView
+        android:id="@+id/scroll_latest"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_gravity="bottom|right"
+        android:layout_marginRight="18dp"
+        android:layout_marginBottom="140dp"
+        android:padding="12dp"
+        android:background="@drawable/bg_latest_button"
+        android:contentDescription="@string/scroll_latest"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"/>
 
     <!-- 时间和信号那一条：先用乳白渐变，采到画面后再换成轻微模糊。 -->
     <ImageView

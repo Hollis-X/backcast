@@ -10,6 +10,9 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -135,6 +138,74 @@ public final class AgentLoopRegressionTest {
         check(loop.activeTurnStart() == 100000, "Fixture did not publish a running clock");
         loop.cancel();
         check(loop.activeTurnStart() == 0, "Stopped turn still published an active clock");
+    }
+    private static void retargetKeepsRunningRequestCancellable() throws Exception {
+        SystemClock.set(100000);
+        final CountDownLatch started = new CountDownLatch(1), stopped = new CountDownLatch(1);
+        final int[] aborts = new int[2];
+        LlmClient original = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "original")) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                started.countDown();
+                try {
+                    check(stopped.await(5, TimeUnit.SECONDS), "Running request was not stopped");
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(error);
+                }
+                Reply reply = new Reply();
+                reply.content = "cancelled old output";
+                return reply;
+            }
+            @Override public void abort() {
+                aborts[0]++;
+                stopped.countDown();
+            }
+        };
+        final LlmClient.Config config = new LlmClient.Config("http://localhost", "fixture", "new");
+        config.responseInstructions = "Mandatory application output language: English (en).";
+        final int[] served = new int[1];
+        LlmClient replacement = new LlmClient(config) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                served[0]++;
+                check(config.responseInstructions.contains("English (en)"), "Next request lost the new language config");
+                Reply reply = new Reply();
+                reply.content = "new configured output";
+                return reply;
+            }
+            @Override public void abort() { aborts[1]++; }
+        };
+        final Recorder recorder = new Recorder();
+        final AgentLoop loop = new AgentLoop(original, new ToolRegistry(), new AgentLoop.Quiet());
+        loop.bindSession(1);
+        loop.reset("system");
+        loop.setRecorder(recorder);
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try { loop.submit("first", 1, loop.generation(), 1); }
+                catch (Throwable error) { failure.set(error); }
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            check(started.await(5, TimeUnit.SECONDS), "Original request did not start");
+            loop.retarget(replacement, new ToolRegistry());
+            loop.cancel();
+            worker.join(5000);
+            check(!worker.isAlive() && failure.get() == null, "Stopped turn did not finish: " + failure.get());
+            check(aborts[0] == 1 && aborts[1] == 0, "Stop targeted the replacement client instead of the running request");
+            check(served[0] == 0 && !loop.busy(), "Retarget restarted the cancelled turn");
+            for (Message message : recorder.saved) {
+                check(!Message.ASSISTANT.equals(message.role), "Cancelled output was persisted");
+            }
+            loop.submit("next", 1, loop.generation(), 2);
+            check(served[0] == 1 && "new configured output".equals(recorder.answer().content),
+                    "Next turn did not use the replacement client");
+        } finally {
+            stopped.countDown();
+            worker.join(5000);
+        }
     }
     private static void disclosureNeverReachesTransport() throws Exception {
         SystemClock.set(100000);
@@ -760,7 +831,8 @@ public final class AgentLoopRegressionTest {
     }
     public static void main(String[] args) {
         for (String name : new String[]{"newClockPublishedBeforePersistence", "resumeAndRetryKeepOriginalClock",
-                "stoppedClockIsNotPublished", "disclosureNeverReachesTransport", "disclosureIsRefusedAfterRecovery",
+                "stoppedClockIsNotPublished", "retargetKeepsRunningRequestCancellable",
+                "disclosureNeverReachesTransport", "disclosureIsRefusedAfterRecovery",
                 "disclosureGoalStopsWithoutSpinning", "promptFileTaskIsAllowed", "staleCallbacksDoNotChangeNewTurnClock",
                 "longBackgroundResumeKeepsClock", "disclosureIsRefusedBeforeCompaction",
                 "repeatedToolResultsStopTheGoal", "goalWithoutToolCallsStopsAfterRepeats",
@@ -771,6 +843,6 @@ public final class AgentLoopRegressionTest {
                 "goalStopsWhenMarkedComplete", "bareAuditClaimDoesNotFinish",
                 "emptyContinuationsBlockTheGoal", "continuationEncouragesClosingOnce"}) run(name);
         if (failures != 0) throw new AssertionError(failures + " loop tests failed");
-        System.out.println("24 loop tests passed");
+        System.out.println("25 loop tests passed");
     }
 }

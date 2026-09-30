@@ -12,6 +12,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -23,6 +24,36 @@ public class ChatStore extends SQLiteOpenHelper {
     public static class Session {
         public long id;
         public String title;
+    }
+
+    /** A bounded transcript page; cursors stay valid while new messages are appended. */
+    public static final class MessagePage {
+        public final List<Message> messages;
+        public final long firstId;
+        public final long lastId;
+        public final long earlierCount;
+        public final String requestBefore;
+        /** Only tool call labels, for results whose assistant is in the previous page. */
+        public final Message leadingAssistant;
+        /** Results just after this page; used to finish existing labels, never drawn twice. */
+        public final List<Message> trailingResults;
+
+        public MessagePage(List<Message> messages, long firstId, long lastId, long earlierCount,
+                String requestBefore, Message leadingAssistant) {
+            this(messages, firstId, lastId, earlierCount, requestBefore, leadingAssistant,
+                    new ArrayList<Message>());
+        }
+
+        public MessagePage(List<Message> messages, long firstId, long lastId, long earlierCount,
+                String requestBefore, Message leadingAssistant, List<Message> trailingResults) {
+            this.messages = Collections.unmodifiableList(messages);
+            this.firstId = firstId;
+            this.lastId = lastId;
+            this.earlierCount = earlierCount;
+            this.requestBefore = requestBefore;
+            this.leadingAssistant = leadingAssistant;
+            this.trailingResults = Collections.unmodifiableList(trailingResults);
+        }
     }
 
     public static class Run {
@@ -270,6 +301,152 @@ public class ChatStore extends SQLiteOpenHelper {
         return readMessages(sessionId, -1);
     }
 
+    /** Call on a worker thread. A non-positive cursor selects the latest page. */
+    public synchronized MessagePage messagePage(long sessionId, long beforeId, int limit) {
+        int pageSize = Math.min(128, Math.max(1, limit));
+        List<Message> out = new ArrayList<Message>();
+        SQLiteDatabase db = getReadableDatabase();
+        String selection = "session_id=?";
+        String[] args = new String[]{String.valueOf(sessionId)};
+        if (beforeId > 0) {
+            selection += " AND id<?";
+            args = new String[]{String.valueOf(sessionId), String.valueOf(beforeId)};
+        }
+        Cursor c = db.query("messages", new String[]{"id", "role", "content", "reasoning",
+                "tool_calls", "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir"},
+                selection, args, null, null, "id DESC", String.valueOf(pageSize));
+        long firstId = 0;
+        long lastId = 0;
+        try {
+            while (c.moveToNext()) {
+                long id = c.getLong(0);
+                if (lastId == 0) lastId = id;
+                firstId = id;
+                out.add(readMessage(c, 1));
+            }
+        } finally {
+            c.close();
+        }
+        Collections.reverse(out);
+        if (out.isEmpty()) return new MessagePage(out, 0, 0, 0, "", null);
+
+        String[] prefixArgs = new String[]{String.valueOf(sessionId), String.valueOf(firstId)};
+        long earlierCount = 0;
+        Cursor count = db.rawQuery("SELECT COUNT(*) FROM messages WHERE session_id=? AND id<?", prefixArgs);
+        try {
+            if (count.moveToFirst()) earlierCount = count.getLong(0);
+        } finally {
+            count.close();
+        }
+        String request = "";
+        Cursor user = db.query("messages", new String[]{"content"},
+                "session_id=? AND id<? AND role=?",
+                new String[]{prefixArgs[0], prefixArgs[1], Message.USER},
+                null, null, "id DESC", "1");
+        try {
+            if (user.moveToFirst()) {
+                String text = user.getString(0);
+                if (text != null && !com.mkei.backcast.agent.Goal.isSteer(text)
+                        && !com.mkei.backcast.agent.Goal.isNote(text)) request = text;
+            }
+        } finally {
+            user.close();
+        }
+        Message leading = null;
+        if (Message.TOOL.equals(out.get(0).role)) {
+            Cursor previous = db.query("messages", new String[]{"role", "tool_calls"},
+                    "session_id=? AND id<? AND role<>?",
+                    new String[]{prefixArgs[0], prefixArgs[1], Message.TOOL},
+                    null, null, "id DESC", "1");
+            try {
+                if (previous.moveToFirst() && Message.ASSISTANT.equals(previous.getString(0))) {
+                    String calls = previous.getString(1);
+                    if (calls != null && calls.length() > 0) {
+                        try {
+                            JSONArray allCalls = new JSONArray(calls);
+                            JSONArray shownCalls = new JSONArray();
+                            for (int i = 0; i < allCalls.length(); i++) {
+                                JSONObject call = allCalls.optJSONObject(i);
+                                if (call == null) continue;
+                                String callId = call.optString("id", "");
+                                for (int j = 0; j < out.size() && Message.TOOL.equals(out.get(j).role); j++) {
+                                    if (callId.equals(out.get(j).toolCallId)) {
+                                        shownCalls.put(call);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (shownCalls.length() > 0) leading = Message.assistant("", shownCalls);
+                        } catch (Exception ignored) { }
+                    }
+                }
+            } finally {
+                previous.close();
+            }
+        }
+        return new MessagePage(out, firstId, lastId, earlierCount, request, leading,
+                trailingResults(db, sessionId, lastId, out));
+    }
+
+    private List<Message> trailingResults(SQLiteDatabase db, long sessionId, long lastId,
+            List<Message> page) {
+        ArrayList<Message> out = new ArrayList<Message>();
+        int assistantAt = page.size() - 1;
+        while (assistantAt >= 0 && Message.TOOL.equals(page.get(assistantAt).role)) assistantAt--;
+        if (assistantAt < 0) return out;
+        Message assistant = page.get(assistantAt);
+        if (!Message.ASSISTANT.equals(assistant.role) || assistant.toolCalls == null) return out;
+        ArrayList<String> ids = new ArrayList<String>();
+        for (int i = 0; i < assistant.toolCalls.length() && ids.size() < 128; i++) {
+            JSONObject call = assistant.toolCalls.optJSONObject(i);
+            if (call == null) continue;
+            String id = call.optString("id", "");
+            if (id.length() == 0 || ids.contains(id)) continue;
+            boolean complete = false;
+            for (int j = assistantAt + 1; j < page.size(); j++) {
+                if (id.equals(page.get(j).toolCallId)) { complete = true; break; }
+            }
+            if (!complete) ids.add(id);
+        }
+        if (ids.isEmpty()) return out;
+
+        long boundary = 0;
+        Cursor next = db.query("messages", new String[]{"id"},
+                "session_id=? AND id>? AND role<>?",
+                new String[]{String.valueOf(sessionId), String.valueOf(lastId), Message.TOOL},
+                null, null, "id ASC", "1");
+        try {
+            if (next.moveToFirst()) boundary = next.getLong(0);
+        } finally {
+            next.close();
+        }
+        StringBuilder selection = new StringBuilder("session_id=? AND id>?");
+        ArrayList<String> args = new ArrayList<String>();
+        args.add(String.valueOf(sessionId));
+        args.add(String.valueOf(lastId));
+        if (boundary > 0) {
+            selection.append(" AND id<?");
+            args.add(String.valueOf(boundary));
+        }
+        selection.append(" AND role=? AND tool_call_id IN (");
+        args.add(Message.TOOL);
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) selection.append(',');
+            selection.append('?');
+            args.add(ids.get(i));
+        }
+        selection.append(')');
+        Cursor results = db.query("messages", new String[]{"role", "content", "reasoning", "tool_calls",
+                "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir"},
+                selection.toString(), args.toArray(new String[args.size()]), null, null, "id ASC", "128");
+        try {
+            while (results.moveToNext()) out.add(readMessage(results, 0));
+        } finally {
+            results.close();
+        }
+        return out;
+    }
+
     /** Restore the model checkpoint plus messages appended after it. */
     public synchronized List<Message> contextMessages(long sessionId) {
         List<Message> out = new ArrayList<Message>();
@@ -322,42 +499,33 @@ public class ChatStore extends SQLiteOpenHelper {
                 null, null, "id ASC");
         try {
             while (c.moveToNext()) {
-                Message m = new Message(c.getString(0), c.getString(1));
-                String reasoning = c.getString(2);
-                if (reasoning != null && reasoning.length() > 0) {
-                    m.reasoning = reasoning;
-                }
-                String calls = c.getString(3);
-                if (calls != null && calls.length() > 0) {
-                    try {
-                        m.toolCalls = new JSONArray(calls);
-                    } catch (Exception ignored) {
-                    }
-                }
-                String callId = c.getString(4);
-                if (callId != null && callId.length() > 0) {
-                    m.toolCallId = callId;
-                }
-                if (!c.isNull(5)) {
-                    m.elapsedMs = c.getLong(5);
-                }
-                if (!c.isNull(6)) {
-                    m.thinkMs = c.getLong(6);
-                }
-                String parts = c.getString(7);
-                if (parts != null && parts.length() > 0) {
-                    try { m.displayParts = new JSONArray(parts); } catch (Exception ignored) { }
-                }
-                String workDir = c.getString(8);
-                if (workDir != null && workDir.length() > 0) {
-                    m.workDir = workDir;
-                }
-                out.add(m);
+                out.add(readMessage(c, 0));
             }
         } finally {
             c.close();
         }
         return out;
+    }
+
+    private static Message readMessage(Cursor c, int offset) {
+        Message m = new Message(c.getString(offset), c.getString(offset + 1));
+        String reasoning = c.getString(offset + 2);
+        if (reasoning != null && reasoning.length() > 0) m.reasoning = reasoning;
+        String calls = c.getString(offset + 3);
+        if (calls != null && calls.length() > 0) {
+            try { m.toolCalls = new JSONArray(calls); } catch (Exception ignored) { }
+        }
+        String callId = c.getString(offset + 4);
+        if (callId != null && callId.length() > 0) m.toolCallId = callId;
+        if (!c.isNull(offset + 5)) m.elapsedMs = c.getLong(offset + 5);
+        if (!c.isNull(offset + 6)) m.thinkMs = c.getLong(offset + 6);
+        String parts = c.getString(offset + 7);
+        if (parts != null && parts.length() > 0) {
+            try { m.displayParts = new JSONArray(parts); } catch (Exception ignored) { }
+        }
+        String workDir = c.getString(offset + 8);
+        if (workDir != null && workDir.length() > 0) m.workDir = workDir;
+        return m;
     }
 
     /**

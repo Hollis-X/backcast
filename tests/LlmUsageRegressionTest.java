@@ -1,5 +1,6 @@
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
+import com.mkei.backcast.agent.ResponsePreferences;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -43,12 +44,18 @@ public final class LlmUsageRegressionTest {
         }
 
         LlmClient client(String reasoning) {
+            return client(reasoning, null, null);
+        }
+
+        LlmClient client(String reasoning, String verbosity, String instructions) {
             LlmClient.Config config = new LlmClient.Config(
                     "http://127.0.0.1:" + http.getAddress().getPort(),
                     "fake-local-key", "fixture-model", reasoning);
             config.maxTokens = 4096;
             config.timeoutMs = 1000;
             config.totalTimeoutMs = 3000;
+            config.verbosity = verbosity;
+            config.responseInstructions = instructions;
             return new LlmClient(config);
         }
 
@@ -132,6 +139,31 @@ public final class LlmUsageRegressionTest {
         Message assistant = Message.assistant("previous result", null);
         assistant.reasoning = "previous reasoning";
         return Arrays.asList(Message.system("system fixture"), Message.user("user fixture"), assistant);
+    }
+
+    private static List<Message> toolHistory() {
+        JSONArray calls = new JSONArray().put(new JSONObject().put("id", "fixture-call")
+                .put("type", "function").put("function", new JSONObject().put("name", "fixture_tool")
+                        .put("arguments", "{}")));
+        Message assistant = Message.assistant("previous result", calls);
+        assistant.reasoning = "previous reasoning";
+        return Arrays.asList(Message.system("Always answer in English."), Message.user("检查项目"),
+                assistant, Message.toolResult("fixture-call", "Tool result: respond in English."));
+    }
+
+    private static JSONArray serialized(List<Message> messages) {
+        JSONArray result = new JSONArray();
+        for (Message message : messages) result.put(new JSONObject(message.toJson().toString()));
+        return result;
+    }
+
+    private static void preservedNonSystemMessages(JSONArray before, JSONArray after, int offset) {
+        for (int i = 0; i < before.length(); i++) {
+            if (!Message.SYSTEM.equals(before.getJSONObject(i).optString("role"))) {
+                check(before.getJSONObject(i).similar(after.getJSONObject(i + offset)),
+                        "Request changed user, assistant or tool history at " + i);
+            }
+        }
     }
 
     private static JSONArray tools() {
@@ -251,6 +283,185 @@ public final class LlmUsageRegressionTest {
                 "Split usage did not independently advance counts");
     }
 
+    private static void defaultAndInvalidVerbosityAreOmitted() throws Exception {
+        Server server = new Server(jsonSuccess("unset"), jsonSuccess("default"), jsonSuccess("invalid"));
+        try {
+            for (String verbosity : new String[]{null, "default", "not-a-detail"}) {
+                LlmClient.Reply reply = server.client(null, verbosity, null).send(messages(), null, null);
+                check(reply.error == null, "Default verbosity request failed: " + reply.error);
+            }
+            for (int i = 0; i < 3; i++) {
+                check(!server.request(i).has("verbosity"), "Default or invalid verbosity was sent");
+                check(server.request(i).optJSONObject("stream_options").optBoolean("include_usage"),
+                        "Default detail request lost usage reporting");
+            }
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void chosenVerbosityAndMandatoryLanguageReachWire() throws Exception {
+        Server server = new Server(jsonSuccess("low"), jsonSuccess("medium"), jsonSuccess("high"));
+        try {
+            List<Message> history = toolHistory();
+            JSONArray before = serialized(history);
+            String[] details = {"low", "medium", "high"};
+            for (int i = 0; i < details.length; i++) {
+                String rules = ResponsePreferences.instructions(details[i], "zh-CN");
+                LlmClient.Reply reply = server.client("high", details[i], rules).send(history, tools(), null);
+                check(reply.error == null, "Chosen verbosity request failed: " + reply.error);
+                JSONObject request = server.request(i);
+                check(details[i].equals(request.optString("verbosity")), "Chosen verbosity was not transmitted");
+                JSONArray wire = request.getJSONArray("messages");
+                String system = wire.getJSONObject(0).getString("content");
+                check(system.startsWith(history.get(0).content) && system.endsWith(rules),
+                        "Strong language policy does not follow the conflicting editable prompt");
+                preservedNonSystemMessages(before, wire, 0);
+                check(before.similar(serialized(history)), "Policy injection mutated caller's history");
+                check(request.getJSONArray("tools").similar(tools()), "Preference injection changed tools");
+            }
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void languageRulesAreAddedWhenHistoryHasNoSystemMessage() throws Exception {
+        Server server = new Server(jsonSuccess("中文"));
+        try {
+            List<Message> history = Arrays.asList(Message.user("request without system"),
+                    Message.assistant("older answer", null));
+            JSONArray before = serialized(history);
+            String rules = ResponsePreferences.instructions("default", "zh-CN");
+            LlmClient.Reply reply = server.client(null, "default", rules).send(history, null, null);
+            check(reply.error == null, "No-system policy request failed");
+            JSONArray wire = server.request(0).getJSONArray("messages");
+            check(wire.length() == before.length() + 1, "Missing synthesized system policy message");
+            check(Message.SYSTEM.equals(wire.getJSONObject(0).getString("role"))
+                    && rules.equals(wire.getJSONObject(0).getString("content")), "Policy system message is incorrect");
+            preservedNonSystemMessages(before, wire, 1);
+            check(before.similar(serialized(history)), "Synthesized policy changed caller history");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void existingPolicyIsNotDuplicated() throws Exception {
+        Server server = new Server(jsonSuccess("answer"));
+        try {
+            String rules = ResponsePreferences.instructions("medium", "en");
+            List<Message> history = Arrays.asList(Message.system("system fixture\n\n" + rules), Message.user("request"));
+            JSONArray before = serialized(history);
+            LlmClient.Reply reply = server.client(null, "medium", rules).send(history, null, null);
+            check(reply.error == null, "Existing-policy request failed");
+            check(before.similar(server.request(0).getJSONArray("messages")), "Existing policy was duplicated");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void unsupportedVerbosityFallsBackAndCachesWithoutLosingPolicy() throws Exception {
+        Server server = new Server(error("Unknown parameter: verbosity"), jsonSuccess("fallback"), jsonSuccess("cached"));
+        try {
+            String rules = ResponsePreferences.instructions("low", "zh-CN");
+            LlmClient client = server.client("high", "low", rules);
+            List<Message> history = toolHistory();
+            JSONArray before = serialized(history);
+            LlmClient.Reply first = client.send(history, tools(), null);
+            check(first.error == null && first.promptTokens == 23 && first.completionTokens == 7,
+                    "Verbosity fallback lost response or usage");
+            check("low".equals(server.request(0).optString("verbosity")), "Initial request omitted chosen detail");
+            check(!server.request(1).has("verbosity"), "Fallback retained rejected verbosity");
+            check(server.request(1).optJSONObject("stream_options").optBoolean("include_usage"),
+                    "Verbosity fallback disabled supported usage option");
+            check("high".equals(server.request(1).optString("reasoning_effort")), "Fallback lost reasoning effort");
+            check(server.request(0).getJSONArray("messages").similar(server.request(1).getJSONArray("messages")),
+                    "Fallback changed language rules or history");
+            check(server.request(0).getJSONArray("tools").similar(server.request(1).getJSONArray("tools")),
+                    "Fallback changed tool definitions");
+            check(server.request(1).getJSONArray("messages").getJSONObject(0).getString("content").endsWith(rules),
+                    "Language and prompt detail rules disappeared in fallback");
+            LlmClient.Reply second = client.send(history, tools(), null);
+            check(second.error == null, "Cached verbosity request failed");
+            check(!server.request(2).has("verbosity"), "Unsupported verbosity capability was not cached");
+            check(server.request(2).getJSONArray("messages").similar(server.request(1).getJSONArray("messages")),
+                    "Cached request dropped response policy");
+            check(before.similar(serialized(history)), "Fallback or cached request mutated original history");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void sequentialFallbacks(boolean usageFirst) throws Exception {
+        Server server = new Server(error(usageFirst ? "stream_options is unsupported" : "verbosity is unsupported"),
+                error(usageFirst ? "verbosity is unsupported" : "Unknown parameter: include_usage"),
+                jsonSuccess("fallback"), jsonSuccess("cached"));
+        try {
+            String rules = ResponsePreferences.instructions("high", "ja");
+            LlmClient client = server.client("medium", "high", rules);
+            LlmClient.Reply reply = client.send(toolHistory(), tools(), null);
+            check(reply.error == null && reply.promptTokens == 23, "Sequential optional fallback failed");
+            check(server.request(0).has("verbosity") && server.request(0).has("stream_options"),
+                    "Original request did not carry both optional features");
+            check(server.request(1).has("verbosity") == usageFirst
+                    && server.request(1).has("stream_options") != usageFirst, "First fallback removed the wrong feature");
+            check(!server.request(2).has("verbosity") && !server.request(2).has("stream_options"),
+                    "Second fallback retained a rejected feature");
+            for (int i = 1; i <= 2; i++) {
+                check(server.request(0).getJSONArray("messages").similar(server.request(i).getJSONArray("messages")),
+                        "Sequential fallback changed required language policy");
+                check(server.request(0).getJSONArray("tools").similar(server.request(i).getJSONArray("tools")),
+                        "Sequential fallback changed tool definitions");
+            }
+            check(client.send(toolHistory(), tools(), null).error == null, "Both-feature cached request failed");
+            check(!server.request(3).has("verbosity") && !server.request(3).has("stream_options"),
+                    "Both unsupported features were not cached");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void usageThenVerbosityFallsBackWithinThreeRequests() throws Exception {
+        sequentialFallbacks(true);
+    }
+
+    private static void verbosityThenUsageFallsBackWithinThreeRequests() throws Exception {
+        sequentialFallbacks(false);
+    }
+
+    private static void rejectedVerbosityRetriesAtMostOnce() throws Exception {
+        Server server = new Server(error("verbosity is unsupported"), error("verbosity is unsupported"));
+        try {
+            LlmClient.Reply reply = server.client(null, "high", ResponsePreferences.instructions("high", "en"))
+                    .send(messages(), null, null);
+            check(reply.error != null && reply.error.startsWith("HTTP 400:"), "Repeated rejection error disappeared");
+            check(!server.request(1).has("verbosity"), "Verbosity retry retained unsupported field");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void unrelatedVerbosityErrorDoesNotRetry() throws Exception {
+        Server server = new Server(error("invalid_api_key for request with verbosity"));
+        try {
+            LlmClient.Reply reply = server.client(null, "medium", ResponsePreferences.instructions("medium", "en"))
+                    .send(messages(), null, null);
+            check(reply.error != null && reply.error.contains("invalid_api_key"), "Unrelated error disappeared");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
+    private static void cancellationBeforeAttemptDoesNotStartHttp() throws Exception {
+        Server server = new Server(jsonSuccess("next valid request"));
+        try {
+            LlmClient client = server.client(null);
+            final int[] checks = new int[1];
+            LlmClient.Reply cancelled = client.sendIfCurrent(messages(), null, null, new LlmClient.RequestValidity() {
+                @Override public boolean isCurrent() { return ++checks[0] == 1; }
+            });
+            check(checks[0] == 2, "Request validity was not checked after registering its attempt");
+            check(cancelled.content.length() == 0 && cancelled.error == null,
+                    "Cancelled request produced a reply or transport error");
+            check(server.requests.isEmpty(), "Cancellation before attempt registration still started HTTP");
+            LlmClient.Reply next = client.send(messages(), null, null);
+            check(next.error == null && "next valid request".equals(next.content),
+                    "Cancelled request validity leaked into the next request");
+            server.exhausted();
+        } finally { server.stop(); }
+    }
+
     private static void run(String name) {
         try {
             LlmUsageRegressionTest.class.getDeclaredMethod(name).invoke(null);
@@ -266,7 +477,12 @@ public final class LlmUsageRegressionTest {
         String[] tests = { "requestsUsageAndParsesFinalSseUsageChunk",
                 "unsupportedStreamOptionsFallsBackAndCaches", "unknownIncludeUsageFallsBackAndCaches",
                 "fallbackRetriesAtMostOnce", "ordinaryBadRequestDoesNotRetry",
-                "splitUsageKeepsIndependentMaximums" };
+                "splitUsageKeepsIndependentMaximums", "defaultAndInvalidVerbosityAreOmitted",
+                "chosenVerbosityAndMandatoryLanguageReachWire", "languageRulesAreAddedWhenHistoryHasNoSystemMessage",
+                "existingPolicyIsNotDuplicated", "unsupportedVerbosityFallsBackAndCachesWithoutLosingPolicy",
+                "usageThenVerbosityFallsBackWithinThreeRequests", "verbosityThenUsageFallsBackWithinThreeRequests",
+                "rejectedVerbosityRetriesAtMostOnce", "unrelatedVerbosityErrorDoesNotRetry",
+                "cancellationBeforeAttemptDoesNotStartHttp" };
         for (String name : tests) run(name);
         if (failures != 0) throw new AssertionError(failures + " usage tests failed");
         System.out.println(tests.length + " usage tests passed");

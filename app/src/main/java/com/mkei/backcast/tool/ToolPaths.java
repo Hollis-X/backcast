@@ -10,6 +10,8 @@ import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.io.StreamTokenizer;
 import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.List;
 
 /** 文件工具共用的路径、整篇读写，以及应用读不到时改走 root。 */
 final class ToolPaths {
@@ -87,6 +89,20 @@ final class ToolPaths {
         return base.equals(path) || path.startsWith(base.endsWith("/") ? base : base + "/");
     }
 
+    static boolean organizedTest(String workDir, File file) throws Exception {
+        File root = workDir == null ? null : new File(workDir).getCanonicalFile();
+        File directory = file.getParentFile();
+        while (directory != null && !directory.equals(root)) {
+            String name = directory.getName().toLowerCase(java.util.Locale.US);
+            if ("test".equals(name) || "tests".equals(name) || "__tests__".equals(name)
+                    || "spec".equals(name) || "specs".equals(name) || "androidtest".equals(name)) return true;
+            // Preserve an established project's own descriptive testing directory.
+            if (directory.isDirectory() && (name.contains("test") || name.contains("测试"))) return true;
+            directory = directory.getParentFile();
+        }
+        return false;
+    }
+
     /**
      * 命令的预检：字面路径、重定向和原地改写。
      *
@@ -101,6 +117,88 @@ final class ToolPaths {
             scanCommand(workDir, command);
         } catch (IOException error) {
             throw new IllegalArgumentException("命令无法解析：" + command);
+        }
+    }
+
+    /** Check literal output arguments while allowing project paths as command inputs. */
+    static void checkTemporaryCommand(String temporaryDir, String command) {
+        try {
+            StreamTokenizer words = new StreamTokenizer(new StringReader(command));
+            words.resetSyntax();
+            words.wordChars(33, 65535);
+            words.whitespaceChars(0, 32);
+            words.quoteChar('\''); words.quoteChar('"');
+            for (char separator : "|;&()<>`".toCharArray()) words.ordinaryChar(separator);
+            words.eolIsSignificant(true);
+            List<String> arguments = new ArrayList<String>();
+            int type;
+            while ((type = words.nextToken()) != StreamTokenizer.TT_EOF) {
+                if (type == '|' || type == ';' || type == '&' || type == '(' || type == ')'
+                        || type == StreamTokenizer.TT_EOL) {
+                    checkTemporaryArguments(temporaryDir, arguments);
+                    arguments.clear();
+                } else if (words.sval != null) arguments.add(words.sval);
+            }
+            checkTemporaryArguments(temporaryDir, arguments);
+        } catch (IOException error) {
+            throw new IllegalArgumentException("无法确认临时命令的输出路径。");
+        }
+    }
+
+    private static void checkTemporaryArguments(String temporaryDir, List<String> arguments) {
+        if (arguments.isEmpty()) return;
+        String tool = new File(arguments.get(0)).getName();
+        boolean each = "touch".equals(tool) || "mkdir".equals(tool) || "mkfifo".equals(tool)
+                || "truncate".equals(tool) || "rm".equals(tool) || "rmdir".equals(tool) || "cd".equals(tool);
+        boolean destination = "cp".equals(tool) || "mv".equals(tool) || "ln".equals(tool) || "install".equals(tool);
+        boolean compiler = "cc".equals(tool) || "gcc".equals(tool) || "g++".equals(tool)
+                || "clang".equals(tool) || "clang++".equals(tool) || "c++".equals(tool);
+        String last = null;
+        boolean targetDirectory = false;
+        boolean positionalOnly = false;
+        for (int i = 1; i < arguments.size(); i++) {
+            String value = arguments.get(i);
+            if ("--".equals(value) && !positionalOnly) { positionalOnly = true; continue; }
+            if (!positionalOnly && value.startsWith("-")) {
+                boolean output = (destination && ("-t".equals(value) || "--target-directory".equals(value)))
+                        || (compiler && "-o".equals(value))
+                        || (("javac".equals(tool) || "unzip".equals(tool)) && "-d".equals(value))
+                        || ("tar".equals(tool) && "-C".equals(value));
+                if (output) {
+                    if (++i >= arguments.size()) throw new IllegalArgumentException("临时输出选项缺少路径。");
+                    temporaryOutput(temporaryDir, arguments.get(i));
+                    if (destination) targetDirectory = true;
+                } else if (destination && value.startsWith("--target-directory=")) {
+                    temporaryOutput(temporaryDir, value.substring(value.indexOf('=') + 1));
+                    targetDirectory = true;
+                } else if (compiler && value.startsWith("-o") && value.length() > 2) {
+                    temporaryOutput(temporaryDir, value.substring(2));
+                } else if (("mkdir".equals(tool) || "mkfifo".equals(tool) || "install".equals(tool))
+                        && ("-m".equals(value) || "--mode".equals(value))) {
+                    i++;
+                } else if (("touch".equals(tool) && ("-t".equals(value) || "-d".equals(value)
+                        || "--date".equals(value) || "-r".equals(value) || "--reference".equals(value)))
+                        || ("truncate".equals(tool) && ("-s".equals(value) || "--size".equals(value)
+                        || "-r".equals(value) || "--reference".equals(value)))) {
+                    i++;
+                }
+                continue;
+            }
+            last = value;
+            if (each) temporaryOutput(temporaryDir, value);
+        }
+        if (destination && !targetDirectory && last != null) temporaryOutput(temporaryDir, last);
+    }
+
+    private static void temporaryOutput(String temporaryDir, String path) {
+        String expanded = path.replace("${TMPDIR}", temporaryDir).replace("$TMPDIR", temporaryDir);
+        if (expanded.indexOf('$') >= 0 || expanded.indexOf('`') >= 0) {
+            throw new IllegalArgumentException("临时输出请使用 temporary 返回的明确路径，不能使用未知变量。");
+        }
+        try { resolve(temporaryDir, expanded); }
+        catch (IllegalArgumentException outside) {
+            throw new IllegalArgumentException("临时命令只能写入专用临时目录：" + path
+                    + "。请把输出放在 " + temporaryDir + "，正式测试或交付物请明确分类。");
         }
     }
 
@@ -379,9 +477,18 @@ final class ToolPaths {
         if (parent != null) {
             cmd = "mkdir -p " + RootShell.quote(parent.getAbsolutePath()) + " && " + cmd;
         }
-        RootShell.Out out = RootShell.exec(cmd, data == null ? new byte[0] : data, 2048, 60000);
-        if (out.exit != 0) {
-            throw new IllegalArgumentException(trimErr(out.stderr, "没有权限写入：" + path));
+        boolean moved = false;
+        try {
+            RootShell.Out out = RootShell.exec(cmd, data == null ? new byte[0] : data, 2048, 60000);
+            if (out.exit != 0) {
+                throw new IllegalArgumentException(trimErr(out.stderr, "没有权限写入：" + path));
+            }
+            moved = true;
+        } finally {
+            if (!moved) {
+                try { RootShell.exec("rm -f " + RootShell.quote(tmp), null, 1024, 15000); }
+                catch (Exception ignored) { }
+            }
         }
     }
 

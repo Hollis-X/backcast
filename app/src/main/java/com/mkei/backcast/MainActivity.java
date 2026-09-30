@@ -29,6 +29,7 @@ import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -74,7 +75,10 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedList;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 主界面：对话流 + agent 循环。
@@ -129,8 +133,29 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private int lastContextUsed;
     /** 回放旧消息时暂时改写，避免插到正在进行的对话后面。 */
     private LinearLayout renderHost;
-    private boolean collapseEarlier = true;
-    private List<Message> shownMessages;
+    private static final int HISTORY_PAGE_SIZE = 48;
+    private static final int HISTORY_FRAME_SIZE = 4;
+    private final ExecutorService historyReader = Executors.newSingleThreadExecutor();
+    private final List<Runnable> historyEvents = new LinkedList<Runnable>();
+    private int historyToken;
+    private long historySequence = -1;
+    private boolean sessionOpening;
+    private boolean initialHistoryLoading;
+    private boolean earlierLoading;
+    private boolean historyInserting;
+    private long earlierBeforeId;
+    private TextView earlierRow;
+    private ImageView latestButton;
+    private boolean followLatest = true;
+    private boolean autoScrollQueued;
+    private int scrollActionToken;
+
+    private static class ReplayCursor {
+        TurnTrace turn;
+        LinearLayout rows;
+        int rendered;
+        String request = "";
+    }
     private TextView plus;
     private View drawerOverlay;
     private View drawerPanel;
@@ -254,6 +279,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private WorkTimeline sheetTimeline;
     private WorkTimeline.CommandView sheetCommand;
     private ReasoningNotes reasoningNotes;
+    private String reasoningPreference = "";
     private final Runnable sheetRefresh = new Runnable() {
         public void run() {
             if (sheetTrace == null && sheetCommand == null) return;
@@ -311,6 +337,22 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sessionSub = (TextView) findViewById(R.id.session_sub);
         accessChip = (TextView) findViewById(R.id.access_chip);
         composerDock = findViewById(R.id.composer_dock);
+        latestButton = (ImageView) findViewById(R.id.scroll_latest);
+        if (latestButton != null) {
+            latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, 0xFF3C3C43, dp(20)));
+            latestButton.setRotation(180f);
+            latestButton.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { jumpToLatest(); }
+            });
+        }
+        if (scroll != null) {
+            scroll.setOnTouchListener(new View.OnTouchListener() {
+                @Override public boolean onTouch(View v, MotionEvent event) {
+                    if (event.getActionMasked() == MotionEvent.ACTION_DOWN) scrollActionToken++;
+                    return false;
+                }
+            });
+        }
         goalBar = findViewById(R.id.goal_bar);
         goalLabel = (TextView) findViewById(R.id.goal_label);
         goalTime = (TextView) findViewById(R.id.goal_time);
@@ -532,14 +574,63 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     @Override
     protected void onResume() {
         super.onResume();
+        hideKeyboard();
         updateStatus();
+        if (!sessionOpening && settings != null && settings.isConfigured()) RunHub.get(this).retargetIfNeeded();
+        refreshReasoningPreference();
         applyGate();
         refreshGoal();
         maybeContinue();
     }
 
+    private void refreshReasoningPreference() {
+        if (settings == null || reasoningNotes == null) return;
+        String preference = settings.reasoningSummary() + "\n" + settings.outputLanguage();
+        if (preference.equals(reasoningPreference)) return;
+        reasoningPreference = preference;
+        refreshReasoningViews(stream);
+        applyReasoningPreference(currentTrace);
+        if (sheetRange != null && !sheetRange.hasDetail()) hideWorkSheet();
+        else {
+            syncSheetTools();
+            fitActivitySheet();
+        }
+    }
+
+    private void applyReasoningPreference(TurnTrace trace) {
+        if (trace == null) return;
+        trace.showReasoning = !"none".equals(settings.reasoningSummary());
+        for (TurnTrace.Piece piece : trace.order) reasoningNotes.refreshPreference(piece);
+    }
+
+    private void refreshReasoningViews(View view) {
+        if (view == null) return;
+        Object tag = view.getTag();
+        if (tag instanceof TurnTrace) applyReasoningPreference((TurnTrace) tag);
+        if (tag instanceof TurnTrace.Range) {
+            TurnTrace.Range range = (TurnTrace.Range) tag;
+            applyReasoningPreference(range.trace);
+            if (view instanceof LinearLayout) {
+                refreshFoldResults((LinearLayout) view);
+                syncWorkChevron(summaryChevron((LinearLayout) view), range.trace);
+            }
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) refreshReasoningViews(group.getChildAt(i));
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        hideKeyboard();
+        super.onPause();
+    }
+
     @Override
     protected void onDestroy() {
+        resetHistoryLoading();
+        historyReader.shutdownNow();
         if (goalBar != null) {
             goalBar.removeCallbacks(goalTicker);
         }
@@ -1025,6 +1116,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     new ViewTreeObserver.OnScrollChangedListener() {
                         @Override
                         public void onScrollChanged() {
+                            if (!initialHistoryLoading && !historyInserting) {
+                                followLatest = stuckAtEnd();
+                            }
+                            updateLatestButton();
                             scheduleFrost();
                         }
                     });
@@ -1109,16 +1204,19 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             footer = bar + mlp.bottomMargin + dp(12);
         }
         if (scroll.getPaddingBottom() == footer) {
+            positionLatestButton(footer);
             return;
         }
         final boolean follow = stuckAtEnd();
         scroll.setPadding(scroll.getPaddingLeft(), scroll.getPaddingTop(),
                 scroll.getPaddingRight(), footer);
+        positionLatestButton(footer);
         if (follow) {
             scroll.post(new Runnable() {
                 @Override
                 public void run() {
-                    scroll.fullScroll(View.FOCUS_DOWN);
+                    if (followLatest && !historyInserting) scroll.scrollTo(0, latestScrollY());
+                    updateLatestButton();
                 }
             });
         }
@@ -1126,6 +1224,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 贴在会话末尾时，补上底部留白后要跟着滚，否则最后一条还是被输入条挡住。 */
     private boolean stuckAtEnd() {
+        if (scroll == null) return true;
         View child = scroll.getChildAt(0);
         if (child == null) {
             return true;
@@ -1133,6 +1232,42 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         int slack = child.getBottom() + scroll.getPaddingBottom()
                 - scroll.getHeight() - scroll.getScrollY();
         return slack < dp(80);
+    }
+
+    private int latestScrollY() {
+        if (scroll == null || scroll.getChildAt(0) == null) return 0;
+        return Math.max(0, scroll.getChildAt(0).getBottom()
+                + scroll.getPaddingBottom() - scroll.getHeight());
+    }
+
+    private void positionLatestButton(int footer) {
+        if (latestButton == null) return;
+        ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) latestButton.getLayoutParams();
+        int margin = footer + dp(8);
+        if (lp.bottomMargin != margin) {
+            lp.bottomMargin = margin;
+            latestButton.setLayoutParams(lp);
+        }
+        updateLatestButton();
+    }
+
+    private void updateLatestButton() {
+        if (latestButton == null) return;
+        latestButton.setVisibility(!initialHistoryLoading && !stuckAtEnd()
+                && stream != null && stream.getChildCount() > 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private void jumpToLatest() {
+        scrollActionToken++;
+        followLatest = true;
+        scrollToLatest();
+        if (stream != null) {
+            stream.animate().cancel();
+            stream.setTranslationY(dp(24));
+            stream.setAlpha(0.65f);
+            stream.animate().translationY(0f).alpha(1f).setDuration(180)
+                    .setInterpolator(new DecelerateInterpolator()).start();
+        }
     }
 
     private void scheduleFrost() {
@@ -1503,10 +1638,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 新开会话：旧的留在库里，侧边栏还能点回去。 */
     private void newChat() {
+        hideKeyboard();
+        resetHistoryLoading();
         hideWorkSheet();
         sessionId = -1;
-        collapseEarlier = true;
-        shownMessages = null;
         releaseLiveViews();
         stream.removeAllViews();
         hidePending();
@@ -1519,23 +1654,25 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         turnStartedAt = 0;
         firstEventAt = 0;
         setBusy(false);
+        send.setEnabled(true);
+        stop.setEnabled(true);
         loop = RunHub.get(this).freshDraft(listener);
         applyGate();
         updateStatus();
         refreshIdentity();
         refreshContextMeter();
         refreshGoal();
+        updateLatestButton();
     }
 
-    private void showSession(long id, boolean closeDrawer) {
+    private void showSession(final long id, boolean closeDrawer) {
+        hideKeyboard();
+        resetHistoryLoading();
         // 换会话时把上一轮的面板收掉，否则屏幕上留着旧一轮的内容。
         hideWorkSheet();
         sessionId = id;
-        collapseEarlier = true;
-        loop = RunHub.get(this).bind(id, listener);
-        applyGate();
-        List<Message> messages = withToolResults(
-                stripCompactionAsks(chatStore.messages(id)));
+        RunHub.get(this).detach(listener);
+        loop = null;
         releaseLiveViews();
         stream.removeAllViews();
         hidePending();
@@ -1547,22 +1684,85 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         currentTrace = null;
         turnStartedAt = 0;
         firstEventAt = 0;
-        boolean running = loop != null && loop.busy();
-        setBusy(running);
-        renderTranscript(messages);
-        if (running) {
-            if (!adoptRunningTurn()) {
-                beginWorkRow();
-            }
-            showPending();
-        }
-        refreshIdentity();
-        refreshContextMeter();
-        refreshGoal();
+        sessionOpening = true;
+        setBusy(false);
+        send.setEnabled(false);
+        stop.setEnabled(false);
+        sessionTitle.setText(R.string.history_loading);
+        if (goalBar != null) goalBar.setVisibility(View.GONE);
         if (closeDrawer) {
             hideDrawer();
         }
-        maybeContinue();
+        final int token = historyToken;
+        final RunHub hub = RunHub.get(this);
+        historyReader.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    hub.prepareSession(id);
+                    ui(new Runnable() {
+                        @Override public void run() {
+                            if (token != historyToken || id != sessionId || isFinishing()) return;
+                            final AgentLoop source = hub.bind(id, null);
+                            loop = source;
+                            applyGate();
+                            setBusy(loop != null && loop.busy());
+                            stop.setEnabled(true);
+                            initialHistoryLoading = true;
+                            historyReader.execute(new Runnable() {
+                                @Override public void run() {
+                                    try {
+                                        final AgentLoop.UiSnapshot<ChatStore.MessagePage> snapshot = source.snapshotUi(
+                                                new AgentLoop.UiSnapshotReader<ChatStore.MessagePage>() {
+                                                    @Override public ChatStore.MessagePage read() {
+                                                        return chatStore.messagePage(id, 0, HISTORY_PAGE_SIZE);
+                                                    }
+                                                }, listener);
+                                        ui(new Runnable() {
+                                            @Override public void run() {
+                                                if (token != historyToken || loop != source || isFinishing()) return;
+                                                sessionOpening = false;
+                                                historySequence = snapshot.sequence;
+                                                loadLatestHistory(snapshot.data, new Runnable() {
+                                                    @Override public void run() { source.replayUiSnapshot(snapshot, listener); }
+                                                });
+                                                refreshIdentity();
+                                                refreshContextMeter();
+                                                refreshGoal();
+                                                maybeContinue();
+                                            }
+                                        });
+                                    } catch (Exception error) {
+                                        ui(new Runnable() {
+                                            @Override public void run() {
+                                                if (token != historyToken || loop != source || isFinishing()) return;
+                                                sessionOpening = false;
+                                                initialHistoryLoading = false;
+                                                hub.bind(id, listener);
+                                                historyEvents.clear();
+                                                addErrorText(getString(R.string.history_load_failed));
+                                                send.setEnabled(true);
+                                                refreshIdentity();
+                                                refreshGoal();
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                    });
+                } catch (Exception error) {
+                    ui(new Runnable() {
+                        @Override public void run() {
+                            if (token != historyToken || id != sessionId || isFinishing()) return;
+                            sessionOpening = false;
+                            addErrorText(getString(R.string.history_load_failed));
+                            send.setEnabled(true);
+                            stop.setEnabled(true);
+                        }
+                    });
+                }
+            }
+        });
     }
 
     private long ensureSession(String text) {
@@ -1578,6 +1778,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 顶栏是会话身份，不是模型。模型在底栏芯片。 */
     private void refreshIdentity() {
+        if (sessionOpening) return;
         if (sessionTitle == null) {
             return;
         }
@@ -1711,6 +1912,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 每次发送前按最新配置接上这个会话自己的循环。别的会话正在跑的不会被换掉。 */
     private boolean prepareEngine() {
+        if (sessionOpening || initialHistoryLoading) return false;
         if (!settings.isConfigured()) {
             toast(getString(R.string.toast_need_config));
             return false;
@@ -2029,16 +2231,26 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void uiLive(final int gen, final Runnable r) {
-        final AgentLoop source = loop;
+        final AgentLoop source = AgentLoop.callingUiSource();
         final int token = source == null ? -1 : source.callingToken();
-        runOnUiThread(new Runnable() {
+        final long sequence = source == null ? -1 : source.callingUiSequence();
+        final boolean replaying = source != null && source.isReplayingUiSnapshot();
+        final Runnable event = new Runnable() {
             @Override
             public void run() {
                 if (source == null || loop != source || !source.accepts(gen, token)
-                        || (turnUiToken >= 0 && turnUiToken != token)) {
+                        || (turnUiToken >= 0 && turnUiToken != token)
+                        || (!replaying && sequence >= 0 && sequence <= historySequence)) {
                     return;
                 }
                 r.run();
+            }
+        };
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (source == null || source != loop) return;
+                if (initialHistoryLoading && !replaying) historyEvents.add(event);
+                else event.run();
             }
         });
     }
@@ -2911,10 +3123,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         autoScroll();
     }
 
-    /**
-     * 用户消息：右对齐浅灰胶囊，下面一行小字标出这次发送所在的工作目录。
-     * 目录只在用户发送处出现一次，工具相对路径都按它解析。
-     */
+    /** 用户消息只显示正文；目录仍保存在会话记录中供工具解析。 */
     private void addUserBubble(String text, String workDir) {
         TextView tv = new TextView(this);
         tv.setText(text);
@@ -2931,14 +3140,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         column.setOrientation(LinearLayout.VERTICAL);
         column.setGravity(Gravity.RIGHT);
         column.addView(tv);
-        if (workDir != null && workDir.trim().length() > 0) {
-            TextView where = new TextView(this);
-            where.setText(dirName(workDir));
-            where.setTextSize(12);
-            where.setTextColor(0xFFAEAEB2);
-            where.setPadding(0, dp(3), dp(4), 0);
-            column.addView(where);
-        }
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -2964,6 +3165,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
      * 正文在折叠外面，收起时还在。
      */
     private LinearLayout addTurnSummary(final TurnTrace trace, boolean live) {
+        applyReasoningPreference(trace);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(0, dp(4), 0, dp(2));
@@ -3379,59 +3581,235 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 展开块超过 maxPx 时改成定高，内部自己滚。 */
     
 
-    private void renderTranscript(List<Message> messages) {
+    private void resetHistoryLoading() {
+        if (loop != null && (sessionOpening || initialHistoryLoading)) {
+            loop.setListener(new AgentLoop.Quiet());
+        }
+        historyToken++;
+        scrollActionToken++;
+        initialHistoryLoading = false;
+        sessionOpening = false;
+        earlierLoading = false;
+        historyInserting = false;
+        historyEvents.clear();
+        historySequence = -1;
+        earlierRow = null;
+        earlierBeforeId = 0;
+        renderHost = null;
+        followLatest = true;
+        if (stream != null) {
+            stream.animate().cancel();
+            stream.setAlpha(1f);
+            stream.setTranslationY(0f);
+        }
+    }
+
+    private void loadLatestHistory(final ChatStore.MessagePage page, final Runnable pendingReplay) {
         replayTailTrace = null;
         replayTailRows = null;
-        shownMessages = messages;
-        int lastUser = -1;
-        if (messages != null) {
-            for (int i = 0; i < messages.size(); i++) {
-                Message m = messages.get(i);
-                if (m != null && Message.USER.equals(m.role)
-                        && !Goal.isSteer(m.content) && !Goal.isNote(m.content)) {
-                    lastUser = i;
+        initialHistoryLoading = true;
+        final int token = historyToken;
+        earlierBeforeId = page.firstId;
+        if (page.earlierCount > 0) addEarlierRow(page.earlierCount);
+        final LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        renderPage(page, block, token, new Runnable() {
+            @Override public void run() {
+                stream.addView(block, fullWidth());
+                if (loop != null && (loop.busy() || !historyEvents.isEmpty())) {
+                    if (!adoptRunningTurn()) beginWorkRow();
+                    showPending();
+                }
+                pendingReplay.run();
+                scrollToLatest();
+                drainHistoryEvents(token);
+                updateLatestButton();
+            }
+        }, true);
+    }
+
+    private void drainHistoryEvents(final int token) {
+        if (token != historyToken) return;
+        long start = SystemClock.elapsedRealtime();
+        int count = 0;
+        while (!historyEvents.isEmpty() && count < 16) {
+            historyEvents.remove(0).run();
+            count++;
+            if (SystemClock.elapsedRealtime() - start >= 6) break;
+        }
+        if (!historyEvents.isEmpty()) {
+            stream.postOnAnimation(new Runnable() {
+                @Override public void run() { drainHistoryEvents(token); }
+            });
+        } else {
+            initialHistoryLoading = false;
+            setBusy(loop != null && loop.busy());
+            send.setEnabled(true);
+            updateLatestButton();
+            maybeContinue();
+        }
+    }
+
+    private void renderPage(final ChatStore.MessagePage page, final LinearLayout block,
+            final int token, final Runnable complete, final boolean latest) {
+        final List<Message> messages = stripCompactionAsks(page.messages);
+        final ReplayCursor cursor = new ReplayCursor();
+        cursor.request = page.requestBefore;
+        final Runnable frame = new Runnable() {
+            int next;
+            @Override public void run() {
+                if (token != historyToken || isFinishing()) return;
+                LinearLayout previous = renderHost;
+                renderHost = block;
+                try {
+                    if (next == 0 && page.leadingAssistant != null) {
+                        seedReplayTools(cursor, page.leadingAssistant);
+                    }
+                    long started = SystemClock.elapsedRealtime();
+                    int count = 0;
+                    while (next < messages.size() && count < HISTORY_FRAME_SIZE) {
+                        renderSlice(messages, next, next + 1, cursor);
+                        next++;
+                        count++;
+                        if (SystemClock.elapsedRealtime() - started >= 6) break;
+                    }
+                    if (next == messages.size()) {
+                        fillReplayResults(cursor, page.trailingResults);
+                        closeReplayTurn(cursor.turn, cursor.rows);
+                    }
+                } finally {
+                    renderHost = previous;
+                }
+                if (next < messages.size()) stream.postOnAnimation(this);
+                else {
+                    if (latest) {
+                        replayTailTrace = cursor.turn;
+                        replayTailRows = cursor.rows;
+                    }
+                    complete.run();
+                }
+            }
+        };
+        stream.postOnAnimation(frame);
+    }
+
+    private void seedReplayTools(ReplayCursor cursor, Message leading) {
+        if (leading.toolCalls == null || PromptGuard.requestsDisclosure(cursor.request)) return;
+        cursor.turn = new TurnTrace();
+        cursor.rows = addTurnSummary(cursor.turn, false);
+        for (int i = 0; i < leading.toolCalls.length(); i++) {
+            JSONObject call = leading.toolCalls.optJSONObject(i);
+            if (call == null) continue;
+            JSONObject fn = call.optJSONObject("function");
+            cursor.turn.addStep(call.optString("id", ""),
+                    fn == null ? "tool" : fn.optString("name", "tool"),
+                    fn == null ? "" : fn.optString("arguments", ""));
+        }
+        cursor.rendered = appendFoldRows(cursor.rows, cursor.turn, 0);
+    }
+
+    private void fillReplayResults(ReplayCursor cursor, List<Message> results) {
+        if (cursor.turn == null || results == null || PromptGuard.requestsDisclosure(cursor.request)) return;
+        for (Message result : results) {
+            for (TurnTrace.Step step : cursor.turn.steps) {
+                if (result.toolCallId != null && result.toolCallId.equals(step.id) && !step.done) {
+                    cursor.turn.fillResult(result.toolCallId, "", result.content == null ? "" : result.content);
+                    break;
                 }
             }
         }
-        if (collapseEarlier && lastUser > 0 && renderHost == null) {
-            addEarlierRow(lastUser);
-            renderRange(messages, lastUser, messages.size());
-            return;
-        }
-        renderRange(messages, 0, messages == null ? 0 : messages.size());
+        refreshFoldResults(cursor.rows);
+        refreshAllFolds(flowOf(cursor.rows));
     }
 
-    /** 更早的消息收成一行，点开再摊在当前位置，不重画正在进行的这一轮。 */
-    private void addEarlierRow(final int count) {
+    private void addEarlierRow(long count) {
         final TextView row = new TextView(this);
-        row.setText(getString(R.string.earlier_messages, Integer.valueOf(count)));
+        earlierRow = row;
+        row.setText(getString(R.string.earlier_messages, Long.valueOf(count)));
         row.setTextSize(14);
         row.setTextColor(0xFFAEAEB2);
         row.setPadding(0, dp(10), 0, dp(8));
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (shownMessages == null || stream == null) {
-                    return;
-                }
-                int index = stream.indexOfChild(row);
-                if (index < 0) {
-                    return;
-                }
-                stream.removeView(row);
-                LinearLayout block = new LinearLayout(MainActivity.this);
-                block.setOrientation(LinearLayout.VERTICAL);
-                LinearLayout previous = renderHost;
-                renderHost = block;
-                try {
-                    renderRange(shownMessages, 0, count);
-                } finally {
-                    renderHost = previous;
-                }
-                stream.addView(block, index, fullWidth());
+                loadEarlierPage(row);
             }
         });
         stream.addView(row, fullWidth());
+    }
+
+    private void loadEarlierPage(final TextView row) {
+        if (earlierLoading || initialHistoryLoading || earlierBeforeId <= 0
+                || row != earlierRow || stream.indexOfChild(row) < 0) return;
+        earlierLoading = true;
+        row.setEnabled(false);
+        row.setText(R.string.history_loading);
+        final long sid = sessionId;
+        final long before = earlierBeforeId;
+        final int token = historyToken;
+        historyReader.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final ChatStore.MessagePage page = chatStore.messagePage(sid, before, HISTORY_PAGE_SIZE);
+                    ui(new Runnable() {
+                        @Override public void run() {
+                            if (token != historyToken || sid != sessionId || row != earlierRow) return;
+                            final LinearLayout block = new LinearLayout(MainActivity.this);
+                            block.setOrientation(LinearLayout.VERTICAL);
+                            renderPage(page, block, token, new Runnable() {
+                                @Override public void run() {
+                                    insertEarlierPage(row, block, page);
+                                }
+                            }, false);
+                        }
+                    });
+                } catch (Exception error) {
+                    ui(new Runnable() {
+                        @Override public void run() {
+                            if (token != historyToken || row != earlierRow) return;
+                            earlierLoading = false;
+                            row.setEnabled(true);
+                            row.setText(R.string.history_retry);
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    /** Prepending changes content height; restore the same view at the same screen offset. */
+    private void insertEarlierPage(final TextView row, LinearLayout block, ChatStore.MessagePage page) {
+        int index = stream.indexOfChild(row);
+        if (index < 0) return;
+        final View anchor = stream.getChildCount() > index + 1 ? stream.getChildAt(index + 1) : row;
+        final int offset = anchor.getTop() - scroll.getScrollY();
+        final int token = historyToken;
+        final int action = scrollActionToken;
+        historyInserting = true;
+        stream.addView(block, index + 1, fullWidth());
+        earlierBeforeId = page.firstId;
+        if (page.earlierCount > 0) {
+            row.setText(getString(R.string.earlier_messages, Long.valueOf(page.earlierCount)));
+        } else {
+            stream.removeView(row);
+            earlierRow = null;
+        }
+        scroll.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                scroll.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (token != historyToken) return true;
+                if (action == scrollActionToken && anchor.getParent() == stream) {
+                    scroll.scrollTo(0, Math.max(0, anchor.getTop() - offset));
+                }
+                historyInserting = false;
+                earlierLoading = false;
+                row.setEnabled(true);
+                followLatest = stuckAtEnd();
+                updateLatestButton();
+                scheduleFrost();
+                return true;
+            }
+        });
     }
 
     private LinearLayout host() {
@@ -3442,19 +3820,27 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (messages == null) {
             return;
         }
-        TurnTrace turn = null;
-        LinearLayout rows = null;
-        int rendered = 0;
+        ReplayCursor cursor = new ReplayCursor();
         int start = Math.max(0, from);
         int end = Math.min(to, messages.size());
-        String request = "";
         for (int i = 0; i < Math.min(start, end); i++) {
             Message earlier = messages.get(i);
             if (earlier != null && Message.USER.equals(earlier.role)) {
-                request = Goal.isSteer(earlier.content) || Goal.isNote(earlier.content)
+                cursor.request = Goal.isSteer(earlier.content) || Goal.isNote(earlier.content)
                         ? "" : earlier.content;
             }
         }
+        renderSlice(messages, start, end, cursor);
+        closeReplayTurn(cursor.turn, cursor.rows);
+        replayTailTrace = cursor.turn;
+        replayTailRows = cursor.rows;
+    }
+
+    private void renderSlice(List<Message> messages, int start, int end, ReplayCursor cursor) {
+        TurnTrace turn = cursor.turn;
+        LinearLayout rows = cursor.rows;
+        int rendered = cursor.rendered;
+        String request = cursor.request;
         for (int i = start; i < end; i++) {
             Message m = messages.get(i);
             if (m == null) {
@@ -3544,9 +3930,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 refreshAllFolds(flowOf(rows));
             }
         }
-        closeReplayTurn(turn, rows);
-        replayTailTrace = turn;
-        replayTailRows = rows;
+        cursor.turn = turn;
+        cursor.rows = rows;
+        cursor.rendered = rendered;
+        cursor.request = request;
     }
 
     private int renderDisplayParts(Message message, String content, String reasoning,
@@ -3620,7 +4007,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private void syncWorkChevron(View chevron, TurnTrace trace) {
         if (chevron == null) return;
         int end = trace == null ? 0 : trace.bodyAt < 0 ? trace.order.size() : trace.bodyAt;
-        chevron.setVisibility(end > 0 ? View.VISIBLE : View.GONE);
+        TurnTrace.Range range = trace == null ? null : new TurnTrace.Range(trace, 0);
+        if (range != null) range.end = end;
+        chevron.setVisibility(range != null && range.hasDetail() ? View.VISIBLE : View.GONE);
     }
 
     
@@ -3712,16 +4101,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 收起软键盘。面板要占满底部时，键盘不该跟着一起顶上来。 */
     private void hideKeyboard() {
         View focus = getCurrentFocus();
-        if (focus == null) {
-            return;
-        }
         android.view.inputmethod.InputMethodManager imm =
                 (android.view.inputmethod.InputMethodManager)
                         getSystemService(INPUT_METHOD_SERVICE);
         if (imm != null) {
-            imm.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+            View target = focus != null ? focus : prompt;
+            if (target != null) imm.hideSoftInputFromWindow(target.getWindowToken(), 0);
         }
-        focus.clearFocus();
+        if (focus != null) focus.clearFocus();
+        View root = findViewById(R.id.main_root);
+        if (root != null) root.requestFocus();
     }
 
     private void resetSheetDetails() {
@@ -3927,16 +4316,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (scroll == null) {
             return;
         }
+        followLatest = true;
+        final int token = historyToken;
+        final int action = scrollActionToken;
         scroll.post(new Runnable() {
             @Override
             public void run() {
-                scroll.fullScroll(View.FOCUS_DOWN);
-                scroll.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        scroll.fullScroll(View.FOCUS_DOWN);
-                    }
-                });
+                if (token != historyToken || action != scrollActionToken || !followLatest) return;
+                scroll.scrollTo(0, latestScrollY());
+                updateLatestButton();
             }
         });
     }
@@ -4109,7 +4497,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
      * 回到这个会话就接上。正在跑的不会从这里再开一轮。
      */
     private void maybeContinue() {
-        if (loop == null || loop.busy() || sessionId < 0 || chatStore == null
+        if (sessionOpening || initialHistoryLoading || loop == null || loop.busy() || sessionId < 0 || chatStore == null
                 || settings == null || !settings.isConfigured()) {
             return;
         }
@@ -4200,18 +4588,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 用户已经往上翻时不打断他；只在贴近底部时自动跟随。 */
     private void autoScroll() {
-        scroll.post(new Runnable() {
+        if (scroll == null || renderHost != null || historyInserting || autoScrollQueued) return;
+        autoScrollQueued = true;
+        final int token = historyToken;
+        scroll.postOnAnimation(new Runnable() {
             @Override
             public void run() {
-                View child = scroll.getChildAt(0);
-                if (child == null) {
-                    return;
-                }
-                int distance = child.getBottom() + scroll.getPaddingBottom()
-                        - scroll.getHeight() - scroll.getScrollY();
-                if (distance < dp(200)) {
-                    scroll.fullScroll(View.FOCUS_DOWN);
-                }
+                autoScrollQueued = false;
+                if (token != historyToken) return;
+                if (followLatest && !initialHistoryLoading && !historyInserting)
+                    scroll.scrollTo(0, latestScrollY());
+                updateLatestButton();
                 scheduleFrost();
             }
         });

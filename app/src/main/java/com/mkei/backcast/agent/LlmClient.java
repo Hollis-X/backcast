@@ -30,6 +30,8 @@ public class LlmClient {
         public int maxTokens;
         public int totalTimeoutMs;
         public int maxResponseChars;
+        public String verbosity;
+        public String responseInstructions;
 
         /**
          * 思考强度，透传为请求体里的 reasoning_effort。
@@ -168,9 +170,15 @@ public class LlmClient {
         void onToolCall(int index, String id, String name, String arguments);
     }
 
+    public interface RequestValidity {
+        boolean isCurrent();
+    }
+
     private final Config config;
     private volatile HttpURLConnection active;
     private volatile boolean usageOptionUnsupported;
+    private volatile boolean verbosityUnsupported;
+    private final ThreadLocal<RequestValidity> requestValidity = new ThreadLocal<RequestValidity>();
 
     /** 这一次请求。停止时把它标死并断开，不碰到下一次请求。 */
     private static class Attempt {
@@ -199,30 +207,58 @@ public class LlmClient {
         }
     }
 
+    /** Register cancellation validity while preserving existing send overrides. */
+    public Reply sendIfCurrent(List<Message> messages, JSONArray tools, Sink sink, RequestValidity validity) {
+        if (!validity.isCurrent()) return new Reply();
+        requestValidity.set(validity);
+        try {
+            return send(messages, tools, sink);
+        } finally {
+            requestValidity.remove();
+        }
+    }
+
     public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
         Attempt mine = new Attempt();
         mine.deadline = config.totalTimeoutMs > 0 ? System.currentTimeMillis() + config.totalTimeoutMs : 0;
         mine.maxChars = config.maxResponseChars;
         attempt = mine;
-        Reply reply = sendAttempt(messages, tools, sink, mine, !usageOptionUnsupported);
-        if (!mine.dead && rejectsUsageOption(reply.error)) {
-            usageOptionUnsupported = true;
-            reply = sendAttempt(messages, tools, sink, mine, false);
+        RequestValidity validity = requestValidity.get();
+        if (validity != null && !validity.isCurrent()) {
+            mine.dead = true;
+            return new Reply();
         }
-        return reply;
+        boolean includeUsage = !usageOptionUnsupported;
+        String detail = ResponsePreferences.normalizeVerbosity(config.verbosity);
+        boolean includeVerbosity = !verbosityUnsupported && !"default".equals(detail);
+        Reply reply;
+        while (true) {
+            reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
+            if (mine.dead) return reply;
+            if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) {
+                usageOptionUnsupported = true;
+                includeUsage = false;
+            } else if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) {
+                verbosityUnsupported = true;
+                includeVerbosity = false;
+            } else {
+                return reply;
+            }
+        }
     }
 
-    private static boolean rejectsUsageOption(String error) {
+    private static boolean rejectsOption(String error, String option, String alias) {
         if (error == null || !error.startsWith("HTTP 400:")) return false;
         String lower = error.toLowerCase(java.util.Locale.US);
-        return (lower.contains("stream_options") || lower.contains("include_usage"))
+        return (lower.contains(option) || lower.contains(alias))
                 && (lower.contains("unsupported") || lower.contains("unknown")
                 || lower.contains("unrecognized") || lower.contains("not supported")
+                || lower.contains("does not support") || lower.contains("not allowed")
                 || lower.contains("not permitted") || lower.contains("unexpected"));
     }
 
     private Reply sendAttempt(List<Message> messages, JSONArray tools, Sink sink,
-            Attempt mine, boolean includeUsage) {
+            Attempt mine, boolean includeUsage, String verbosity) {
         Reply reply = new Reply();
         if (mine.dead) {
             return reply;
@@ -233,6 +269,7 @@ public class LlmClient {
             body.put("model", config.model);
             body.put("stream", true);
             if (includeUsage) body.put("stream_options", new JSONObject().put("include_usage", true));
+            if (verbosity != null) body.put("verbosity", verbosity);
             if (config.maxTokens > 0) body.put("max_tokens", config.maxTokens);
 
             if (config.reasoningWanted()) {
@@ -240,8 +277,23 @@ public class LlmClient {
             }
 
             JSONArray msgs = new JSONArray();
+            boolean rulesApplied = false;
             for (Message m : messages) {
-                msgs.put(m.toJson());
+                JSONObject item = m.toJson();
+                if (config.responseInstructions != null && config.responseInstructions.length() > 0
+                        && Message.SYSTEM.equals(m.role)) {
+                    String content = m.content == null ? "" : m.content;
+                    if (!content.contains(config.responseInstructions)) {
+                        item.put("content", content + "\n\n" + config.responseInstructions);
+                    }
+                    rulesApplied = true;
+                }
+                msgs.put(item);
+            }
+            if (!rulesApplied && config.responseInstructions != null && config.responseInstructions.length() > 0) {
+                JSONArray withRules = new JSONArray().put(Message.system(config.responseInstructions).toJson());
+                for (int i = 0; i < msgs.length(); i++) withRules.put(msgs.get(i));
+                msgs = withRules;
             }
             body.put("messages", msgs);
 

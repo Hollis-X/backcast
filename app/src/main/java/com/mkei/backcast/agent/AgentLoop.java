@@ -153,10 +153,20 @@ public class AgentLoop {
     private static final String REVIEW_UNAVAILABLE = "REVIEW_UNAVAILABLE";
 
     private LlmClient client;
+    private LlmClient requestClient;
     private ToolRegistry registry;
     private final List<Message> history = new ArrayList<Message>();
     private final List<Hook> hooks = new ArrayList<Hook>();
-    private volatile Listener listener;
+    private final Object uiLock = new Object();
+    private final Object listenerLock = new Object();
+    private volatile Listener uiListener;
+    private long listenerRevision;
+    private final Listener listener = new UiForwarder();
+    private final UiEventBuffer uiEvents = new UiEventBuffer();
+    private long uiSequence;
+    private final ThreadLocal<Long> callingUiSequence = new ThreadLocal<Long>();
+    private final ThreadLocal<Boolean> replayingUi = new ThreadLocal<Boolean>();
+    private static final ThreadLocal<AgentLoop> UI_SOURCE = new ThreadLocal<AgentLoop>();
     private final Object lock = new Object();
 
     private volatile boolean cancelled;
@@ -168,6 +178,8 @@ public class AgentLoop {
     private volatile int acceptedUi = -1;
     /** 界面这一轮的记号，只在跑循环的那条线程上读。 */
     private final ThreadLocal<Integer> callToken = new ThreadLocal<Integer>();
+    private final ThreadLocal<ToolRegistry> turnTools = new ThreadLocal<ToolRegistry>();
+    private volatile Tool runningTool;
     private Recorder recorder;
     private int contextLimit = DEFAULT_CONTEXT_LIMIT;
     private float compactRatio = DEFAULT_COMPACT_RATIO;
@@ -235,7 +247,7 @@ public class AgentLoop {
     public AgentLoop(LlmClient client, ToolRegistry registry, Listener listener) {
         this.client = client;
         this.registry = registry;
-        this.listener = listener;
+        this.uiListener = listener == null ? new Quiet() : listener;
     }
 
     public void addHook(Hook hook) {
@@ -299,11 +311,132 @@ public class AgentLoop {
     }
 
     public void setListener(Listener listener) {
-        this.listener = listener == null ? new Quiet() : listener;
+        synchronized (listenerLock) {
+            uiListener = listener == null ? new Quiet() : listener;
+            listenerRevision++;
+        }
     }
 
     public Listener listener() {
-        return listener;
+        return uiListener;
+    }
+
+    public interface UiSnapshotReader<T> {
+        T read() throws Exception;
+    }
+
+    public static final class UiSnapshot<T> {
+        public final T data;
+        public final long sequence;
+        public final int generation, uiToken;
+        private final List<UiEventBuffer.Event> pending;
+
+        private UiSnapshot(T data, long sequence, int generation, int uiToken,
+                List<UiEventBuffer.Event> pending) {
+            this.data = data; this.sequence = sequence; this.generation = generation;
+            this.uiToken = uiToken; this.pending = pending;
+        }
+
+        public int pendingCount() { return pending.size(); }
+    }
+
+    /** Read the bounded transcript and attach its listener at one event boundary. */
+    public <T> UiSnapshot<T> snapshotUi(UiSnapshotReader<T> reader, Listener target) throws Exception {
+        synchronized (uiLock) {
+            long attachedRevision;
+            synchronized (listenerLock) { attachedRevision = listenerRevision; }
+            T data = reader.read();
+            UiSnapshot<T> snapshot = new UiSnapshot<T>(data, uiSequence, generation, acceptedUi,
+                    uiEvents.snapshot(generation, acceptedUi));
+            synchronized (listenerLock) {
+                if (listenerRevision == attachedRevision) {
+                    uiListener = target == null ? new Quiet() : target;
+                    listenerRevision++;
+                }
+            }
+            return snapshot;
+        }
+    }
+
+    public long callingUiSequence() {
+        Long value = callingUiSequence.get();
+        return value == null ? -1 : value.longValue();
+    }
+
+    public static AgentLoop callingUiSource() { return UI_SOURCE.get(); }
+    public boolean isReplayingUiSnapshot() { return Boolean.TRUE.equals(replayingUi.get()); }
+
+    public void replayUiSnapshot(UiSnapshot<?> snapshot, Listener target) {
+        if (snapshot == null || target == null) return;
+        Integer oldToken = callToken.get();
+        Long oldSequence = callingUiSequence.get();
+        Boolean oldReplay = replayingUi.get();
+        AgentLoop oldSource = UI_SOURCE.get();
+        try {
+            replayingUi.set(Boolean.TRUE);
+            UI_SOURCE.set(this);
+            callToken.set(Integer.valueOf(snapshot.uiToken));
+            for (UiEventBuffer.Event event : snapshot.pending) {
+                if (!accepts(snapshot.generation, snapshot.uiToken)) return;
+                callingUiSequence.set(Long.valueOf(event.sequence));
+                event.dispatch(target);
+            }
+        } finally {
+            if (oldToken == null) callToken.remove(); else callToken.set(oldToken);
+            if (oldSequence == null) callingUiSequence.remove(); else callingUiSequence.set(oldSequence);
+            if (oldReplay == null) replayingUi.remove(); else replayingUi.set(oldReplay);
+            if (oldSource == null) UI_SOURCE.remove(); else UI_SOURCE.set(oldSource);
+        }
+    }
+
+    private final class UiForwarder extends Quiet {
+        private UiEventBuffer.Event event(int kind, int gen, String value) {
+            return new UiEventBuffer.Event(kind, gen, callingToken(), 0, value);
+        }
+
+        private void emit(UiEventBuffer.Event event) {
+            synchronized (uiLock) {
+                event.sequence = ++uiSequence;
+                if (accepts(event.generation, event.token)) uiEvents.add(event);
+                Long previous = callingUiSequence.get();
+                AgentLoop previousSource = UI_SOURCE.get();
+                callingUiSequence.set(Long.valueOf(event.sequence));
+                UI_SOURCE.set(AgentLoop.this);
+                try { event.dispatch(uiListener); }
+                finally {
+                    if (previous == null) callingUiSequence.remove(); else callingUiSequence.set(previous);
+                    if (previousSource == null) UI_SOURCE.remove(); else UI_SOURCE.set(previousSource);
+                }
+            }
+        }
+
+        @Override public void onRequestStart(int gen) { emit(event(UiEventBuffer.REQUEST, gen, "")); }
+        @Override public void onAssistantText(int gen, String value) { emit(event(UiEventBuffer.TEXT, gen, value)); }
+        @Override public void onReasoning(int gen, String value) { emit(event(UiEventBuffer.REASONING, gen, value)); }
+        @Override public void onToolPreview(int gen, int index, String id, String name, String args) {
+            UiEventBuffer.Event event = event(UiEventBuffer.PREVIEW, gen, id);
+            event.first = index; event.name = name; event.arguments = args; emit(event);
+        }
+        @Override public void onToolStart(int gen, String name, String args) {
+            UiEventBuffer.Event event = event(UiEventBuffer.START, gen, "");
+            event.name = name; event.arguments = args; emit(event);
+        }
+        @Override public void onToolEnd(int gen, String name, String value) {
+            UiEventBuffer.Event event = event(UiEventBuffer.END, gen, value);
+            event.name = name; emit(event);
+        }
+        @Override public void onError(int gen, String value) { emit(event(UiEventBuffer.ERROR, gen, value)); }
+        @Override public void onContextUsage(int gen, int used, int limit) {
+            UiEventBuffer.Event event = event(UiEventBuffer.CONTEXT, gen, "");
+            event.first = used; event.second = limit; emit(event);
+        }
+        @Override public void onCompactStart(int gen) { emit(event(UiEventBuffer.COMPACT_START, gen, "")); }
+        @Override public void onCompacted(int gen, boolean followup) {
+            UiEventBuffer.Event event = event(UiEventBuffer.COMPACTED, gen, ""); event.flag = followup; emit(event);
+        }
+        @Override public void onFinish(int gen) { emit(event(UiEventBuffer.FINISH, gen, "")); }
+        @Override public void onRetry(int gen) { emit(event(UiEventBuffer.RETRY, gen, "")); }
+        @Override public void onSteer(int gen) { emit(event(UiEventBuffer.STEER, gen, "")); }
     }
 
     public void setDurability(Durability durability) {
@@ -592,6 +725,14 @@ public class AgentLoop {
 
     /** 收尾。已经排了续跑时不先通知界面结束，否则停止键会闪一下又卡住。 */
     private void endTurn(int token, int gen, long sessionId) {
+        if (token != 0) {
+            ToolRegistry tools = turnTools.get();
+            String cleanup = tools == null ? null : tools.cleanupTemporary(true);
+            turnTools.remove();
+            if (cleanup != null && !stale(token, gen)) {
+                listener.onError(gen, "临时材料清理失败：" + cleanup);
+            }
+        }
         if (token != 0 && stale(token, gen) && gen == generation) {
             closeDanglingTools(sessionId);
         }
@@ -612,6 +753,20 @@ public class AgentLoop {
 
     /** 模型声明完成或达不到。其它状态它改不了。 */
     public String closeGoal(String status, String reason) {
+        if (Goal.COMPLETE.equals(status)) {
+            synchronized (lock) {
+                if ((!Goal.ACTIVE.equals(goalStatus) && !Goal.BUDGET_LIMITED.equals(goalStatus))
+                        || goalText == null || goalText.length() == 0) {
+                    return "错误：当前没有进行中的目标。";
+                }
+            }
+            ToolRegistry tools = turnTools.get();
+            if (tools == null) tools = registry;
+            String cleanup = tools == null ? null : tools.cleanupTemporary(false);
+            if (cleanup != null) {
+                return "错误：临时材料尚未清理，目标不能标成完成：" + cleanup;
+            }
+        }
         synchronized (lock) {
             // 预算用尽还在收尾那一轮时，模型仍可以声明完成或遇到阻塞；
             // 对齐 Codex：budget_limited 是可继续做终态判定的中间态，不是死状态。
@@ -661,7 +816,8 @@ public class AgentLoop {
                 report.put("remainingTokens", goalTokenBudget > 0
                         ? Long.valueOf(Math.max(0L, goalTokenBudget - goalTokensUsed)) : JSONObject.NULL);
                 report.put("completionBudgetReport", Goal.COMPLETE.equals(goalStatus)
-                        ? "目标已完成。根据此工具结果中的 tokensUsed、tokenBudget 和 timeUsedSeconds 报告最终用量，然后结束当前答复。"
+                        ? "目标已完成。按设置的输出语言自然地报告已用 token、预算和耗时，"
+                                + "不要向用户照抄 JSON 字段名；预算未设置时说明未设上限，然后结束当前答复。"
                         : JSONObject.NULL);
                 return report.toString();
             } catch (Exception invalid) {
@@ -826,17 +982,44 @@ public class AgentLoop {
     }
 
     public void cancel() {
+        LlmClient current;
+        ToolRegistry tools;
+        Tool active;
         synchronized (lock) {
             cancelled = true;
             acceptedUi = -1;
             runToken++;
             resumeAfter = false;
+            current = requestClient;
+            tools = registry;
+            active = runningTool;
         }
-        if (client != null) {
-            client.abort();
+        if (current != null) {
+            current.abort();
         }
-        if (registry != null) {
-            registry.abort();
+        if (tools != null) {
+            tools.abort();
+        }
+        if (active != null) active.abort();
+    }
+
+    private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, LlmClient.Sink sink,
+            final int token, final int gen) {
+        LlmClient current;
+        synchronized (lock) {
+            if (stale(token, gen)) return new LlmClient.Reply();
+            current = client;
+            requestClient = current;
+        }
+        try {
+            if (stale(token, gen)) return new LlmClient.Reply();
+            return current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
+                @Override public boolean isCurrent() { return !stale(token, gen); }
+            });
+        } finally {
+            synchronized (lock) {
+                if (requestClient == current) requestClient = null;
+            }
         }
     }
 
@@ -868,6 +1051,7 @@ public class AgentLoop {
                 user.workDir = workspace;
                 history.add(user);
             }
+            beginTemporaryTurn();
             record(sessionId, user);
             saveRun(true);
             runLoop(sessionId, gen, token);
@@ -924,6 +1108,7 @@ public class AgentLoop {
             if (token == 0) {
                 return;
             }
+            beginTemporaryTurn();
             repairMissingTools(sessionId);
             // 没答完就接着原来的起点。从「刚刚」重计会把已经等过的时间裁掉。
             if (shouldContinue() && !keepTurnClock()) {
@@ -942,6 +1127,12 @@ public class AgentLoop {
             endTurn(token, gen, sessionId);
             callToken.remove();
         }
+    }
+
+    private void beginTemporaryTurn() {
+        ToolRegistry tools = registry;
+        turnTools.set(tools);
+        if (tools != null) tools.beginTurn();
     }
 
     /** 还没答完。已经答完或正在跑的，回到界面时不要再开一轮。 */
@@ -1052,7 +1243,7 @@ public class AgentLoop {
 
         while (!stale(token, gen)) {
 
-            LlmClient.Reply reply = client.send(request, null, null);
+            LlmClient.Reply reply = sendRequest(request, null, null, token, gen);
             if (stale(token, gen)) {
                 return false;
             }
@@ -1467,7 +1658,7 @@ public class AgentLoop {
             String liveExtra = REVIEW_PROMPT + "\n" + Compactor.PROMPT;
             final PromptGuard.Stream reasonGuard = new PromptGuard.Stream(liveParts[0], liveParts[1], liveExtra);
             final PromptGuard.Stream contentGuard = new PromptGuard.Stream(liveParts[0], liveParts[1], liveExtra);
-            LlmClient.Reply reply = client.send(snapshot, finishingGoal ? null : schema, new LlmClient.Sink() {
+            LlmClient.Reply reply = sendRequest(snapshot, finishingGoal ? null : schema, new LlmClient.Sink() {
                 @Override
                 public void onReasoning(String delta) {
                     noteTurnEvent(liveToken, liveGen);
@@ -1491,7 +1682,7 @@ public class AgentLoop {
                         listener.onToolPreview(liveGen, index, id, name, arguments);
                     }
                 }
-            });
+            }, token, gen);
             if (stale(token, gen)) {
                 return;
             }
@@ -1658,8 +1849,7 @@ public class AgentLoop {
                 synchronized (lock) {
                     if (!stale(token, gen)) history.add(result);
                 }
-                record(sessionId, result);
-                if (!stale(token, gen)) listener.onToolEnd(gen, name, stopped);
+                recordToolResult(sessionId, result, gen, token, name);
                 continue;
             }
             // 同一个调用已经连续拿到相同结果时不再重跑，把结论回给模型。
@@ -1671,10 +1861,7 @@ public class AgentLoop {
                         history.add(stopped);
                     }
                 }
-                record(sessionId, stopped);
-                if (!stale(token, gen)) {
-                    listener.onToolEnd(gen, name, repeated);
-                }
+                recordToolResult(sessionId, stopped, gen, token, name);
                 return;
             }
             listener.onToolStart(gen, name, argsRaw);
@@ -1692,10 +1879,7 @@ public class AgentLoop {
                         history.add(refused);
                     }
                 }
-                record(sessionId, refused);
-                if (!stale(token, gen)) {
-                    listener.onToolEnd(gen, name, denied);
-                }
+                recordToolResult(sessionId, refused, gen, token, name);
                 continue;
             }
 
@@ -1712,10 +1896,7 @@ public class AgentLoop {
                     history.add(toolMsg);
                 }
             }
-            record(sessionId, toolMsg);
-            if (!stale(token, gen)) {
-                listener.onToolEnd(gen, name, result);
-            }
+            recordToolResult(sessionId, toolMsg, gen, token, name);
         }
     }
 
@@ -1773,7 +1954,7 @@ public class AgentLoop {
         List<Message> review = new ArrayList<Message>();
         review.add(Message.system(REVIEW_PROMPT));
         review.add(Message.user("Tool: " + name + "\nArguments: " + String.valueOf(args)));
-        LlmClient.Reply reply = client.send(review, null, null);
+        LlmClient.Reply reply = sendRequest(review, null, null, token, gen);
         if (stale(token, gen)) {
             return null;
         }
@@ -1810,10 +1991,19 @@ public class AgentLoop {
     }
 
     private void record(long sessionId, Message message) {
-        if (recorder == null || sessionId < 0 || message == null) {
-            return;
+        synchronized (uiLock) {
+            if (message == null) return;
+            if (recorder != null && sessionId >= 0) recorder.record(sessionId, message);
+            if (Message.ASSISTANT.equals(message.role) || Message.USER.equals(message.role)
+                    || Message.TOOL.equals(message.role)) uiEvents.clear();
         }
-        recorder.record(sessionId, message);
+    }
+
+    private void recordToolResult(long sessionId, Message message, int gen, int token, String name) {
+        synchronized (uiLock) {
+            record(sessionId, message);
+            if (!stale(token, gen)) listener.onToolEnd(gen, name, message.content);
+        }
     }
 
     private void noteTurnEvent(int token, int gen) {
@@ -1960,9 +2150,13 @@ public class AgentLoop {
 
         String result;
         try {
+            runningTool = tool;
+            if (cancelled) return "已停止。";
             result = tool.run(args);
         } catch (Exception e) {
             result = FAIL_PREFIX + e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            if (runningTool == tool) runningTool = null;
         }
 
         for (Hook h : hooks) {
@@ -2083,6 +2277,7 @@ public class AgentLoop {
     }
 
     private void fillMissingTools(long sessionId, String note) {
+        List<Message> repaired = new ArrayList<Message>();
         synchronized (lock) {
             for (int i = 0; i < history.size(); i++) {
                 Message message = history.get(i);
@@ -2110,10 +2305,12 @@ public class AgentLoop {
                     Message toolMsg = Message.toolResult(id, note);
                     history.add(insertAt, toolMsg);
                     insertAt++;
-                    record(sessionId, toolMsg);
+                    repaired.add(toolMsg);
                 }
             }
         }
+        // Database snapshots can wait on I/O; keep cancellation's state lock available.
+        for (Message message : repaired) record(sessionId, message);
     }
 
     private static JSONObject parseArgs(String raw) {

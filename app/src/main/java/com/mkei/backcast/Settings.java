@@ -2,6 +2,7 @@ package com.mkei.backcast;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import com.mkei.backcast.agent.ResponsePreferences;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +22,9 @@ public class Settings {
     private static final String KEY_REASONING_EFFORT = "reasoning_effort";
     private static final String KEY_ACCESS = "access_level";
     private static final String KEY_WORK_DIR = "work_dir";
+    private static final String KEY_OUTPUT_VERBOSITY = "output_verbosity";
+    private static final String KEY_REASONING_SUMMARY = "reasoning_summary";
+    private static final String KEY_OUTPUT_LANGUAGE = "output_language";
 
     /**
      * 权限级别。决定工具调用要不要人工放行。
@@ -319,13 +323,48 @@ public class Settings {
                 + "读文件不要用 cat，改文件不要用重定向。"
                 + "read、edit、write 跟随上面的 root 开关，读不到不要复制到临时目录。"
                 + "工具失败时先读错误中的路径与原因，修正参数，不要重复同一错误调用。"
+                + "临时脚本、一次性验证辅助文件和中间产物必须使用 temporary 管理，"
+                + "write 的 purpose=temporary，shell 创建临时材料时 temporary=true；"
+                + "相对临时路径按专用临时目录解析。用完立即 temporary cleanup，收尾前必须清理干净。"
+                + "正式测试长期保留，归类到项目已有测试目录或 tests/；"
+                + "一次性验证脚本不是正式测试，禁止为逃避清理把临时材料标成 test 或 deliverable。"
+                + "不按文件名猜测删除用户文件，只清理本轮明确创建并登记的临时材料。"
                 + "可用工具以本轮 tools 列表为准，不沿用历史里的工具清单。");
         return sb.toString();
     }
 
     /** 每轮真正发给模型的：静态指令 + 现拼的环境事实。 */
     public String fullSystemPrompt() {
-        return systemPrompt() + ENV_SEPARATOR + environmentContext();
+        return systemPrompt() + ENV_SEPARATOR + environmentContext()
+                + "\n\n" + responseInstructions();
+    }
+
+    public String outputVerbosity() {
+        return ResponsePreferences.normalizeVerbosity(prefs.getString(KEY_OUTPUT_VERBOSITY, "default"));
+    }
+
+    public void setOutputVerbosity(String value) {
+        prefs.edit().putString(KEY_OUTPUT_VERBOSITY, ResponsePreferences.normalizeVerbosity(value)).apply();
+    }
+
+    public String reasoningSummary() {
+        return ResponsePreferences.normalizeSummary(prefs.getString(KEY_REASONING_SUMMARY, "auto"));
+    }
+
+    public void setReasoningSummary(String value) {
+        prefs.edit().putString(KEY_REASONING_SUMMARY, ResponsePreferences.normalizeSummary(value)).apply();
+    }
+
+    public String outputLanguage() {
+        return ResponsePreferences.normalizeLanguage(prefs.getString(KEY_OUTPUT_LANGUAGE, "zh-CN"));
+    }
+
+    public void setOutputLanguage(String value) {
+        prefs.edit().putString(KEY_OUTPUT_LANGUAGE, ResponsePreferences.normalizeLanguage(value)).apply();
+    }
+
+    public String responseInstructions() {
+        return ResponsePreferences.instructions(outputVerbosity(), outputLanguage());
     }
 
     /** 思考强度；未设置时返回默认值。 */

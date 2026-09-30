@@ -14,11 +14,14 @@ import com.mkei.backcast.tool.GetGoalTool;
 import com.mkei.backcast.tool.ReadTool;
 import com.mkei.backcast.tool.ShellTool;
 import com.mkei.backcast.tool.WriteTool;
+import com.mkei.backcast.tool.TemporaryTool;
+import com.mkei.backcast.tool.TemporaryWorkspace;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 每个会话一个循环，跟界面当前看哪一个会话无关。
@@ -32,6 +35,8 @@ public final class RunHub {
     private final ChatStore store;
     private final Settings settings;
     private final Map<Long, AgentLoop> loops = new HashMap<Long, AgentLoop>();
+    private final Map<AgentLoop, TemporaryWorkspace> temporary = new ConcurrentHashMap<AgentLoop, TemporaryWorkspace>();
+    private final ConcurrentHashMap<Long, Object> sessionPreparations = new ConcurrentHashMap<Long, Object>();
     private final AgentLoop.Recorder recorder;
     private final AgentLoop.Durability durability;
     private final AgentLoop.Listener quiet = new AgentLoop.Quiet();
@@ -79,31 +84,59 @@ public final class RunHub {
     }
 
     /** 打开一个已经落库的会话。已有循环就接着用，不重新装历史。 */
-    public synchronized AgentLoop bind(long sessionId, AgentLoop.Listener ui) {
-        AgentLoop loop = obtainSession(sessionId);
-        quietOthers(loop, ui);
-        arm(loop);
-        loop.setListener(ui == null ? quiet : ui);
+    public AgentLoop bind(long sessionId, AgentLoop.Listener ui) {
+        AgentLoop loop = existingSession(sessionId);
+        if (loop == null) {
+            prepareSession(sessionId);
+            loop = existingSession(sessionId);
+        }
+        synchronized (this) {
+            quietOthers(loop, ui);
+            arm(loop);
+            loop.setListener(ui == null ? quiet : ui);
+        }
         return loop;
     }
 
-    /** 调用方持有 hub 锁。恢复循环不改变已有监听的归属。 */
-    private AgentLoop obtainSession(long sessionId) {
-        AgentLoop loop = loops.get(Long.valueOf(sessionId));
-        if (loop == null) {
-            loop = create();
-            loops.put(Long.valueOf(sessionId), loop);
-            loop.bindSession(sessionId);
-            ChatStore.Run run = store.readRun(sessionId);
-            loop.restoreGoal(run.goal, run.status, run.elapsedMs, run.tokensUsed, run.tokenBudget,
-                    run.budgetWrapFinished);
-            loop.loadHistory(settings.fullSystemPrompt(),
-                    stripSteer(store.contextMessages(sessionId)));
-            if (run.running) {
-                loop.restoreTurnClock(run.turnAt, run.turnWall, run.seenAt);
+    /** Returns only a fully restored loop; performs no database or filesystem work. */
+    public synchronized AgentLoop existingSession(long sessionId) {
+        return loops.get(Long.valueOf(sessionId));
+    }
+
+    /** Preload persisted context off the UI thread without changing listener ownership. */
+    public void prepareSession(long sessionId) {
+        AgentLoop known = existingSession(sessionId);
+        if (known == null) {
+            Long key = Long.valueOf(sessionId);
+            Object candidate = new Object();
+            Object previous = sessionPreparations.putIfAbsent(key, candidate);
+            Object preparation = previous == null ? candidate : previous;
+            synchronized (preparation) {
+                known = existingSession(sessionId);
+                if (known == null) {
+                    ChatStore.Run run = store.readRun(sessionId);
+                    List<Message> context = stripSteer(store.contextMessages(sessionId));
+                    known = create(sessionId);
+                    try {
+                        restoreSession(known, sessionId, run, context);
+                    } catch (RuntimeException error) {
+                        temporary.remove(known);
+                        throw error;
+                    }
+                    synchronized (this) { loops.put(key, known); }
+                }
             }
         }
-        return loop;
+        TemporaryWorkspace materials = temporary.get(known);
+        if (materials != null) materials.cleanupRecovered();
+    }
+
+    private void restoreSession(AgentLoop loop, long sessionId, ChatStore.Run run, List<Message> context) {
+        loop.bindSession(sessionId);
+        loop.restoreGoal(run.goal, run.status, run.elapsedMs, run.tokensUsed, run.tokenBudget,
+                run.budgetWrapFinished);
+        loop.loadHistory(settings.fullSystemPrompt(), context);
+        if (run.running) loop.restoreTurnClock(run.turnAt, run.turnWall, run.seenAt);
     }
 
     /** 还没落库的新会话。不碰别的会话上正在跑的循环。 */
@@ -112,7 +145,7 @@ public final class RunHub {
         if (draft != null) {
             draft.setListener(quiet);
         }
-        draft = create();
+        draft = create(-1);
         draft.bindSession(-1);
         draft.reset(settings.fullSystemPrompt());
         arm(draft);
@@ -126,6 +159,8 @@ public final class RunHub {
             return;
         }
         loop.bindSession(sessionId);
+        TemporaryWorkspace materials = temporary.get(loop);
+        if (materials != null) materials.bindSession(sessionId);
         loops.put(Long.valueOf(sessionId), loop);
         if (draft == loop) {
             draft = null;
@@ -165,8 +200,15 @@ public final class RunHub {
     public synchronized void drop(long sessionId) {
         AgentLoop loop = loops.remove(Long.valueOf(sessionId));
         if (loop != null) {
+            boolean running = loop.busy();
             loop.clearGoal();
             loop.cancel();
+            final TemporaryWorkspace materials = temporary.remove(loop);
+            if (!running && materials != null) {
+                new Thread(new Runnable() {
+                    @Override public void run() { materials.cleanupRecovered(); }
+                }).start();
+            }
         }
     }
 
@@ -177,7 +219,8 @@ public final class RunHub {
         }
         String sig = settings.baseUrl() + "\n" + settings.apiKey() + "\n" + settings.model()
                 + "\n" + settings.reasoningEffort() + "\n" + settings.useRoot()
-                + "\n" + settings.workDir();
+                + "\n" + settings.workDir() + "\n" + settings.outputVerbosity()
+                + "\n" + settings.outputLanguage();
         if (sig.equals(applied)) {
             return;
         }
@@ -228,8 +271,9 @@ public final class RunHub {
         for (int i = 0; i < ids.size(); i++) {
             final long sid = ids.get(i).longValue();
             final AgentLoop loop;
+            prepareSession(sid);
             synchronized (this) {
-                loop = obtainSession(sid);
+                loop = loops.get(Long.valueOf(sid));
             }
             if (loop.busy()) {
                 continue;
@@ -263,27 +307,35 @@ public final class RunHub {
         }
     }
 
-    private AgentLoop create() {
+    private AgentLoop create(long sessionId) {
         AgentLoop loop = new AgentLoop(newClient(), new ToolRegistry(), quiet);
+        temporary.put(loop, new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
+                new java.io.File(app.getFilesDir(), "temporary-workspaces"), sessionId));
         loop.retarget(newClient(), tools(loop));
         arm(loop);
         return loop;
     }
 
     private LlmClient newClient() {
-        return new LlmClient(new LlmClient.Config(
+        LlmClient.Config config = new LlmClient.Config(
                 settings.baseUrl(), settings.apiKey(), settings.model(),
-                settings.reasoningEffort()));
+                settings.reasoningEffort());
+        config.verbosity = settings.outputVerbosity();
+        config.responseInstructions = settings.responseInstructions();
+        return new LlmClient(config);
     }
 
     private ToolRegistry tools(AgentLoop loop) {
         ToolRegistry next = new ToolRegistry();
         String dir = settings.workDir();
         boolean root = settings.useRoot();
+        TemporaryWorkspace materials = temporary.get(loop);
+        materials.configure(dir, root);
         next.register(new ReadTool(dir, root));
-        next.register(new ShellTool(root, dir));
+        next.register(new ShellTool(root, dir, materials));
         next.register(new EditTool(dir, root));
-        next.register(new WriteTool(dir, root));
+        next.register(new WriteTool(dir, root, materials));
+        next.register(new TemporaryTool(materials));
         next.register(new GoalTool(loop));
         next.register(new GetGoalTool(loop));
         return next;

@@ -29,6 +29,7 @@ public class TurnTrace {
     private boolean roundOpen;
     public long elapsedMs;
     public long thinkMs;
+    public boolean showReasoning = true;
     /**
      * 正文开始时 order 的条数。
      * 这个下标之前的思考和命令留在工作时间下面，之后新来的才挂到正文下面。
@@ -49,6 +50,7 @@ public class TurnTrace {
         public int requestedChars;
         public boolean summaryComplete;
         public int summaryVersion;
+        public String summaryPreference = "";
     }
 
     public static final class Range {
@@ -75,13 +77,18 @@ public class TurnTrace {
             boolean pending = false;
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.think != null ? !piece.sealed : piece.step != null && !piece.step.done) pending = true;
+                if (piece.think != null ? trace.showReasoning && !piece.sealed
+                        : piece.step != null && !piece.step.done) pending = true;
             }
             return pending ? text + " · 进行中" : text;
         }
 
         public boolean hasDetail() {
-            return Math.min(end, trace.order.size()) > Math.max(0, start);
+            for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
+                Piece piece = trace.order.get(i);
+                if (piece.step != null || trace.showReasoning && piece.think != null) return true;
+            }
+            return false;
         }
     }
 
@@ -98,7 +105,7 @@ public class TurnTrace {
     public String activityCaption(int from, int to) {
         int thinks = 0, tools = 0;
         for (int i = Math.max(0, from); i < Math.min(to, order.size()); i++) {
-            if (order.get(i).think != null) thinks++;
+            if (showReasoning && order.get(i).think != null) thinks++;
             if (order.get(i).step != null) tools++;
         }
         if (thinks == 0 && tools == 0) return "";
@@ -108,7 +115,7 @@ public class TurnTrace {
     }
 
     public boolean hasDetail() {
-        return hasThink() || !steps.isEmpty();
+        return showReasoning && hasThink() || !steps.isEmpty();
     }
 
     /**

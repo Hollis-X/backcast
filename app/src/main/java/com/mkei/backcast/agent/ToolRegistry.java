@@ -31,6 +31,32 @@ public class ToolRegistry {
         return tools.isEmpty();
     }
 
+    public void beginTurn() {
+        for (Tool tool : tools.values()) {
+            if (tool instanceof TemporaryCleanup) ((TemporaryCleanup) tool).beginTurn();
+        }
+    }
+
+    public String cleanupTemporary(boolean finishing) {
+        StringBuilder errors = new StringBuilder();
+        for (Tool tool : tools.values()) {
+            if (!(tool instanceof TemporaryCleanup)) continue;
+            String error;
+            try {
+                error = finishing ? ((TemporaryCleanup) tool).finishTurn()
+                        : ((TemporaryCleanup) tool).cleanupTemporary();
+            } catch (Exception failure) {
+                error = failure.getMessage();
+                if (error == null || error.length() == 0) error = failure.getClass().getSimpleName();
+            }
+            if (error != null) {
+                if (errors.length() > 0) errors.append('\n');
+                errors.append(error);
+            }
+        }
+        return errors.length() == 0 ? null : errors.toString();
+    }
+
     /** 打断正在跑的工具，例如用户点了停止。 */
     public void abort() {
         for (Tool tool : tools.values()) {
