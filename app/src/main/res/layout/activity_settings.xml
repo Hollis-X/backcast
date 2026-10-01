@@ -1,323 +1,76 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout
-	xmlns:android="http://schemas.android.com/apk/res/android"
-	android:layout_width="match_parent"
-	android:layout_height="match_parent"
-	android:orientation="vertical"
-	android:background="@color/bg_window">
-
-	<androidx.appcompat.widget.Toolbar
-		android:id="@+id/toolbar"
-		android:layout_width="match_parent"
-		android:layout_height="?attr/actionBarSize"
-		android:background="@color/surface"
-		android:title="@string/settings_title"
-		android:titleTextColor="@color/text_primary"/>
-
-	<ScrollView
-		android:layout_width="match_parent"
-		android:layout_height="0dp"
-		android:layout_weight="1"
-		android:padding="14dp">
-
-		<LinearLayout
-			android:layout_width="match_parent"
-			android:layout_height="wrap_content"
-			android:orientation="vertical">
-
-			<TextView
-				android:layout_width="wrap_content"
-				android:layout_height="wrap_content"
-				android:text="@string/label_base_url"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingBottom="4dp"/>
-
-			<EditText
-				android:id="@+id/base_url"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:background="@color/surface"
-				android:hint="@string/hint_base_url"
-				android:textColorHint="@color/text_secondary"
-				android:textColor="@color/text_primary"
-				android:textSize="13sp"
-				android:padding="10dp"
-				android:inputType="textUri"
-				android:typeface="monospace"/>
-
-			<TextView
-				android:layout_width="wrap_content"
-				android:layout_height="wrap_content"
-				android:text="@string/label_api_key"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<EditText
-				android:id="@+id/api_key"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:background="@color/surface"
-				android:textColorHint="@color/text_secondary"
-				android:textColor="@color/text_primary"
-				android:textSize="13sp"
-				android:padding="10dp"
-				android:inputType="textVisiblePassword"
-				android:typeface="monospace"/>
-
-			<TextView
-				android:layout_width="wrap_content"
-				android:layout_height="wrap_content"
-				android:text="@string/label_model"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<EditText
-				android:id="@+id/model"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:background="@color/surface"
-				android:textColorHint="@color/text_secondary"
-				android:textColor="@color/text_primary"
-				android:textSize="13sp"
-				android:padding="10dp"
-				android:inputType="textNoSuggestions"
-				android:typeface="monospace"/>
-
-			<Button
-				android:id="@+id/fetch_models"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:layout_marginTop="8dp"
-				android:text="@string/action_fetch_models"
-				android:textColor="@color/text_primary"
-				android:backgroundTint="@color/divider"/>
-
-			<TextView
-				android:id="@+id/fetch_status"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingTop="6dp"
-				android:textSize="11sp"
-				android:textColor="@color/text_secondary"
-				android:typeface="monospace"
-				android:visibility="gone"/>
-
-			<TextView
-				android:layout_width="wrap_content"
-				android:layout_height="wrap_content"
-				android:text="@string/label_model_pick"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<LinearLayout
-				android:id="@+id/model_list"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:orientation="vertical"
-				android:background="@color/surface"
-				android:padding="6dp"/>
-
-			<TextView
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:text="@string/label_output_verbosity"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="16dp"
-				android:paddingBottom="4dp"/>
-
-			<Spinner
-				android:id="@+id/output_verbosity"
-				android:layout_width="match_parent"
-				android:layout_height="48dp"
-				android:spinnerMode="dropdown"
-				android:contentDescription="@string/label_output_verbosity"/>
-
-			<TextView
-				android:id="@+id/output_verbosity_description"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingLeft="8dp"
-				android:paddingRight="8dp"
-				android:paddingBottom="4dp"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"/>
-
-			<TextView
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:text="@string/label_reasoning_summary"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<Spinner
-				android:id="@+id/reasoning_summary"
-				android:layout_width="match_parent"
-				android:layout_height="48dp"
-				android:spinnerMode="dropdown"
-				android:contentDescription="@string/label_reasoning_summary"/>
-
-			<TextView
-				android:id="@+id/reasoning_summary_description"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingLeft="8dp"
-				android:paddingRight="8dp"
-				android:paddingBottom="4dp"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"/>
-
-			<TextView
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:text="@string/label_output_language"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<Spinner
-				android:id="@+id/output_language"
-				android:layout_width="match_parent"
-				android:layout_height="48dp"
-				android:spinnerMode="dropdown"
-				android:contentDescription="@string/label_output_language"/>
-
-			<TextView
-				android:id="@+id/output_language_description"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingLeft="8dp"
-				android:paddingRight="8dp"
-				android:paddingBottom="4dp"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"/>
-
-			<TextView
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:text="@string/label_agent_concurrency"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-			<Spinner
-				android:id="@+id/agent_concurrency"
-				android:layout_width="match_parent"
-				android:layout_height="48dp"
-				android:spinnerMode="dropdown"
-				android:contentDescription="@string/label_agent_concurrency"/>
-			<TextView
-				android:id="@+id/agent_concurrency_description"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingLeft="8dp"
-				android:paddingRight="8dp"
-				android:paddingBottom="4dp"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"/>
-			<TextView
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:text="@string/label_reasoning_effort"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-			<Spinner
-				android:id="@+id/reasoning_effort"
-				android:layout_width="match_parent"
-				android:layout_height="48dp"
-				android:spinnerMode="dropdown"
-				android:contentDescription="@string/label_reasoning_effort"/>
-			<TextView
-				android:id="@+id/reasoning_effort_description"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingLeft="8dp"
-				android:paddingRight="8dp"
-				android:paddingBottom="4dp"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"/>
-			<TextView
-				android:id="@+id/agent_status"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:paddingTop="8dp"
-				android:paddingBottom="4dp"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"/>
-
-			<CheckBox
-				android:id="@+id/use_root"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:layout_marginTop="14dp"
-				android:text="@string/label_use_root"
-				android:textColor="@color/text_primary"
-				android:textSize="14sp"/>
-
-			<TextView
-				android:layout_width="wrap_content"
-				android:layout_height="wrap_content"
-				android:text="@string/label_system_prompt"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<EditText
-				android:id="@+id/system_prompt"
-				android:layout_width="match_parent"
-				android:layout_height="200dp"
-				android:background="@color/surface"
-				android:gravity="top|start"
-				android:textColor="@color/text_primary"
-				android:textSize="12sp"
-				android:padding="10dp"
-				android:inputType="textMultiLine|textNoSuggestions"
-				android:typeface="monospace"/>
-
-			<TextView
-				android:layout_width="wrap_content"
-				android:layout_height="wrap_content"
-				android:text="@string/label_env_context"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:paddingTop="12dp"
-				android:paddingBottom="4dp"/>
-
-			<!-- 每轮现拼，不参与保存。让用户看见实际发出去的环境事实，又不会把它写死。 -->
-			<TextView
-				android:id="@+id/env_context"
-				android:layout_width="match_parent"
-				android:layout_height="wrap_content"
-				android:background="@color/code_bg"
-				android:textColor="@color/text_secondary"
-				android:textSize="12sp"
-				android:padding="10dp"
-				android:typeface="monospace"/>
-
-		</LinearLayout>
-
-	</ScrollView>
-
-	<Button
-		android:id="@+id/save"
-		android:layout_width="match_parent"
-		android:layout_height="wrap_content"
-		android:layout_margin="14dp"
-		android:text="@string/action_save"
-		android:textColor="#FFFFFF"
-		android:backgroundTint="@color/colorAccent"/>
-
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/bg_window">
+    <androidx.appcompat.widget.Toolbar android:id="@+id/toolbar"
+        android:layout_width="match_parent" android:layout_height="?attr/actionBarSize"
+        android:background="@color/surface" android:title="@string/settings_title"
+        android:titleTextColor="@color/text_primary"/>
+    <ScrollView android:layout_width="match_parent" android:layout_height="match_parent"
+        android:fillViewport="true">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical">
+            <LinearLayout android:id="@+id/settings_ai_row"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:minHeight="76dp" android:orientation="horizontal" android:gravity="center_vertical"
+                android:padding="16dp" android:clickable="true" android:focusable="true"
+                android:background="?android:attr/selectableItemBackground">
+                <ImageView android:id="@+id/settings_ai_icon" android:layout_width="24dp"
+                    android:layout_height="24dp" android:importantForAccessibility="no"/>
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:layout_marginLeft="16dp" android:layout_marginRight="12dp"
+                    android:orientation="vertical">
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/settings_ai_entry" android:textSize="16sp" android:textColor="@color/text_primary"/>
+                    <TextView android:id="@+id/settings_ai_summary" android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:layout_marginTop="4dp"
+                        android:textSize="13sp" android:textColor="@color/text_secondary"/>
+                </LinearLayout>
+                <ImageView android:id="@+id/settings_ai_arrow" android:layout_width="18dp"
+                    android:layout_height="18dp" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp"
+                android:layout_marginLeft="56dp" android:background="@color/divider"/>
+            <LinearLayout android:id="@+id/settings_preferences_row"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:minHeight="76dp" android:orientation="horizontal" android:gravity="center_vertical"
+                android:padding="16dp" android:clickable="true" android:focusable="true"
+                android:background="?android:attr/selectableItemBackground">
+                <ImageView android:id="@+id/settings_preferences_icon" android:layout_width="24dp"
+                    android:layout_height="24dp" android:importantForAccessibility="no"/>
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:layout_marginLeft="16dp" android:layout_marginRight="12dp"
+                    android:orientation="vertical">
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/settings_preferences_title" android:textSize="16sp" android:textColor="@color/text_primary"/>
+                    <TextView android:id="@+id/settings_preferences_summary" android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:layout_marginTop="4dp"
+                        android:textSize="13sp" android:textColor="@color/text_secondary"/>
+                </LinearLayout>
+                <ImageView android:id="@+id/settings_preferences_arrow" android:layout_width="18dp"
+                    android:layout_height="18dp" android:importantForAccessibility="no"/>
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp"
+                android:layout_marginLeft="56dp" android:background="@color/divider"/>
+            <LinearLayout android:id="@+id/settings_tools_row"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:minHeight="76dp" android:orientation="horizontal" android:gravity="center_vertical"
+                android:padding="16dp" android:clickable="true" android:focusable="true"
+                android:background="?android:attr/selectableItemBackground">
+                <ImageView android:id="@+id/settings_tools_icon" android:layout_width="24dp"
+                    android:layout_height="24dp" android:importantForAccessibility="no"/>
+                <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:layout_marginLeft="16dp" android:layout_marginRight="12dp"
+                    android:orientation="vertical">
+                    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:text="@string/settings_tools_title" android:textSize="16sp" android:textColor="@color/text_primary"/>
+                    <TextView android:id="@+id/settings_tools_summary" android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:layout_marginTop="4dp"
+                        android:textSize="13sp" android:textColor="@color/text_secondary"/>
+                </LinearLayout>
+                <ImageView android:id="@+id/settings_tools_arrow" android:layout_width="18dp"
+                    android:layout_height="18dp" android:importantForAccessibility="no"/>
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
 </LinearLayout>

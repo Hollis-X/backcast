@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/bg_window">
+    <androidx.appcompat.widget.Toolbar android:id="@+id/toolbar"
+        android:layout_width="match_parent" android:layout_height="?attr/actionBarSize"
+        android:background="@color/surface" android:title="@string/settings_ai_title"
+        android:titleTextColor="@color/text_primary"/>
+    <ScrollView android:layout_width="match_parent" android:layout_height="0dp"
+        android:layout_weight="1" android:padding="14dp" android:fillViewport="true">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/label_base_url" android:textColor="@color/text_secondary" android:textSize="12sp" android:paddingBottom="4dp"/>
+            <EditText android:id="@+id/base_url" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:background="@color/surface" android:hint="@string/hint_base_url" android:textColorHint="@color/text_secondary"
+                android:textColor="@color/text_primary" android:textSize="13sp" android:padding="10dp"
+                android:inputType="textUri" android:typeface="monospace" android:saveEnabled="false"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/label_api_key" android:textColor="@color/text_secondary" android:textSize="12sp"
+                android:paddingTop="12dp" android:paddingBottom="4dp"/>
+            <EditText android:id="@+id/api_key" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:background="@color/surface" android:textColorHint="@color/text_secondary"
+                android:textColor="@color/text_primary" android:textSize="13sp" android:padding="10dp"
+                android:inputType="textPassword" android:typeface="monospace" android:saveEnabled="false"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/label_model" android:textColor="@color/text_secondary" android:textSize="12sp"
+                android:paddingTop="12dp" android:paddingBottom="4dp"/>
+            <EditText android:id="@+id/model" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:background="@color/surface" android:textColorHint="@color/text_secondary"
+                android:textColor="@color/text_primary" android:textSize="13sp" android:padding="10dp"
+                android:inputType="textNoSuggestions" android:typeface="monospace" android:saveEnabled="false"/>
+            <Button android:id="@+id/fetch_models" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="8dp" android:text="@string/action_fetch_models"
+                android:textColor="@color/text_primary" android:backgroundTint="@color/divider"/>
+            <TextView android:id="@+id/fetch_status" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:paddingTop="6dp" android:textSize="12sp" android:textColor="@color/text_secondary" android:visibility="gone"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/label_model_pick" android:textColor="@color/text_secondary" android:textSize="12sp"
+                android:paddingTop="12dp" android:paddingBottom="4dp"/>
+            <LinearLayout android:id="@+id/model_list" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:background="@color/surface" android:padding="6dp"/>
+        </LinearLayout>
+    </ScrollView>
+    <Button android:id="@+id/save" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_margin="14dp" android:text="@string/action_save" android:textColor="#FFFFFF" android:backgroundTint="@color/colorAccent"/>
+</LinearLayout>

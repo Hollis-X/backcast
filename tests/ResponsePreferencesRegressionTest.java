@@ -322,6 +322,55 @@ public final class ResponsePreferencesRegressionTest {
                 "Unsaved preview contaminated preferences or editable prompt");
     }
 
+    @SuppressWarnings("unchecked")
+    private static void groupedAiSavePreservesPreferencesPermissionsAndWorkspace() throws Exception {
+        Object context = context(), settings = settings(context);
+        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
+                .invoke(settings, "high", "none", "ja", "ultra", 4, "User-owned prompt");
+        settingsType.getMethod("setUseRoot", boolean.class).invoke(settings, false);
+        set(settings, "setAccessLevel", "strict"); set(settings, "setWorkDir", "/storage/emulated/0/project");
+        java.util.Map<String,Object> stored = (java.util.Map<String,Object>) contextType.getField("values").get(context);
+        java.util.Map<String,Object> before = new java.util.HashMap<String,Object>(stored);
+        settingsType.getMethod("saveAiConfiguration", String.class, String.class, String.class, List.class)
+                .invoke(settings, " https://provider.example/v1 ", " secret ", " chosen ",
+                        Arrays.asList("chosen", "other", "chosen", " ", null, "bad\nline"));
+        check("https://provider.example/v1".equals(get(settings, "baseUrl")) && "secret".equals(get(settings, "apiKey"))
+                && "chosen".equals(get(settings, "model")), "AI fields were not saved and trimmed");
+        check(Arrays.asList("chosen", "other").equals(settingsType.getMethod("modelList").invoke(settings)), "AI preview model list was not safely saved");
+        for (String key : before.keySet()) check(before.get(key).equals(stored.get(key)), "AI save changed another group: " + key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void groupedPreferenceSavePreservesLatestAiAndToolSettings() throws Exception {
+        Object context = context(), settings = settings(context);
+        settingsType.getMethod("saveAiConfiguration", String.class, String.class, String.class, List.class)
+                .invoke(settings, "https://new.example/v1", "new-key", "new-model", Arrays.asList("new-model", "available"));
+        settingsType.getMethod("setUseRoot", boolean.class).invoke(settings, false);
+        set(settings, "setAccessLevel", "guarded"); set(settings, "setWorkDir", "/storage/emulated/0/current");
+        java.util.Map<String,Object> stored = (java.util.Map<String,Object>) contextType.getField("values").get(context);
+        java.util.Map<String,Object> before = new java.util.HashMap<String,Object>(stored);
+        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
+                .invoke(settings, "medium", "detailed", "en", "max", 2, "My preference draft");
+        for (String key : before.keySet()) check(before.get(key).equals(stored.get(key)), "Preference save changed another group: " + key);
+        check("medium".equals(get(settings, "outputVerbosity")) && "detailed".equals(get(settings, "reasoningSummary"))
+                && "en".equals(get(settings, "outputLanguage")) && "max".equals(get(settings, "effectiveReasoningEffort"))
+                && concurrency(settings) == 2 && "My preference draft".equals(get(settings, "systemPrompt")), "Preference group did not save every field");
+    }
+
+    private static void groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra() throws Exception {
+        Object context = context(), settings = settings(context);
+        @SuppressWarnings("unchecked") java.util.Map<String,Object> values =
+                (java.util.Map<String,Object>) contextType.getField("values").get(context);
+        values.put("agent_mode", "ultra");
+        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
+                .invoke(settings, "invalid", null, "unknown", "max", 100, null);
+        check("default".equals(get(settings, "outputVerbosity")) && "auto".equals(get(settings, "reasoningSummary"))
+                && "zh-CN".equals(get(settings, "outputLanguage")) && concurrency(settings) == 3,
+                "Grouped save bypassed validation");
+        check("max".equals(get(settings(context), "effectiveReasoningEffort"))
+                && "manual".equals(get(settings(context), "agentMode")), "Legacy ultra changed explicit preference save");
+    }
+
     private static void run(String name) throws Exception {
         try { ResponsePreferencesRegressionTest.class.getDeclaredMethod(name).invoke(null); }
         catch (java.lang.reflect.InvocationTargetException failure) {
@@ -342,7 +391,9 @@ public final class ResponsePreferencesRegressionTest {
                     "invalidChildAndEffortValuesReturnDefaults", "malformedStoredChildSettingsReturnDefaults",
                     "maxAndUltraRemainSeparateWhilePreservingLanguage", "childPoliciesRequireEvidenceReviewAndSelectiveDelegation",
                     "legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection",
-                    "unsavedModePreviewDoesNotPersistOrAlterPrompt"}) run(name);
+                    "unsavedModePreviewDoesNotPersistOrAlterPrompt", "groupedAiSavePreservesPreferencesPermissionsAndWorkspace",
+                    "groupedPreferenceSavePreservesLatestAiAndToolSettings",
+                    "groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra"}) run(name);
             System.out.println(passed + " response preference tests passed");
         } finally {
             try (java.util.stream.Stream<Path> paths = Files.walk(build)) {

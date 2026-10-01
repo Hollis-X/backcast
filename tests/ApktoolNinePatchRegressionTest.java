@@ -1,5 +1,9 @@
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
+import ar.com.hjg.pngj.ImageInfo;
+import ar.com.hjg.pngj.ImageLineInt;
+import ar.com.hjg.pngj.PngReader;
+import ar.com.hjg.pngj.PngWriter;
+import ar.com.hjg.pngj.chunks.PngChunkPLTE;
+import ar.com.hjg.pngj.chunks.PngChunkTRNS;
 import brut.androlib.exceptions.AndrolibException;
 import brut.androlib.exceptions.CantFind9PatchChunkException;
 import brut.androlib.res.decoder.Res9patchStreamDecoder;
@@ -19,8 +23,12 @@ import java.net.URLClassLoader;
 import java.util.Arrays;
 import java.util.zip.CRC32;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.IIOImage;
+import javax.imageio.stream.ImageOutputStream;
 
-/** Runs the production Android replacement against real PNG chunks and upstream 2.9.3. */
+/** Runs the production pure Java replacement against real PNG chunks and upstream 2.9.3. */
 public final class ApktoolNinePatchRegressionTest {
     private static String upstreamJar;
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
@@ -60,12 +68,12 @@ public final class ApktoolNinePatchRegressionTest {
         CRC32 crc = new CRC32(); crc.update(name); crc.update(content); data.writeInt((int) crc.getValue());
     }
     private static BufferedImage decode(byte[] compiled) throws Exception {
+        return ImageIO.read(new ByteArrayInputStream(decodePng(compiled)));
+    }
+    private static byte[] decodePng(byte[] compiled) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         new Res9patchStreamDecoder().decode(new ByteArrayInputStream(compiled), bytes);
-        check(Bitmap.liveBitmaps == 0, "Decoder leaked bitmap memory");
-        check(!BitmapFactory.lastOptions.inScaled && !BitmapFactory.lastOptions.inPremultiplied
-                && BitmapFactory.lastOptions.inPreferredConfig == Bitmap.Config.ARGB_8888, "Pixel decode is scaled or premultiplied");
-        return ImageIO.read(new ByteArrayInputStream(bytes.toByteArray()));
+        return bytes.toByteArray();
     }
     private static BufferedImage upstream(byte[] compiled) throws Exception {
         URLClassLoader loader = new URLClassLoader(new URL[]{new java.io.File(upstreamJar).toURI().toURL()}, null);
@@ -81,7 +89,7 @@ public final class ApktoolNinePatchRegressionTest {
         check(left.getWidth() == right.getWidth() && left.getHeight() == right.getHeight(), "Nine-patch dimensions differ");
         int width = left.getWidth(), height = left.getHeight();
         check(Arrays.equals(left.getRGB(0, 0, width, height, null, 0, width), right.getRGB(0, 0, width, height, null, 0, width)),
-                "Android output differs from upstream nine-patch pixels");
+                "Pure Java output differs from upstream nine-patch pixels");
     }
     private static void stretchPaddingAndPixelsMatchUpstream() throws Exception {
         BufferedImage original = source(6, 5);
@@ -130,32 +138,168 @@ public final class ApktoolNinePatchRegressionTest {
     private static void missingChunkAndInvalidImageFailWithoutLeaks() throws Exception {
         boolean missing = false;
         try { decode(png(source(2, 2))); } catch (CantFind9PatchChunkException expected) { missing = true; }
-        check(missing && Bitmap.liveBitmaps == 0, "Missing npTc was silently accepted or leaked memory");
+        check(missing, "Missing npTc was silently accepted");
         boolean invalid = false;
         try { new Res9patchStreamDecoder().decode(new ByteArrayInputStream("not png".getBytes("UTF-8")), new ByteArrayOutputStream()); }
         catch (AndrolibException expected) { invalid = true; }
-        check(invalid && Bitmap.liveBitmaps == 0, "Invalid image was accepted or leaked memory");
+        check(invalid, "Invalid image was accepted");
     }
     private static void emptyInputAndOutputFailureKeepTheOriginalContract() throws Exception {
         ByteArrayOutputStream empty = new ByteArrayOutputStream();
         new Res9patchStreamDecoder().decode(new ByteArrayInputStream(new byte[0]), empty);
-        check(empty.size() == 0 && Bitmap.liveBitmaps == 0, "Empty input wrote image data");
+        check(empty.size() == 0, "Empty input wrote image data");
         boolean failed = false;
         byte[] compiled = addChunks(png(source(2, 2)), patch(new int[]{0, 2}, new int[]{0, 2}, 0, 0, 0, 0), null);
         try { new Res9patchStreamDecoder().decode(new ByteArrayInputStream(compiled), new OutputStream() {
             @Override public void write(int value) throws java.io.IOException { throw new java.io.IOException("disk full"); }
         }); } catch (AndrolibException expected) { failed = true; }
-        check(failed && Bitmap.liveBitmaps == 0, "Output failure did not release bitmap memory");
+        check(failed, "Output failure was silently accepted");
+    }
+
+    private static byte[] fixture(ImageInfo info, int[][] rows, PngChunkPLTE palette, PngChunkTRNS transparency) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        PngWriter writer = new PngWriter(output, info);
+        if (palette != null) writer.queueChunk(palette);
+        if (transparency != null && (info.indexed || info.greyscale)) writer.queueChunk(transparency);
+        for (int[] row : rows) writer.writeRowInt(row);
+        writer.end();
+        if (transparency != null && !info.indexed && !info.greyscale) {
+            // PNGJ 2.1.0's RGB tRNS writer repeats offset zero; use the format's six-byte metadata payload.
+            byte[] image = output.toByteArray(); ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            bytes.write(image, 0, 33);
+            ByteArrayOutputStream values = new ByteArrayOutputStream(); DataOutputStream data = new DataOutputStream(values);
+            for (int value : transparency.getRGB()) data.writeShort(value);
+            chunk(bytes, "tRNS", values.toByteArray()); bytes.write(image, 33, image.length - 33);
+            return bytes.toByteArray();
+        }
+        return output.toByteArray();
+    }
+    private static byte[] compileFixture(byte[] image) throws Exception {
+        PngReader reader = new PngReader(new ByteArrayInputStream(image));
+        int width = reader.imgInfo.cols, height = reader.imgInfo.rows; reader.close();
+        return addChunks(image, patch(new int[]{0, width}, new int[]{0, height}, 0, 0, 0, 0), null);
+    }
+    private static int[][] samples(byte[] image, int depth) {
+        PngReader reader = new PngReader(new ByteArrayInputStream(image));
+        try {
+            check(reader.imgInfo.bitDepth == depth && reader.imgInfo.alpha && !reader.imgInfo.greyscale && !reader.imgInfo.indexed,
+                    "Decoded PNG did not preserve bit depth in RGBA output");
+            int[][] rows = new int[reader.imgInfo.rows][];
+            for (int y = 0; y < rows.length; y++) rows[y] = ((ImageLineInt) reader.readRow()).getScanline().clone();
+            reader.end(); return rows;
+        } finally { reader.close(); }
+    }
+    private static void packedPalettesAndTransparencyDecodeAtEveryBitDepth() throws Exception {
+        for (int depth : new int[]{1, 2, 4}) {
+            ImageInfo info = new ImageInfo(4, 2, depth, false, false, true);
+            PngChunkPLTE palette = new PngChunkPLTE(info); int entries = 1 << depth;
+            palette.setNentries(entries);
+            for (int i = 0; i < entries; i++) palette.setEntry(i, 13 + i * 11, 230 - i * 7, 47 + i * 5);
+            PngChunkTRNS alpha = new PngChunkTRNS(info); alpha.setPalletteAlpha(new int[]{0, 127});
+            int[][] pixels = {{0, 1, entries - 1, 0}, {entries - 1, 0, 1, entries - 1}};
+            byte[] image = fixture(info, pixels, palette, alpha);
+            BufferedImage decoded = decode(compileFixture(image));
+            for (int y = 0; y < 2; y++) for (int x = 0; x < 4; x++) {
+                int index = pixels[y][x]; int expectedAlpha = index == 0 ? 0 : index == 1 ? 127 : 255;
+                check(decoded.getRGB(x + 1, y + 1) == (expectedAlpha << 24 | palette.getEntry(index)),
+                        "Packed palette or tRNS changed at depth " + depth);
+            }
+        }
+    }
+    private static void packedGrayscaleAndTransparencyDecodeAtEveryBitDepth() throws Exception {
+        for (int depth : new int[]{1, 2, 4}) {
+            ImageInfo info = new ImageInfo(4, 1, depth, false, true, false);
+            int maximum = (1 << depth) - 1;
+            PngChunkTRNS transparency = new PngChunkTRNS(info); transparency.setGray(maximum);
+            int[] pixels = {0, maximum, maximum / 2, 0};
+            int[][] decoded = samples(decodePng(compileFixture(fixture(info, new int[][]{pixels}, null, transparency))), 8);
+            for (int x = 0; x < pixels.length; x++) {
+                int offset = (x + 1) * 4, gray = pixels[x] * 255 / maximum;
+                check(decoded[1][offset] == gray && decoded[1][offset + 1] == gray && decoded[1][offset + 2] == gray
+                        && decoded[1][offset + 3] == (pixels[x] == maximum ? 0 : 255), "Packed grayscale/tRNS changed at depth " + depth);
+            }
+        }
+    }
+    private static void sixteenBitRgbaAndGrayscaleKeepEverySample() throws Exception {
+        ImageInfo rgba = new ImageInfo(2, 2, 16, true);
+        int[][] pixels = {{1, 0x1234, 65535, 0, 0xabcd, 33, 20000, 0x4321}, {65535, 32768, 40000, 65535, 1000, 29999, 0, 1}};
+        int[][] decoded = samples(decodePng(compileFixture(fixture(rgba, pixels, null, null))), 16);
+        for (int y = 0; y < 2; y++) for (int x = 0; x < 2; x++) for (int c = 0; c < 4; c++) {
+            check(decoded[y + 1][(x + 1) * 4 + c] == pixels[y][x * 4 + c], "16-bit RGBA sample truncated");
+        }
+        check(decoded[0][7] == 65535 && decoded[0][0] == 0, "16-bit stretch/corner alpha incorrect");
+        ImageInfo gray = new ImageInfo(3, 1, 16, true, true, false);
+        int[] grayPixels = {65535, 12, 32768, 65535, 0x1234, 0x4321};
+        int[][] grayDecoded = samples(decodePng(compileFixture(fixture(gray, new int[][]{grayPixels}, null, null))), 16);
+        for (int x = 0; x < 3; x++) {
+            int offset = (x + 1) * 4;
+            check(grayDecoded[1][offset] == grayPixels[x * 2] && grayDecoded[1][offset + 1] == grayPixels[x * 2]
+                    && grayDecoded[1][offset + 2] == grayPixels[x * 2] && grayDecoded[1][offset + 3] == grayPixels[x * 2 + 1],
+                    "16-bit grayscale or alpha sample truncated");
+        }
+    }
+    private static void trueColorTransparencyMatchesOriginalSamples() throws Exception {
+        for (int depth : new int[]{8, 16}) {
+            ImageInfo info = new ImageInfo(2, 1, depth, false);
+            int[] pixels = {depth == 16 ? 0x1234 : 18, 29, 63, 18, 29, 64};
+            // PNGJ 2.1.0's RGB tRNS writer uses the same offset for all channels.
+            // Emit the fixture chunk directly to test the reader against valid PNG bytes.
+            byte[] image = fixture(info, new int[][]{pixels}, null, null);
+            ByteArrayOutputStream transparent = new ByteArrayOutputStream(), channels = new ByteArrayOutputStream();
+            DataOutputStream values = new DataOutputStream(channels);
+            values.writeShort(pixels[0]); values.writeShort(pixels[1]); values.writeShort(pixels[2]);
+            transparent.write(image, 0, 33); chunk(transparent, "tRNS", channels.toByteArray());
+            transparent.write(image, 33, image.length - 33);
+            int[][] decoded = samples(decodePng(compileFixture(transparent.toByteArray())), depth);
+            check(decoded[1][4] == pixels[0] && decoded[1][5] == pixels[1] && decoded[1][6] == pixels[2]
+                    && decoded[1][7] == 0 && decoded[1][11] == (depth == 16 ? 65535 : 255), "RGB tRNS compared scaled or rounded values");
+        }
+    }
+    private static void interlacedImagesKeepInteriorPixels() throws Exception {
+        BufferedImage original = source(7, 5); original.setRGB(2, 3, 0x7f123456);
+        ImageWriter writer = ImageIO.getImageWritersByFormatName("png").next();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ImageOutputStream output = ImageIO.createImageOutputStream(bytes);
+        try {
+            writer.setOutput(output); ImageWriteParam parameters = writer.getDefaultWriteParam();
+            parameters.setProgressiveMode(ImageWriteParam.MODE_DEFAULT);
+            writer.write(null, new IIOImage(original, null, null), parameters); output.flush();
+        } finally { writer.dispose(); output.close(); }
+        byte[] image = bytes.toByteArray(); check(image[28] == 1, "Fixture is not Adam7 interlaced");
+        BufferedImage decoded = decode(compileFixture(image));
+        for (int y = 0; y < 5; y++) for (int x = 0; x < 7; x++) {
+            check(decoded.getRGB(x + 1, y + 1) == original.getRGB(x, y), "Interlaced sample differs");
+        }
+    }
+    private static void streamsStayOwnedByCallerAndCorruptPixelsFail() throws Exception {
+        byte[] compiled = compileFixture(png(source(2, 2)));
+        final boolean[] closed = {false, false};
+        ByteArrayInputStream in = new ByteArrayInputStream(compiled) { @Override public void close() { closed[0] = true; } };
+        ByteArrayOutputStream out = new ByteArrayOutputStream() { @Override public void close() { closed[1] = true; } };
+        new Res9patchStreamDecoder().decode(in, out);
+        check(!closed[0] && !closed[1], "Decoder closed caller-owned streams");
+        byte[] corrupt = compiled.clone();
+        for (int i = 8; i < corrupt.length - 12;) {
+            int size = (corrupt[i] & 255) << 24 | (corrupt[i + 1] & 255) << 16 | (corrupt[i + 2] & 255) << 8 | corrupt[i + 3] & 255;
+            if (new String(corrupt, i + 4, 4, "US-ASCII").equals("IDAT")) { corrupt[i + 8] ^= 1; break; }
+            i += size + 12;
+        }
+        boolean failed = false;
+        try { decode(corrupt); } catch (AndrolibException expected) { failed = true; }
+        check(failed, "Corrupt PNG compression/CRC was accepted");
     }
     public static void main(String[] args) throws Exception {
         upstreamJar = args[0];
         String[] names = {"stretchPaddingAndPixelsMatchUpstream", "semiTransparentPixelsKeepExactColorAndAlpha", "absentStretchRangesCoverTheEntireEdge", "optionalOpticalInsetsMatchUpstream",
-                "grayscaleAlphaRemainsTransparentAndNeutral", "missingChunkAndInvalidImageFailWithoutLeaks", "emptyInputAndOutputFailureKeepTheOriginalContract"};
+                "grayscaleAlphaRemainsTransparentAndNeutral", "missingChunkAndInvalidImageFailWithoutLeaks", "emptyInputAndOutputFailureKeepTheOriginalContract",
+                "packedPalettesAndTransparencyDecodeAtEveryBitDepth", "packedGrayscaleAndTransparencyDecodeAtEveryBitDepth",
+                "sixteenBitRgbaAndGrayscaleKeepEverySample", "trueColorTransparencyMatchesOriginalSamples", "interlacedImagesKeepInteriorPixels",
+                "streamsStayOwnedByCallerAndCorruptPixelsFail"};
         for (String name : names) {
             try { ApktoolNinePatchRegressionTest.class.getDeclaredMethod(name).invoke(null); }
             catch (java.lang.reflect.InvocationTargetException failure) { throw new AssertionError(name, failure.getCause()); }
             System.out.println("PASS " + name);
         }
-        System.out.println(names.length + " Android Apktool nine-patch tests passed");
+        System.out.println(names.length + " pure Java Apktool nine-patch tests passed");
     }
 }

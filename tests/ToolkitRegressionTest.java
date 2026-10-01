@@ -73,6 +73,56 @@ public final class ToolkitRegressionTest {
         check(!result.getBoolean("success") && !leak.exists(), "Structured argument executed shell injection");
     }
 
+    private static void missingToolsReturnActionableErrorsBeforeOpeningAssets() throws Exception {
+        final int[] opened = new int[1];
+        ToolchainStore isolated = new ToolchainStore(new File(state, "argument-check"), new EmbeddedToolchain.Assets() {
+            public InputStream open(String name) { opened[0]++; throw new AssertionError("Invalid arguments opened assets"); }
+        }, "arm64-v8a", 30);
+        ToolkitTool target = new ToolkitTool(shell, isolated, project.getPath(), temporary, "arm64-v8a");
+        for (JSONObject args : new JSONObject[]{new JSONObject().put("action", "status"),
+                new JSONObject().put("action", "status").put("arguments", new JSONArray().put("apktool")),
+                new JSONObject().put("action", "run")}) {
+            JSONObject result = new JSONObject(target.run(args));
+            check("error".equals(result.getString("state")) && result.getString("error").contains("tool")
+                    && result.getString("error").contains("apktool"), "Missing tool has no corrective example: " + result);
+        }
+        JSONObject property = target.parameters().getJSONObject("properties").getJSONObject("tool");
+        check(property.getJSONArray("enum").length() == 13 && opened[0] == 0, "Tool ids are not constrained before asset work");
+    }
+
+    private static void versionProbesRejectEmptyAndCrashedSuccessfulExitCodes() throws Exception {
+        final String[] output = new String[1];
+        ShellTool probe = new ShellTool(false, project.getPath(), temporary) {
+            @Override String runProgram(ToolchainStore.Launcher launcher, List<String> arguments, boolean temp, int timeout, int mine) {
+                return output[0];
+            }
+        };
+        ToolkitTool target = new ToolkitTool(probe, store, project.getPath(), temporary, "arm64-v8a");
+        store.configure("apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
+        for (String failed : new String[]{"exit=0\n", "exit=0\nKilled \n", "exit=0\nException in thread \"main\" java.lang.ExceptionInInitializerError\n2.9.3\n"}) {
+            output[0] = failed;
+            JSONObject result = target.status("apktool");
+            check(!result.getBoolean("ready") && "unavailable".equals(result.getString("state")), "Crashed probe declared ready: " + failed);
+        }
+        output[0] = "exit=0\n2.9.3\n";
+        check(target.status("apktool").getBoolean("ready"), "Valid Apktool version was rejected");
+        store.clear("apktool");
+        store.configure("readelf", "/usr/bin/readelf", null);
+        output[0] = "exit=0\n2.9.3\n";
+        check(!target.status("readelf").getBoolean("ready"), "Wrong program version declared ready");
+        output[0] = "exit=0\nGNU readelf (GNU Binutils) 2.47\n";
+        check(target.status("readelf").getBoolean("ready"), "Valid GNU version was rejected");
+        store.clear("readelf");
+        for (String id : new String[]{"objection", "radare2", "rabin2", "addr2line", "objdump", "nm", "strings", "size", "objcopy", "ar", "strip"}) {
+            store.configure(id, new File(root, id).getPath(), null);
+            String version = "objection".equals(id) ? "objection: 1.12.5" : "radare2".equals(id) || "rabin2".equals(id)
+                    ? id + " 6.2.2 0 @ android-arm-64" : "GNU " + id + " (GNU Binutils) 2.47";
+            output[0] = "exit=0\n" + version + "\n";
+            check(target.status(id).getBoolean("ready"), "Valid " + id + " version was rejected");
+            store.clear(id);
+        }
+    }
+
     private static void programArgumentsKeepPathBoundaries() throws Exception {
         List<String> args = Arrays.asList("-h", new File(root, "outside.elf").getPath());
         boolean rejected = false;
@@ -313,7 +363,8 @@ public final class ToolkitRegressionTest {
                 return;
             }
             for (String name : new String[]{"catalogDoesNotPretendToolsAreInstalled", "configurationIsPersistentAndCannotBindShell",
-                    "apktoolNeedsRealJvm", "actualExternalExecutableUsesStructuredArguments", "programArgumentsKeepPathBoundaries",
+                    "apktoolNeedsRealJvm", "actualExternalExecutableUsesStructuredArguments", "missingToolsReturnActionableErrorsBeforeOpeningAssets",
+                    "versionProbesRejectEmptyAndCrashedSuccessfulExitCodes", "programArgumentsKeepPathBoundaries",
                     "binaryMutationRequiresDisposableExplicitOutputs",
                     "cancellationWhileWaitingForToolLockNeverStartsProgram",
                     "verifiedInstallationPublishesOnlyCompleteArtifact", "hashMismatchAndCancellationRemoveStaging",

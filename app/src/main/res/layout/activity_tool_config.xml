@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:background="@color/bg_window">
+    <androidx.appcompat.widget.Toolbar android:id="@+id/tool_toolbar"
+        android:layout_width="match_parent" android:layout_height="?attr/actionBarSize"
+        android:background="@color/surface" android:title="@string/settings_tools_title"
+        android:titleTextColor="@color/text_primary" />
+    <ScrollView android:layout_width="match_parent" android:layout_height="0dp"
+        android:layout_weight="1" android:fillViewport="true">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:padding="16dp">
+            <LinearLayout android:id="@+id/tool_config_controls"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical">
+                <CheckBox android:id="@+id/tool_use_root" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:text="@string/label_use_root" android:textColor="@color/text_primary" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:text="@string/toolkit_root_note" android:textColor="@color/text_secondary"
+                    android:textSize="12sp" android:paddingBottom="12dp" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:text="@string/access_title" android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+                <RadioGroup android:id="@+id/tool_permission" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:orientation="vertical">
+                    <RadioButton android:id="@+id/tool_access_full" android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:minHeight="48dp"
+                        android:text="@string/access_full" android:textColor="@color/text_primary" />
+                    <RadioButton android:id="@+id/tool_access_guarded" android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:minHeight="48dp"
+                        android:text="@string/access_guarded" android:textColor="@color/text_primary" />
+                    <RadioButton android:id="@+id/tool_access_strict" android:layout_width="match_parent"
+                        android:layout_height="wrap_content" android:minHeight="48dp"
+                        android:text="@string/access_strict" android:textColor="@color/text_primary" />
+                </RadioGroup>
+                <TextView android:id="@+id/tool_permission_note" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:textColor="@color/text_secondary"
+                    android:textSize="12sp" android:paddingTop="4dp" android:paddingBottom="8dp" />
+                <Button android:id="@+id/tool_save_permissions" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:text="@string/action_save" android:textAllCaps="false" />
+            </LinearLayout>
+            <View android:layout_width="match_parent" android:layout_height="1dp"
+                android:layout_marginTop="16dp" android:layout_marginBottom="16dp"
+                android:background="@color/divider" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/toolkit_package_title" android:textColor="@color/text_primary"
+                android:textSize="16sp" />
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/toolkit_package_note" android:textColor="@color/text_secondary"
+                android:textSize="12sp" android:paddingTop="4dp" android:paddingBottom="8dp" />
+            <TextView android:id="@+id/tool_package_status" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:text="@string/toolkit_loading"
+                android:textColor="@color/text_secondary" android:textSize="12sp"
+                android:textIsSelectable="true" />
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:layout_marginTop="8dp">
+                <Button android:id="@+id/tool_package_install" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:text="@string/toolkit_install_offline" android:textAllCaps="false" />
+                <Button android:id="@+id/tool_package_remove" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:text="@string/toolkit_remove_package" android:textAllCaps="false" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/tool_config_list" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:orientation="vertical"
+                android:layout_marginTop="16dp" />
+            <LinearLayout android:id="@+id/tool_detail_content" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:orientation="vertical"
+                android:visibility="gone" android:layout_marginTop="16dp">
+                <TextView android:id="@+id/tool_detail_name" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:textColor="@color/text_primary"
+                    android:textSize="18sp" android:paddingBottom="8dp" />
+                <TextView android:id="@+id/tool_detail_info" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:textColor="@color/text_secondary"
+                    android:textSize="13sp" android:textIsSelectable="true" />
+                <Button android:id="@+id/tool_detail_probe" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:text="@string/toolkit_probe" android:textAllCaps="false"
+                    android:layout_marginTop="12dp" />
+                <TextView android:id="@+id/tool_detail_output" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:textColor="@color/text_primary"
+                    android:textSize="12sp" android:fontFamily="monospace"
+                    android:textIsSelectable="true" android:visibility="gone"
+                    android:paddingTop="12dp" />
+            </LinearLayout>
+            <TextView android:id="@+id/tool_operation_status" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:textColor="@color/text_secondary"
+                android:textSize="13sp" android:paddingTop="12dp" android:visibility="gone" />
+            <Button android:id="@+id/tool_operation_cancel" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:minHeight="48dp"
+                android:text="@string/toolkit_cancel" android:textAllCaps="false"
+                android:visibility="gone" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

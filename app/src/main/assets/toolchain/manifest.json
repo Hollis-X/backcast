@@ -4,11 +4,12 @@
   "radare2": "6.2.2",
   "objection": "1.12.5",
   "patches": [
-    "Apktool Res9patchStreamDecoder: replace desktop AWT/ImageIO with Android Bitmap APIs",
     "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix",
     "Materialize upstream internal symlinks as regular copies for private extraction",
     "Exclude desktop aapt binaries; include Android aapt2",
-    "Exclude unneeded pip and Frida tracer web UI"
+    "Exclude unneeded pip and Frida tracer web UI",
+    "Apktool OSDetection: tolerate missing desktop JVM properties on Android ART",
+    "Apktool Res9patchStreamDecoder: use bundled PNGJ 2.1.0 without desktop AWT/ImageIO or Android Bitmap JNI"
   ],
   "converter": {
     "tool": "Google R8/D8 8.3.37",
@@ -20,8 +21,11 @@
       "asset": "toolchain/common.tar.gz",
       "abi": "any",
       "min_sdk": 26,
-      "sha256": "1bde3177dc1ff3efbd737de35ce8596839a98a6db40daf9da74380dc84bd5653",
-      "bytes": 9465375
+      "sha256": "3e2690e6c9b010c84f9c9a139a09fc36b53f4481c7996d73565972f9802c2abd",
+      "bytes": 9521826,
+      "tar_asset": "toolchain/common.tar",
+      "tar_sha256": "403663204811a3a5248293f54a1d1746a4a0fbd114683edfce4b8c34704f6ba6",
+      "tar_bytes": 25896960
     },
     {
       "asset": "toolchain/arm64-v8a.tar.gz",
@@ -31,7 +35,10 @@
       "bytes": 91523495,
       "excluded_upstream_host_tools": [
         "radare2/bin/r2sdb"
-      ]
+      ],
+      "tar_asset": "toolchain/arm64-v8a.tar",
+      "tar_sha256": "9241b3919a46625b6fbca74e5b7317a056b2f90035d1eb376fcff17ed48f1a51",
+      "tar_bytes": 244602880
     },
     {
       "asset": "toolchain/armeabi-v7a.tar.gz",
@@ -41,7 +48,10 @@
       "bytes": 64829051,
       "excluded_upstream_host_tools": [
         "radare2/bin/r2sdb"
-      ]
+      ],
+      "tar_asset": "toolchain/armeabi-v7a.tar",
+      "tar_sha256": "5f801554eb996ab319b426cda2cb599d8affab444d1bf7e35aa6c4866b38a34f",
+      "tar_bytes": 173834240
     }
   ],
   "sources": [
@@ -69,11 +79,6 @@
       "url": "https://raw.githubusercontent.com/python/cpython/v3.14.6/LICENSE",
       "sha256": "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231",
       "bytes": 13804
-    },
-    {
-      "url": "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar",
-      "sha256": "7956eb04194300ce0d0a84ad18771eebc94b89fb8d1ddcce8ea4c056818646f4",
-      "bytes": 23254968
     },
     {
       "url": "https://files.pythonhosted.org/packages/26/79/e329b43f31c6ee0f665c1511593e9742d4912e14fff4d40a6ab666cf6e47/objection-1.12.5-py3-none-any.whl",
@@ -718,6 +723,20 @@
       "url": "https://github.com/radareorg/radare2/releases/download/6.2.2/radare2-6.2.2-android-arm.tar.gz",
       "sha256": "1ecca02220f0309a7a6d5349fc914e1d930b73dca09a27567abc862dd9df6c2b",
       "bytes": 25091011
+    },
+    {
+      "url": "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar",
+      "sha256": "7956eb04194300ce0d0a84ad18771eebc94b89fb8d1ddcce8ea4c056818646f4",
+      "bytes": 23254968
+    },
+    {
+      "url": "https://repo.maven.apache.org/maven2/ar/com/hjg/pngj/2.1.0/pngj-2.1.0.jar",
+      "sha256": "e6b762f15e4891178dddd74e4d57318f518ce278000129efa41f85410b132ccc",
+      "bytes": 167436,
+      "package": "ar.com.hjg:pngj",
+      "version": "2.1.0",
+      "license": "Apache-2.0"
     }
-  ]
+  ],
+  "pngj": "2.1.0"
 }

@@ -32,7 +32,23 @@
         </activity>
 
         <activity android:name=".SettingsActivity"
-            android:label="@string/settings_title"/>
+            android:label="@string/settings_title"
+            android:exported="false"/>
+
+        <activity android:name=".AiConfigActivity"
+            android:label="@string/settings_ai_title"
+            android:exported="false"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"/>
+
+        <activity android:name=".UserPreferencesActivity"
+            android:label="@string/settings_preferences_title"
+            android:exported="false"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"/>
+
+        <activity android:name=".ToolConfigActivity"
+            android:label="@string/settings_tools_title"
+            android:exported="false"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"/>
 
         <activity android:name=".SubAgentsActivity"
             android:label="@string/agent_panel_title"

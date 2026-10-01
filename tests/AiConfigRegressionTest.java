@@ -1,0 +1,190 @@
+import com.sun.source.tree.ClassTree;
+import com.sun.source.tree.CompilationUnitTree;
+import com.sun.source.tree.MethodTree;
+import com.sun.source.tree.Tree;
+import com.sun.source.util.JavacTask;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.URI;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
+
+/** Runs the production fetch callback, lifecycle and grouped-save methods with queued UI delivery. */
+public final class AiConfigRegressionTest {
+    private static int passed;
+    private static Class<?> type;
+    private static Path root;
+    private static final class Source extends SimpleJavaFileObject {
+        final String body;
+        Source(String body) { super(URI.create("string:///AiConfigActivity.java"), Kind.SOURCE); this.body = body; }
+        @Override public CharSequence getCharContent(boolean ignored) { return body; }
+    }
+    private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
+    private static Object field(Object object, String name) throws Exception {
+        for (Class<?> c = object.getClass(); c != null; c = c.getSuperclass()) try {
+            Field f = c.getDeclaredField(name); f.setAccessible(true); return f.get(object);
+        } catch (NoSuchFieldException absent) { }
+        throw new NoSuchFieldException(name);
+    }
+    private static void set(Object object, String name, Object value) throws Exception {
+        for (Class<?> c = object.getClass(); c != null; c = c.getSuperclass()) try {
+            Field f = c.getDeclaredField(name); f.setAccessible(true); f.set(object, value); return;
+        } catch (NoSuchFieldException absent) { }
+        throw new NoSuchFieldException(name);
+    }
+    private static Object call(Object object, String name, Class<?>[] signature, Object... args) throws Exception {
+        Method method = object.getClass().getDeclaredMethod(name, signature); method.setAccessible(true); return method.invoke(object, args);
+    }
+    private static URLClassLoader compile(Path root, Path build) throws Exception {
+        Map<String,String> methods = new HashMap<String,String>();
+        try (StandardJavaFileManager manager = ToolProvider.getSystemJavaCompiler().getStandardFileManager(null, null, null)) {
+            JavacTask task = (JavacTask) ToolProvider.getSystemJavaCompiler().getTask(null, manager, null,
+                    Arrays.asList("-proc:none"), null, manager.getJavaFileObjects(root.resolve(
+                    "app/src/main/java/com/mkei/backcast/AiConfigActivity.java").toFile()));
+            for (CompilationUnitTree unit : task.parse()) for (Tree tree : unit.getTypeDecls()) if (tree instanceof ClassTree) {
+                for (Tree member : ((ClassTree) tree).getMembers()) if (member instanceof MethodTree) {
+                    methods.put(((MethodTree) member).getName().toString(), member.toString());
+                }
+            }
+        }
+        String source = "import java.util.*; class Activity {boolean finishing;protected void onDestroy(){}"
+                + "public void finish(){finishing=true;}protected void onSaveInstanceState(AiConfigActivity.Bundle b){}}"
+                + "public class AiConfigActivity extends Activity {"
+                + "static class View{static final int GONE=8,VISIBLE=0;boolean enabled=true;int visibility;void setEnabled(boolean e){enabled=e;}"
+                + "void setVisibility(int v){visibility=v;}}static class TextView extends View{String text=\"\";void setText(String s){text=s;}String getText(){return text;}}"
+                + "static class EditText extends TextView{}static class Button extends View{}"
+                + "static class Bundle{Map<String,Object> values=new HashMap<String,Object>();void putString(String k,String v){values.put(k,v);}"
+                + "String getString(String k){return (String)values.get(k);}void putStringArrayList(String k,ArrayList<String> v){values.put(k,v);}}"
+                + "static class Settings{int writes;String url,key,model;List<String> saved;void saveAiConfiguration(String u,String k,String m,List<String> v)"
+                + "{writes++;url=u;key=k;model=m;saved=new ArrayList<String>(v);}}"
+                + "static class LlmClient{static class ModelsResult{String error;List<String> models=Arrays.asList(\"remote-a\",\"remote-b\");}"
+                + "static ModelsResult fetchModels(String u,String k){return new ModelsResult();}}"
+                + "static class TextUtils{static boolean isEmpty(String s){return s==null||s.length()==0;}}"
+                + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(AiConfigActivity a,int i,int d){return new Toast();}void show(){}}"
+                + "static class R{static class string{static final int toast_need_url_key=1,fetching=2,fetch_failed=3,fetch_count=4;}}"
+                + "EditText baseUrl=new EditText(),apiKey=new EditText(),model=new EditText();Button fetchModels=new Button();TextView fetchStatus=new TextView();"
+                + "ArrayList<String> previewModels=new ArrayList<String>();int requestGeneration;boolean destroyed;Thread activeFetch;int renders;"
+                + "List<Runnable> callbacks=Collections.synchronizedList(new ArrayList<Runnable>());Settings settings=new Settings();"
+                + "public AiConfigActivity(){baseUrl.text=\"https://provider.example/v1\";apiKey.text=\"secret\";model.text=\"selected\";previewModels.add(\"stored-model\");}"
+                + "boolean isFinishing(){return finishing;}void runOnUiThread(Runnable r){callbacks.add(r);}"
+                + "String getString(int id,Object...args){return id+Arrays.toString(args);}void renderModels(List<String> m){renders++;}"
+                + "void drain(){while(!callbacks.isEmpty())callbacks.remove(0).run();}"
+                + methods.get("doFetch") + methods.get("isCurrentFetch") + methods.get("invalidateFetch") + methods.get("saveSettings")
+                + methods.get("draft") + methods.get("onSaveInstanceState") + methods.get("onDestroy") + methods.get("finish")
+                + methods.get("showStatus") + methods.get("onConnectionChanged") + "}";
+        try (StandardJavaFileManager manager = ToolProvider.getSystemJavaCompiler().getStandardFileManager(null, null, null)) {
+            check(ToolProvider.getSystemJavaCompiler().getTask(null, manager, null, Arrays.asList("-proc:none", "-encoding", "UTF-8",
+                    "-source", "7", "-target", "7", "-Xlint:-options", "-d", build.toString()), null, Arrays.asList(new Source(source))).call(),
+                    "AI production lifecycle/fetch methods did not compile as Java 7");
+        }
+        URLClassLoader loader = new URLClassLoader(new URL[]{build.toUri().toURL()}, null);
+        type = loader.loadClass("AiConfigActivity"); return loader;
+    }
+    private static Object fetch() throws Exception {
+        Object activity = type.getConstructor().newInstance(); call(activity, "doFetch", new Class[0]);
+        long deadline = System.currentTimeMillis() + 2000;
+        while (((List<?>) field(activity, "callbacks")).isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(5);
+        check(!((List<?>) field(activity, "callbacks")).isEmpty(), "Model request did not return");
+        return activity;
+    }
+    private static void unchanged(Object activity) throws Exception {
+        call(activity, "drain", new Class[0]);
+        check(Arrays.asList("stored-model").equals(field(activity, "previewModels")) && (Integer) field(activity, "renders") == 0,
+                "Expired callback changed the preview");
+        check((Integer) field(field(activity, "settings"), "writes") == 0, "Expired fetch persisted settings");
+    }
+    private static void successOnlyUpdatesThePreviewUntilExplicitSave() throws Exception {
+        Object activity = fetch(); call(activity, "drain", new Class[0]); Object settings = field(activity, "settings");
+        check(Arrays.asList("remote-a", "remote-b").equals(field(activity, "previewModels"))
+                && (Integer) field(activity, "renders") == 1 && (Integer) field(settings, "writes") == 0, "Fetch wrote through preferences");
+        call(activity, "saveSettings", new Class[]{settings.getClass()}, settings);
+        check((Integer) field(settings, "writes") == 1 && "selected".equals(field(settings, "model"))
+                && Arrays.asList("remote-a", "remote-b").equals(field(settings, "saved")), "Explicit AI save missed the model preview");
+    }
+    private static void editedConnectionRejectsAnOldResponse() throws Exception {
+        Object activity = fetch(); set(field(activity, "baseUrl"), "text", "https://changed.example/v1"); unchanged(activity);
+        activity = fetch(); set(field(activity, "apiKey"), "text", "new-key"); unchanged(activity);
+    }
+    private static void newRequestGenerationRejectsAnOldResponse() throws Exception {
+        Object activity = fetch(); call(activity, "invalidateFetch", new Class[0]); unchanged(activity);
+    }
+    private static void editingConnectionClearsOldProviderModelsWithoutSaving() throws Exception {
+        Object activity = fetch(); set(field(activity, "baseUrl"), "text", "https://new-provider.example/v1");
+        call(activity, "onConnectionChanged", new Class[0]); call(activity, "drain", new Class[0]);
+        check(((List<?>) field(activity, "previewModels")).isEmpty() && (Integer) field(activity, "renders") == 1
+                && (Integer) field(field(activity, "settings"), "writes") == 0, "New provider retained or saved an old provider model list");
+        check("selected".equals(field(field(activity, "model"), "text")) && (Boolean) field(field(activity, "fetchModels"), "enabled"),
+                "Connection edits discarded the manually entered model or blocked fetching");
+    }
+    private static void leavingOrDestroyingThePageRejectsLateResponses() throws Exception {
+        Object activity = fetch(); call(activity, "finish", new Class[0]); unchanged(activity);
+        activity = fetch(); call(activity, "onDestroy", new Class[0]); unchanged(activity);
+    }
+    private static void saveDoesNotCommitAnUnfinishedFetch() throws Exception {
+        Object activity = fetch(), settings = field(activity, "settings");
+        call(activity, "saveSettings", new Class[]{settings.getClass()}, settings); call(activity, "drain", new Class[0]);
+        check((Integer) field(settings, "writes") == 1 && Arrays.asList("stored-model").equals(field(settings, "saved"))
+                && Arrays.asList("stored-model").equals(field(activity, "previewModels")), "Pending callback overwrote the saved AI draft");
+    }
+    private static void rotationKeepsIndependentUnsavedInputAndModelPreview() throws Exception {
+        Object activity = fetch(); call(activity, "drain", new Class[0]);
+        set(field(activity, "baseUrl"), "text", ""); set(field(activity, "model"), "text", "typed-model");
+        Class<?> bundleType = type.getClassLoader().loadClass("AiConfigActivity$Bundle");
+        java.lang.reflect.Constructor<?> constructor = bundleType.getDeclaredConstructor(); constructor.setAccessible(true); Object bundle = constructor.newInstance();
+        call(activity, "onSaveInstanceState", new Class[]{bundleType}, bundle);
+        check("".equals(call(activity, "draft", new Class[]{bundleType, String.class, String.class}, bundle, "url", "saved-url"))
+                && "typed-model".equals(call(activity, "draft", new Class[]{bundleType, String.class, String.class}, bundle, "model", "saved-model")),
+                "Rotation lost or replaced unsaved input");
+        @SuppressWarnings("unchecked") Map<String,Object> saved = (Map<String,Object>) field(bundle, "values");
+        @SuppressWarnings("unchecked") List<String> preview = (List<String>) field(activity, "previewModels"); preview.add("later");
+        check(Arrays.asList("remote-a", "remote-b").equals(saved.get("models")) && (Integer) field(field(activity, "settings"), "writes") == 0,
+                "Rotation persisted or aliased the model preview");
+    }
+    private static void explicitDraftRestorationAvoidsDuplicateConnectionWatchers() throws Exception {
+        javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(true); factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        org.w3c.dom.NodeList inputs = factory.newDocumentBuilder().parse(root.resolve(
+                "app/src/main/res/layout/activity_ai_config.xml").toFile()).getElementsByTagName("EditText");
+        int verified = 0;
+        for (int i = 0; i < inputs.getLength(); i++) {
+            org.w3c.dom.Element input = (org.w3c.dom.Element) inputs.item(i);
+            String id = input.getAttributeNS("http://schemas.android.com/apk/res/android", "id");
+            if (Arrays.asList("@+id/base_url", "@+id/api_key", "@+id/model").contains(id)) {
+                check("false".equals(input.getAttributeNS("http://schemas.android.com/apk/res/android", "saveEnabled")),
+                        "Automatic widget replay could clear the explicitly restored provider model list");
+                if (id.equals("@+id/api_key")) check("textPassword".equals(input.getAttributeNS(
+                        "http://schemas.android.com/apk/res/android", "inputType")), "API key is visible by default");
+                verified++;
+            }
+        }
+        check(verified == 3, "AI draft widgets are incomplete");
+    }
+    public static void main(String[] args) throws Exception {
+        Path build = Files.createTempDirectory("backcast-ai-config-");
+        root = Paths.get(args[0]);
+        try (URLClassLoader loader = compile(root, build)) {
+            for (String name : new String[]{"successOnlyUpdatesThePreviewUntilExplicitSave", "editedConnectionRejectsAnOldResponse",
+                    "newRequestGenerationRejectsAnOldResponse", "editingConnectionClearsOldProviderModelsWithoutSaving",
+                    "leavingOrDestroyingThePageRejectsLateResponses",
+                    "saveDoesNotCommitAnUnfinishedFetch", "rotationKeepsIndependentUnsavedInputAndModelPreview",
+                    "explicitDraftRestorationAvoidsDuplicateConnectionWatchers"}) {
+                try { AiConfigRegressionTest.class.getDeclaredMethod(name).invoke(null); }
+                catch (java.lang.reflect.InvocationTargetException failure) { throw new AssertionError(name, failure.getCause()); }
+                passed++; System.out.println("PASS " + name);
+            }
+            System.out.println(passed + " AI configuration lifecycle tests passed");
+        } finally { try (var paths = Files.walk(build)) { for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); } }
+    }
+}

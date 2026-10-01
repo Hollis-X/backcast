@@ -136,8 +136,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private static final int HISTORY_PAGE_SIZE = 48;
     private static final int HISTORY_FRAME_SIZE = 4;
     private final ExecutorService historyReader = Executors.newSingleThreadExecutor();
-    private final ExecutorService toolkitReader = Executors.newCachedThreadPool();
-    private final List<ToolkitOperation> toolkitOperations = new ArrayList<ToolkitOperation>();
     private final List<Runnable> historyEvents = new LinkedList<Runnable>();
     private int historyToken;
     private long historySequence = -1;
@@ -167,14 +165,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             generation = source == null ? -1 : source.generation();
             token = source == null ? -1 : source.runToken();
         }
-    }
-
-    private interface ToolkitResult { void apply(JSONObject result); }
-
-    private static final class ToolkitOperation {
-        volatile boolean cancelled;
-        volatile java.util.concurrent.Future<?> future;
-        RunHub.ToolkitSession session;
     }
 
     private static class ReplayCursor {
@@ -660,10 +650,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         cancelApprovals();
         resetHistoryLoading();
         historyReader.shutdownNow();
-        List<ToolkitOperation> pendingTools;
-        synchronized (toolkitOperations) { pendingTools = new ArrayList<ToolkitOperation>(toolkitOperations); }
-        for (ToolkitOperation operation : pendingTools) cancelToolkitOperation(operation);
-        toolkitReader.shutdown();
         if (goalBar != null) {
             goalBar.removeCallbacks(goalTicker);
         }
@@ -915,7 +901,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                         showSubAgents();
                     }
                 }), fullWidth());
-        body.addView(sheetRow(R.string.toolkit_title, Icons.TERMINAL, null,
+        body.addView(sheetRow(R.string.settings_tools_title, Icons.TERMINAL, null,
                 new Runnable() {
                     @Override
                     public void run() {
@@ -1618,213 +1604,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void showToolkit() {
-        final LinearLayout rows = new LinearLayout(this);
-        rows.setOrientation(LinearLayout.VERTICAL);
-        rows.setPadding(dp(20), dp(8), dp(20), dp(12));
-        ScrollView pane = new ScrollView(this);
-        pane.addView(rows);
-        final ToolkitOperation[] active = { null };
-        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle(R.string.toolkit_title).setView(pane)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setNeutralButton(R.string.sub_agents_refresh, null).create();
-        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
-            @Override public void onDismiss(android.content.DialogInterface ignored) {
-                if (active[0] != null) cancelToolkitOperation(active[0]);
-            }
-        });
-        dialog.show();
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { loadToolkit(dialog, rows, active); }
-        });
-        loadToolkit(dialog, rows, active);
-    }
-
-    private void loadToolkit(final AlertDialog dialog, final LinearLayout rows, final ToolkitOperation[] active) {
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
-        rows.removeAllViews();
-        rows.addView(popupText(getString(R.string.toolkit_loading), 14, R.color.text_secondary));
-        active[0] = requestToolkit(dialog, toolkitArguments("list", ""), new ToolkitResult() {
-            @Override public void apply(JSONObject result) {
-                active[0] = null;
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
-                rows.removeAllViews();
-                JSONArray tools = result.optJSONArray("tools");
-                if (tools == null) {
-                    rows.addView(popupText(result.optString("error", getString(R.string.toolkit_failed)), 14, R.color.text_secondary));
-                    return;
-                }
-                TextView location = popupText(getString(R.string.toolkit_storage,
-                        result.optString("storage"), result.optString("abi")), 12, R.color.text_secondary);
-                rows.addView(location, fullWidth());
-                for (int i = 0; i < tools.length(); i++) {
-                    final JSONObject entry = tools.optJSONObject(i);
-                    if (entry == null) continue;
-                    TextView row = popupText(entry.optString("name") + "\n" + toolkitState(entry.optString("state")),
-                            14, R.color.text_primary);
-                    row.setPadding(0, dp(12), 0, dp(12));
-                    row.setOnClickListener(new View.OnClickListener() {
-                        @Override public void onClick(View view) { showToolkitEntry(entry); }
-                    });
-                    rows.addView(row, fullWidth());
-                }
-            }
-        });
-    }
-
-    private void showToolkitEntry(final JSONObject entry) {
-        final String id = entry.optString("id");
-        final ToolkitOperation[] active = { null };
-        final TextView info = popupText(toolkitDetails(entry), 14, R.color.text_primary);
-        info.setTextIsSelectable(true);
-        info.setAutoLinkMask(android.text.util.Linkify.WEB_URLS);
-        info.setLineSpacing(dp(3), 1f);
-        final LinearLayout fields = new LinearLayout(this);
-        fields.setOrientation(LinearLayout.VERTICAL);
-        fields.setPadding(dp(20), dp(8), dp(20), dp(12));
-        fields.addView(info, fullWidth());
-        final Button cancel = toolkitButton(R.string.toolkit_cancel, Icons.STOP);
-        cancel.setVisibility(View.GONE);
-        fields.addView(cancel, fullWidth());
-        ScrollView pane = new ScrollView(this);
-        pane.addView(fields);
-        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle(entry.optString("name"))
-                .setView(pane).setNegativeButton(android.R.string.cancel, null)
-                .setNeutralButton(R.string.toolkit_probe, null).create();
-        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
-            @Override public void onDismiss(android.content.DialogInterface ignored) {
-                if (active[0] != null) cancelToolkitOperation(active[0]);
-            }
-        });
-        dialog.show();
-        final ToolkitResult complete = new ToolkitResult() {
-            @Override public void apply(JSONObject result) {
-                active[0] = null;
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
-                cancel.setVisibility(View.GONE);
-                java.util.Iterator<String> keys = result.keys();
-                entry.remove("error");
-                while (keys.hasNext()) {
-                    String key = keys.next();
-                    try { entry.put(key, result.get(key)); } catch (Exception ignored) { }
-                }
-                info.setText(toolkitDetails(entry));
-            }
-        };
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
-                cancel.setVisibility(View.VISIBLE);
-                active[0] = requestToolkit(dialog, toolkitArguments("status", id), complete);
-            }
-        });
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                if (active[0] != null) cancelToolkitOperation(active[0]);
-                active[0] = null;
-                info.setText(getString(R.string.toolkit_cancelled));
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
-                cancel.setVisibility(View.GONE);
-            }
-        });
-    }
-
-    private Button toolkitButton(int label, int icon) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setTextSize(13);
-        button.setCompoundDrawables(Icons.tinted(this, icon, 0xFF3C3C43, dp(18)), null, null, null);
-        button.setCompoundDrawablePadding(dp(6));
-        button.setMinHeight(dp(48));
-        return button;
-    }
-
-    private static JSONObject toolkitArguments(String action, String id) {
-        JSONObject args = new JSONObject();
-        try { args.put("action", action); if (id.length() > 0) args.put("tool", id); }
-        catch (Exception ignored) { }
-        return args;
-    }
-
-    private String toolkitState(String state) {
-        if ("ready".equals(state)) return getString(R.string.toolkit_ready);
-        if ("bundled_not_probed".equals(state)) return getString(R.string.toolkit_bundled);
-        if ("unsupported".equals(state)) return getString(R.string.toolkit_unsupported);
-        if ("configured_not_probed".equals(state)) return getString(R.string.toolkit_configured);
-        if ("needs_runtime".equals(state)) return getString(R.string.toolkit_needs_runtime);
-        if ("unavailable".equals(state)) return getString(R.string.toolkit_unavailable);
-        if ("error".equals(state)) return getString(R.string.toolkit_failed);
-        if ("cancelled".equals(state)) return getString(R.string.toolkit_cancelled);
-        return getString(R.string.toolkit_unconfigured);
-    }
-
-    private String toolkitDetails(JSONObject entry) {
-        StringBuilder text = new StringBuilder(toolkitState(entry.optString("state")))
-                .append("\n\n").append(getString(R.string.toolkit_source)).append('\n').append(entry.optString("source"))
-                .append("\n\n").append(getString(R.string.toolkit_requirements)).append('\n').append(entry.optString("requirements"));
-        JSONObject config = entry.optJSONObject("configuration");
-        if (config != null) {
-            if (config.optString("version").length() > 0) text.append("\n").append(config.optString("version"));
-        }
-        if (entry.optString("version").length() > 0) text.append("\n\n")
-                .append(getString(R.string.toolkit_official_version, entry.optString("version")));
-        if (entry.optString("probe_output").length() > 0) text.append("\n\n").append(getString(R.string.toolkit_probe_output))
-                .append('\n').append(shortChildText(entry.optString("probe_output"), 8000));
-        if (entry.optString("error").length() > 0) text.append("\n\n").append(entry.optString("error"));
-        return text.toString();
-    }
-
-    private ToolkitOperation requestToolkit(final AlertDialog dialog, final JSONObject args, final ToolkitResult callback) {
-        final ToolkitOperation operation = new ToolkitOperation();
-        synchronized (toolkitOperations) { toolkitOperations.add(operation); }
-        operation.future = toolkitReader.submit(new Runnable() {
-            @Override public void run() {
-                JSONObject result = new JSONObject();
-                try {
-                    if (operation.cancelled) return;
-                    RunHub.ToolkitSession session = RunHub.get(MainActivity.this).newToolkitSession();
-                    synchronized (operation) { operation.session = session; }
-                    if (operation.cancelled) return;
-                    result = new JSONObject(session.toolkit.run(args));
-                } catch (Exception failure) {
-                    try { result.put("state", "error").put("error", String.valueOf(failure.getMessage())); }
-                    catch (Exception ignored) { }
-                } finally {
-                    try { closeToolkitSession(operation); }
-                    catch (Exception cleanup) {
-                        try { result.put("state", "error").put("error", String.valueOf(cleanup.getMessage())); }
-                        catch (Exception ignored) { }
-                    }
-                    synchronized (toolkitOperations) { toolkitOperations.remove(operation); }
-                }
-                final JSONObject response = result;
-                ui(new Runnable() {
-                    @Override public void run() {
-                        if (!operation.cancelled && !activityDestroyed && !isFinishing() && dialog.isShowing()) callback.apply(response);
-                    }
-                });
-            }
-        });
-        return operation;
-    }
-
-    private void cancelToolkitOperation(final ToolkitOperation operation) {
-        if (operation.cancelled) return;
-        operation.cancelled = true;
-        java.util.concurrent.Future<?> future = operation.future;
-        if (future != null) future.cancel(true);
-        synchronized (toolkitOperations) { toolkitOperations.remove(operation); }
-        if (!toolkitReader.isShutdown()) toolkitReader.execute(new Runnable() {
-            @Override public void run() { closeToolkitSession(operation); }
-        });
-    }
-
-    private static void closeToolkitSession(ToolkitOperation operation) {
-        RunHub.ToolkitSession session;
-        synchronized (operation) {
-            if (operation.session == null) return;
-            session = operation.session;
-        }
-        session.close();
+        startActivity(new Intent(this, ToolConfigActivity.class));
     }
 
     private void showSubAgents() {

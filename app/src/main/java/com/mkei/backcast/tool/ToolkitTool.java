@@ -30,7 +30,7 @@ public final class ToolkitTool implements Tool {
     @Override public String name() { return "toolkit"; }
 
     @Override public String description() {
-        return "直接调用 APK 内置逆向工具，无需用户下载或填写路径。list 查看内置工具；status 实际探测；"
+        return "直接调用 APK 内置逆向工具，无需用户下载或填写路径。list 查看内置工具；status 实际探测指定 tool，例如 {action:'status',tool:'apktool'}；"
                 + "Apktool 使用内置 DEX JAR 和 Android aapt2，radare2/rabin2、GNU binutils、Objection/Python/Frida 均离线释放到 App 私有目录。"
                 + "支持 Android 8.0+ ARM/ARM64；Objection 自动启用本次调用的本地 Frida server，结束后清理子进程，跨应用操作需要 root。"
                 + "Objection 用 ['-n','包名','run','android hooking list classes'] 这样的单次命令；交互 start/explore 和桌面 patch/sign 工作流不适用于此入口。"
@@ -42,7 +42,11 @@ public final class ToolkitTool implements Tool {
             JSONObject properties = new JSONObject();
             properties.put("action", new JSONObject().put("type", "string").put("enum", new JSONArray()
                     .put("list").put("status").put("run").put("export")));
-            properties.put("tool", new JSONObject().put("type", "string").put("description", "内置工具 id：apktool、radare2、rabin2、objection、readelf、objdump、nm、strings、addr2line、size、objcopy、ar、strip"));
+            JSONArray ids = new JSONArray();
+            JSONArray catalog = ToolCatalog.list();
+            for (int i = 0; i < catalog.length(); i++) ids.put(catalog.getJSONObject(i).getString("id"));
+            properties.put("tool", new JSONObject().put("type", "string").put("enum", ids)
+                    .put("description", "status/run 必填：目标工具 id。不能把工具名放到 arguments；list/export 不需要此字段"));
             properties.put("arguments", new JSONObject().put("type", "array").put("items", new JSONObject().put("type", "string"))
                     .put("description", "程序参数数组，每个参数单独一项，不拼接 shell 语法"));
             properties.put("temporary", new JSONObject().put("type", "boolean").put("description", "默认 true；在本轮私有临时目录执行，项目输入须用绝对路径"));
@@ -73,6 +77,7 @@ public final class ToolkitTool implements Tool {
                         }).put("state", "exported").toString();
             }
             String id = args.optString("tool", "");
+            if ("status".equals(action) || "run".equals(action)) requireTool(id, action);
             if ("configure".equals(action)) {
                 checkEpoch(mine);
                 if ("binutils".equals(id)) return new JSONObject().put("configured", store.configureBinutilsDirectory(args.optString("path", ""),
@@ -109,7 +114,10 @@ public final class ToolkitTool implements Tool {
                 if ("objection".equals(id)) checkObjectionArguments(arguments);
                 checkEpoch(mine);
                 String result;
-                synchronized (store.toolLock(id)) {
+                ToolchainStore.Use use = store.beginUse(new ToolchainInstaller.Cancellation() {
+                    public void check() throws Exception { checkEpoch(mine); }
+                });
+                try { synchronized (store.toolLock(id)) {
                     checkEpoch(mine);
                     ToolchainStore.Launcher launcher = store.launcher(id, new ToolchainInstaller.Cancellation() {
                         public void check() throws Exception { checkEpoch(mine); }
@@ -117,7 +125,7 @@ public final class ToolkitTool implements Tool {
                     if (launcher == null) return status(id, mine, shellMine).put("error", "当前设备没有兼容的内置工具入口。").toString();
                     checkEpoch(mine);
                     result = shell.runProgram(launcher, arguments, args.optBoolean("temporary", true), args.optInt("timeout_sec", 60), shellMine);
-                }
+                } } finally { use.close(); }
                 checkEpoch(mine);
                 return new JSONObject().put("tool", id).put("output", result).put("success", succeeded(result)).toString();
             }
@@ -131,22 +139,39 @@ public final class ToolkitTool implements Tool {
 
     public JSONObject listing() throws Exception {
         JSONArray tools = ToolCatalog.list();
+        JSONObject bundle = store.packageStatus();
         for (int i = 0; i < tools.length(); i++) {
             JSONObject entry = tools.getJSONObject(i), configured = store.configuration(entry.getString("id"));
             boolean bundled = store.bundled(entry.getString("id"));
             entry.put("bundled", bundled).put("configured", bundled || configured.optString("path", "").length() > 0).put("configuration", configured)
-                    .put("state", bundled ? "bundled_not_probed" : configured.optString("path", "").length() > 0 ? "configured_not_probed"
+                    .put("state", bundled ? store.bundledRemoved() ? "removed" : bundle.optBoolean("installed") ? "installed" : "bundled_not_probed" : configured.optString("path", "").length() > 0 ? "configured_not_probed"
                             : store.hasBundledAssets() ? "unsupported" : "unconfigured");
         }
-        return new JSONObject().put("storage", store.root().getPath()).put("abi", abi).put("tools", tools);
+        return new JSONObject().put("storage", store.root().getPath()).put("abi", abi).put("tools", tools).put("package", bundle);
+    }
+
+    public JSONObject packageStatus() throws Exception { return store.packageStatus(); }
+    public JSONObject installBundled() throws Exception {
+        final int mine = epoch;
+        return store.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } });
+    }
+    public JSONObject removeBundled() throws Exception {
+        final int mine = epoch;
+        return store.removeBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } });
     }
 
     public JSONObject status(String id) throws Exception {
+        requireTool(id, "status");
         return status(id, epoch, shell.cancellationEpoch());
     }
 
     private JSONObject status(String id, int mine, int shellMine) throws Exception {
-        synchronized (store.toolLock(id)) { checkEpoch(mine); return statusLocked(id, mine, shellMine); }
+        final int token = mine;
+        ToolchainStore.Use use = store.beginUse(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(token); } });
+        try {
+            if (store.bundled(id) && store.bundledRemoved()) return ToolCatalog.get(id).json().put("ready", false).put("state", "removed").put("bundled", true);
+            synchronized (store.toolLock(id)) { checkEpoch(mine); return statusLocked(id, mine, shellMine); }
+        } finally { use.close(); }
     }
 
     private JSONObject statusLocked(String id, final int mine, int shellMine) throws Exception {
@@ -163,8 +188,29 @@ public final class ToolkitTool implements Tool {
         checkEpoch(mine);
         String output = shell.runProgram(launcher, version, true, 8, shellMine);
         checkEpoch(mine);
-        boolean ready = succeeded(output);
+        boolean ready = validVersion(id, output);
         return result.put("state", ready ? "ready" : "unavailable").put("ready", ready).put("probe_output", output);
+    }
+
+    private static void requireTool(String id, String action) {
+        if (id == null || id.trim().length() == 0) throw new IllegalArgumentException(action
+                + " 缺少必填字段 tool。示例：{\"action\":\"" + action
+                + "\",\"tool\":\"apktool\"}；arguments 只用于 run 的程序参数。");
+        ToolCatalog.get(id);
+    }
+
+    private static boolean validVersion(String id, String output) {
+        if (!succeeded(output)) return false;
+        String value = output.toLowerCase(java.util.Locale.US);
+        if (value.contains("exception in thread") || value.contains("traceback (most recent call last)")
+                || value.contains("cannot link executable") || value.contains("fatal exception")
+                || java.util.regex.Pattern.compile("(?m)^killed\\s*$").matcher(value).find()) return false;
+        if ("apktool".equals(id)) return java.util.regex.Pattern
+                .compile("(?m)^\\d+\\.\\d+(?:\\.\\d+)?(?:[-+][^\\s]+)?\\s*$").matcher(output).find();
+        String name = "objection".equals(id) ? "objection" : id;
+        return java.util.regex.Pattern.compile("(?im)^" + java.util.regex.Pattern.quote(name)
+                + "[^\\r\\n]*\\d+\\.\\d+|^gnu " + java.util.regex.Pattern.quote(name)
+                + "[^\\r\\n]*\\d+\\.\\d+").matcher(output).find();
     }
 
     private void checkEpoch(int mine) throws InterruptedException {

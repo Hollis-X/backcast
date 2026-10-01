@@ -34,7 +34,7 @@ public final class SettingsChoiceRegressionTest {
     private static final String ANDROID = "http://schemas.android.com/apk/res/android";
     private static final class Source extends SimpleJavaFileObject {
         final String text;
-        Source(String text) { super(URI.create("string:///SettingsActivity.java"), Kind.SOURCE); this.text=text; }
+        Source(String text) { super(URI.create("string:///UserPreferencesActivity.java"), Kind.SOURCE); this.text=text; }
         @Override public CharSequence getCharContent(boolean ignored) { return text; }
     }
     private static void check(boolean condition, String message) {
@@ -87,7 +87,7 @@ public final class SettingsChoiceRegressionTest {
         try(StandardJavaFileManager fm=ToolProvider.getSystemJavaCompiler().getStandardFileManager(null,null,null)) {
             JavacTask task=(JavacTask)ToolProvider.getSystemJavaCompiler().getTask(null,fm,null,
                     Arrays.asList("-proc:none"),null,fm.getJavaFileObjects(
-                    root.resolve("app/src/main/java/com/mkei/backcast/SettingsActivity.java").toFile()));
+                    root.resolve("app/src/main/java/com/mkei/backcast/UserPreferencesActivity.java").toFile()));
             for(CompilationUnitTree unit:task.parse()) for(Tree top:unit.getTypeDecls()) {
                 if(!(top instanceof ClassTree)) continue;
                 for(Tree member:((ClassTree)top).getMembers()) {
@@ -107,7 +107,7 @@ public final class SettingsChoiceRegressionTest {
                 }.scan(top,null);
             }
         }
-        String fixture="import java.util.*; public class SettingsActivity {"
+        String fixture="import java.util.*; public class UserPreferencesActivity {"
                 + "static class View { static final int VISIBLE=0,INVISIBLE=4; Object tag; int background,visibility; boolean selected,enabled=true;"
                 + "interface OnClickListener{void onClick(View v);}void setEnabled(boolean e){enabled=e;}"
                 + "Map<Integer,View> views=new HashMap<Integer,View>(); View findViewById(int id){return views.get(id);}"
@@ -125,7 +125,7 @@ public final class SettingsChoiceRegressionTest {
                 + "static class Spinner extends AdapterView<Object> { int position=-1; ArrayAdapter<String> adapter; OnItemSelectedListener listener;"
                 + "void setAdapter(ArrayAdapter<String> a){adapter=a;} void setSelection(int p){position=p;if(listener!=null)listener.onItemSelected(this,null,p,p);}"
                 + "int getSelectedItemPosition(){return position;} void setOnItemSelectedListener(OnItemSelectedListener l){listener=l;} }"
-                + "static class ArrayAdapter<T> { T[] values; int notifications; ArrayAdapter(SettingsActivity a,int layout,T[] v){values=v;}"
+                + "static class ArrayAdapter<T> { T[] values; int notifications; ArrayAdapter(UserPreferencesActivity a,int layout,T[] v){values=v;}"
                 + "T getItem(int p){return values[p];} void notifyDataSetChanged(){notifications++;}"
                 + "View getView(int p,View recycled,ViewGroup parent){TextView t=recycled==null?new TextView():(TextView)recycled;t.setText((String)getItem(p));return t;}"
                 + "View getDropDownView(int p,View v,ViewGroup parent){return getView(p,v,parent);} }"
@@ -135,22 +135,19 @@ public final class SettingsChoiceRegressionTest {
                 + "static class Inflater { View inflate(int id,ViewGroup parent,boolean attach){View v=new View();"
                 + "v.views.put(R.id.choice_title,new TextView());v.views.put(R.id.choice_description,new TextView());"
                 + "v.views.put(R.id.choice_check,new ImageView());return v;} }"
-                + "static class Icons { static Object tinted(SettingsActivity a,int id,int color,int size){return new Object();} }"
+                + "static class Icons { static Object tinted(UserPreferencesActivity a,int id,int color,int size){return new Object();} }"
                 + "static class android { static class R { static class layout { static final int simple_spinner_item=1; } } }"
                 + "static class R { static class layout { static final int settings_choice_item=2; }"
                 + "static class string {static final int toast_saved=20,agent_status_ultra=21,agent_status_normal=22;}"
                 + "static class color { static final int text_primary=3; }"
                 + "static class drawable { static final int bg_settings_choice_selected=4,ic_ds_checkmark_lg_regular_24=5; }"
                 + "static class id { static final int choice_title=6,choice_description=7,choice_check=8; } }"
-                + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(SettingsActivity a,int r,int d){return new Toast();}void show(){}}"
+                + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(UserPreferencesActivity a,int r,int d){return new Toast();}void show(){}}"
                 + "static class Settings{static final String AGENT_ULTRA=\"ultra\",AGENT_MANUAL=\"manual\",EFFORT_ULTRA=\"ultra\";"
-                + "Map<String,Object> preferences=new HashMap<String,Object>();int writes;Settings(){}Settings(SettingsActivity a){preferences=a.settings.preferences;}"
-                + "void save(String u,String k,String m,boolean r,String p){preferences.put(\"root\",r);preferences.put(\"prompt\",p);writes++;}"
-                + "void setOutputVerbosity(String s){preferences.put(\"verbosity\",s);writes++;}"
-                + "void setReasoningSummary(String s){preferences.put(\"summary\",s);writes++;}"
-                + "void setOutputLanguage(String s){preferences.put(\"language\",s);writes++;}"
-                + "void setAgentConcurrency(int s){preferences.put(\"concurrency\",s);writes++;}"
-                + "void setReasoningEffort(String s){preferences.put(\"effort\",s);writes++;}"
+                + "Map<String,Object> preferences=new HashMap<String,Object>();int writes;Settings(){}Settings(UserPreferencesActivity a){preferences=a.settings.preferences;}"
+                + "void saveUserPreferences(String v,String s,String l,String e,int c,String p){preferences.put(\"verbosity\",v);"
+                + "preferences.put(\"summary\",s);preferences.put(\"language\",l);preferences.put(\"effort\",e);"
+                + "preferences.put(\"concurrency\",c);preferences.put(\"prompt\",p);writes++;}boolean useRoot(){return false;}"
                 + "String environmentContext(boolean r,String m,int c){return r+\"/\"+m+\"/\"+c;}}"
                 + "Resources resources=new Resources(); TextView description=new TextView(),envContext=new TextView(),agentStatus=new TextView();"
                 + "Settings settings=new Settings();int finishes,lastStatus;Object[] lastStatusArgs;void finish(){finishes++;}"
@@ -174,10 +171,10 @@ public final class SettingsChoiceRegressionTest {
     }
     private static void run(Path root, URLClassLoader loader) throws Exception {
         Element strings=xml(root.resolve("app/src/main/res/values/strings.xml"));
-        Element layout=xml(root.resolve("app/src/main/res/layout/activity_settings.xml"));
+        Element layout=xml(root.resolve("app/src/main/res/layout/activity_user_preferences.xml"));
         Element row=xml(root.resolve("app/src/main/res/layout/settings_choice_item.xml"));
-        Class<?> activityType=loader.loadClass("SettingsActivity"), spinnerType=loader.loadClass("SettingsActivity$Spinner"),
-                viewType=loader.loadClass("SettingsActivity$View"),groupType=loader.loadClass("SettingsActivity$ViewGroup");
+        Class<?> activityType=loader.loadClass("UserPreferencesActivity"), spinnerType=loader.loadClass("UserPreferencesActivity$Spinner"),
+                viewType=loader.loadClass("UserPreferencesActivity$View"),groupType=loader.loadClass("UserPreferencesActivity$ViewGroup");
         java.lang.reflect.Constructor<?> spinnerConstructor=spinnerType.getDeclaredConstructor();spinnerConstructor.setAccessible(true);
         String[] keys={"output_verbosity","reasoning_summary","output_language","agent_concurrency","reasoning_effort"};
         String[][] values={{"default","low","medium","high"},{"auto","concise","detailed","none"},
@@ -235,7 +232,7 @@ public final class SettingsChoiceRegressionTest {
 
     private static void saveAndPreviewBehaviors(Class<?> type) throws Exception {
         Object activity=type.getConstructor().newInstance(), settings=field(activity,"settings");
-        for(String name:new String[]{"baseUrl","apiKey","model","systemPrompt"}) field(field(activity,name),"text",name);
+        field(field(activity,"systemPrompt"),"text","systemPrompt");
         String[] spinners={"outputVerbosity","reasoningSummary","outputLanguage","agentConcurrency","reasoningEffort"};
         int[] selected={2,3,2,3,5};
         for(int i=0;i<spinners.length;i++) field(field(activity,spinners[i]),"position",selected[i]);
@@ -248,11 +245,11 @@ public final class SettingsChoiceRegressionTest {
         check("false/ultra/4".equals(field(field(activity,"envContext"),"text")),"unsaved mode/count preview was stale");
         pass("ultra preview keeps the selected ultra value without persisting the draft");
         Object back=field(activity,"backAction");
-        call(back,"onClick",new Class[]{Class.forName("SettingsActivity$View",true,type.getClassLoader())},(Object)null);
+        call(back,"onClick",new Class[]{Class.forName("UserPreferencesActivity$View",true,type.getClassLoader())},(Object)null);
         check(values.isEmpty() && (Integer)field(activity,"finishes")==1,"returning from settings persisted drafts");
         pass("returning from settings discards the unsaved agent draft");
         Object save=field(activity,"saveAction");
-        call(save,"onClick",new Class[]{Class.forName("SettingsActivity$View",true,type.getClassLoader())},(Object)null);
+        call(save,"onClick",new Class[]{Class.forName("UserPreferencesActivity$View",true,type.getClassLoader())},(Object)null);
         check(!values.containsKey("mode") && Integer.valueOf(4).equals(values.get("concurrency"))
                 && "ultra".equals(values.get("effort")) && "en".equals(values.get("language"))
                 && "none".equals(values.get("summary")) && "medium".equals(values.get("verbosity")),"save ignored one of the choices");

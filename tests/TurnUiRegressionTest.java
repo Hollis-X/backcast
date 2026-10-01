@@ -43,6 +43,7 @@ import javax.tools.ToolProvider;
 public final class TurnUiRegressionTest {
     private static final JavaCompiler COMPILER = ToolProvider.getSystemJavaCompiler();
     private static final Map<String, String> METHODS = new HashMap<>();
+    private static final Map<String, String> TOOL_METHODS = new HashMap<>();
     private static Class<?> viewType;
     private static int passed;
 
@@ -97,26 +98,28 @@ public final class TurnUiRegressionTest {
                     Arrays.asList("-proc:none", "-encoding", "UTF-8", "-source", "8"), null,
                     fm.getJavaFileObjectsFromFiles(sources));
             for (CompilationUnitTree unit : task.parse()) {
-                if (!unit.getSourceFile().getName().endsWith("/MainActivity.java")) continue;
+                boolean tools = unit.getSourceFile().getName().endsWith("/ToolConfigActivity.java");
+                if (!tools && !unit.getSourceFile().getName().endsWith("/MainActivity.java")) continue;
+                final Map<String,String> destination = tools ? TOOL_METHODS : METHODS;
                 for (Tree declaration : unit.getTypeDecls()) {
                     if (!(declaration instanceof ClassTree)) continue;
                     ClassTree type = (ClassTree) declaration;
-                    if (!type.getSimpleName().contentEquals("MainActivity")) continue;
+                    if (!type.getSimpleName().contentEquals(tools ? "ToolConfigActivity" : "MainActivity")) continue;
                     for (Tree member : type.getMembers()) {
                         if (member instanceof MethodTree) {
                             MethodTree method = (MethodTree) member;
-                            METHODS.put(method.getName().toString(), method.toString());
+                            destination.put(method.getName().toString(), method.toString());
                         } else if (member instanceof ClassTree) {
-                            METHODS.put(((ClassTree) member).getSimpleName().toString(), member.toString());
+                            destination.put(((ClassTree) member).getSimpleName().toString(), member.toString());
                         } else if (member instanceof VariableTree) {
                             VariableTree field = (VariableTree) member;
                             if (Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")
                                     .contains(field.getName().toString())) {
-                                METHODS.put(field.getName().toString(), field.toString() + ";");
+                                destination.put(field.getName().toString(), field.toString() + ";");
                             }
                         }
                     }
-                    new TreeScanner<Void, Void>() {
+                    if (!tools) new TreeScanner<Void, Void>() {
                         @Override
                         public Void visitMethodInvocation(MethodInvocationTree node, Void unused) {
                             if (node.getMethodSelect().toString().equals("scroll.setOnTouchStartListener")) {
@@ -146,7 +149,8 @@ public final class TurnUiRegressionTest {
         StringBuilder source = new StringBuilder(
                 "import android.os.SystemClock; import com.mkei.backcast.agent.*;"
                 + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.tool.ToolCatalog; import java.util.*; import org.json.*;"
-                + "public class TurnUiFixture implements ApprovalGate {"
+                + "class UiActivity {protected void onStop(){}protected void onDestroy(){}}"
+                + "public class TurnUiFixture extends UiActivity implements ApprovalGate {"
                 + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt; int turnUiToken=-1;"
                 + "interface ViewParent {}"
                 + "static class View implements ViewParent { static final int VISIBLE=0,GONE=8;"
@@ -187,7 +191,9 @@ public final class TurnUiRegressionTest {
                 + "synchronized void close(){aborts++;toolkit.cancelled=true;if(Thread.currentThread()!=owner)return;"
                 + "if(closed)return;closed=true;closes++;if(failCleanup)throw new IllegalStateException(\"cleanup_failed\");}}"
                 + "static class FixtureToolkit{volatile boolean cancelled;JSONObject arguments;String run(JSONObject args)throws Exception{arguments=args;"
-                + "if(block)while(!cancelled){Thread.sleep(20);}return new JSONObject().put(\"state\",cancelled?\"cancelled\":\"ready\").toString();}}}"
+                + "if(block)while(!cancelled){Thread.sleep(20);}return new JSONObject().put(\"state\",cancelled?\"cancelled\":\"ready\").toString();}"
+                + "JSONObject installBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_install\")));}"
+                + "JSONObject removeBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_remove\")));}}}"
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
                 + "static class MarginLayoutParams { int bottomMargin; }"
                 + "int getChildCount(){return children.size();} View getChildAt(int i){return children.get(i);}"
@@ -222,7 +228,7 @@ public final class TurnUiRegressionTest {
                 + "toolkit_source=29,toolkit_requirements=30,toolkit_path=31,toolkit_runtime=32,toolkit_official_version=33,toolkit_probe_output=34,"
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
-                + "toolkit_bundled=44,toolkit_unsupported=45; }"
+                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49; }"
                 + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400;}"
@@ -232,8 +238,9 @@ public final class TurnUiRegressionTest {
                 + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return mainRoot;}"
                 + "static List<Runnable> posted=new ArrayList<Runnable>(); List<Runnable> uiTasks=Collections.synchronizedList(new ArrayList<Runnable>());"
                 + "Object approvalLock=new Object();List<ApprovalRequest> approvals=new LinkedList<ApprovalRequest>();volatile boolean activityDestroyed;"
-                + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newCachedThreadPool();"
-                + "List<ToolkitOperation> toolkitOperations=new ArrayList<ToolkitOperation>();"
+                + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newSingleThreadExecutor();"
+                + "java.util.concurrent.ExecutorService toolkitCancellation=java.util.concurrent.Executors.newSingleThreadExecutor();"
+                + "List<ToolkitOperation> toolkitOperations=new ArrayList<ToolkitOperation>();ToolkitOperation active;"
                 + "static class QueuedReader { List<Runnable> tasks=new ArrayList<Runnable>(); void execute(Runnable r){tasks.add(r);} }"
                 + "static class ChatStore { static class MessagePage { List<Message> messages,trailingResults=new ArrayList<Message>(); String requestBefore=\"\"; Message leadingAssistant; long firstId,earlierCount;"
                 + "MessagePage(List<Message> m){messages=m;} } MessagePage nextPage; int reads; long sid,before; int limit;"
@@ -281,8 +288,8 @@ public final class TurnUiRegressionTest {
         source.append(METHODS.get("Flow"));
         source.append(METHODS.get("ReplayCursor"));
         source.append(METHODS.get("ApprovalRequest"));
-        source.append(METHODS.get("ToolkitOperation"));
-        source.append(METHODS.get("ToolkitResult"));
+        source.append(TOOL_METHODS.get("ToolkitOperation"));
+        source.append(TOOL_METHODS.get("ToolkitResult"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {
             check(METHODS.containsKey(name), "Missing UI constant " + name);
             source.append(METHODS.get(name));
@@ -294,14 +301,17 @@ public final class TurnUiRegressionTest {
                 "pinLastMessage",
                 "shortChildText",
                 "approve", "approvalCurrent", "showApproval", "cancelApprovals", "prettyArgs",
-                "requestToolkit", "cancelToolkitOperation", "closeToolkitSession", "toolkitArguments",
-                "toolkitState", "toolkitDetails",
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive",
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
                 "refreshFoldResults", "summaryChevron", "syncWorkChevron")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
             source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this"));
+        }
+        for (String name : Arrays.asList("requestToolkit", "cancelToolkitOperation", "closeToolkitSession", "toolkitArguments",
+                "toolkitState", "toolkitDetails", "pendingOperations", "onStop", "onDestroy")) {
+            check(TOOL_METHODS.containsKey(name), "Missing tool configuration UI method " + name);
+            source.append(TOOL_METHODS.get(name).replace("ToolConfigActivity.this", "TurnUiFixture.this"));
         }
         source.append('}');
         try (StandardJavaFileManager fm = COMPILER.getStandardFileManager(null, null, null)) {
@@ -1021,9 +1031,11 @@ public final class TurnUiRegressionTest {
                 "Task page does not open the actual current session");
         check(!METHODS.get("addEffortOption").contains("setEnabled(false)"),
                 "Selecting ultra prevents returning to max or another effort");
-        String toolkit=METHODS.get("showToolkitEntry");
-        check(!toolkit.contains("new EditText") && !toolkit.contains("\"install\"") && !toolkit.contains("\"configure\"")
-                && toolkit.contains("\"status\""), "Bundled tool page still asks users to download or bind paths");
+        String toolkit=METHODS.get("showToolkit"),details=TOOL_METHODS.get("renderTools");
+        check(toolkit.contains("ToolConfigActivity.class") && !toolkit.contains("AlertDialog")
+                && details.contains("EXTRA_TOOL_ID") && details.contains("startActivity(intent)")
+                && !TOOL_METHODS.get("onCreate").contains("new EditText"),
+                "Bundled tool navigation is not a distinct page with per-tool details");
         pass("conversationMenusSeparateIndependentEffortsPermissionsTasksAndBundledToolStatus");
     }
     private static Class<?> dialogType() {
@@ -1118,19 +1130,18 @@ public final class TurnUiRegressionTest {
     private static List<?> toolkitSessions() throws Exception {
         Field field=fixtureType("RunHub").getDeclaredField("sessions");field.setAccessible(true);return (List<?>)field.get(null);
     }
-    private static Object toolkitRequest(Object view,Object dialog,JSONObject args,final List<JSONObject> responses) throws Exception {
+    private static Object toolkitRequest(Object view,JSONObject args,final List<JSONObject> responses) throws Exception {
         Class<?> callbackType=fixtureType("ToolkitResult");
         Object callback=java.lang.reflect.Proxy.newProxyInstance(viewType.getClassLoader(),new Class<?>[]{callbackType},
                 (proxy,method,values)->{if(method.getName().equals("apply"))responses.add((JSONObject)values[0]);return null;});
-        Method request=viewType.getDeclaredMethod("requestToolkit",dialogType(),JSONObject.class,callbackType);
-        request.setAccessible(true);return request.invoke(view,dialog,args,callback);
-    }
-    private static Object toolkitDialog(Object view) throws Exception {
-        Object dialog=nested(view,"AlertDialog",new Class[0]);call(dialog,"show");return dialog;
+        Method request=viewType.getDeclaredMethod("requestToolkit",JSONObject.class,callbackType);
+        request.setAccessible(true);Object operation=request.invoke(view,args,callback);field(view,"active",operation);return operation;
     }
     private static void stopToolkitExecutor(Object view) throws Exception {
         java.util.concurrent.ExecutorService executor=(java.util.concurrent.ExecutorService)get(view,"toolkitReader");
         executor.shutdownNow();check(executor.awaitTermination(2,java.util.concurrent.TimeUnit.SECONDS),"Toolkit fixture leaked a background worker");
+        executor=(java.util.concurrent.ExecutorService)get(view,"toolkitCancellation");
+        executor.shutdown();check(executor.awaitTermination(2,java.util.concurrent.TimeUnit.SECONDS),"Toolkit fixture leaked a cancellation worker");
     }
     private static void toolkitCatalogDetailsPreserveSourcesDependenciesAndRealState() throws Exception {
         Object view=fixture();
@@ -1147,22 +1158,28 @@ public final class TurnUiRegressionTest {
         JSONObject args=(JSONObject)invoke(view,"toolkitArguments","status","apktool");
         check("status".equals(args.getString("action")) && "apktool".equals(args.getString("tool")),
                 "UI toolkit command arguments were flattened into shell text");
-        check(METHODS.get("showMoreSheet").contains("showToolkit()") && METHODS.get("showToolkitEntry").contains("\"status\"")
-                && !METHODS.get("showToolkitEntry").contains("new EditText"),
+        check(METHODS.get("showMoreSheet").contains("showToolkit()") && METHODS.get("showToolkit").contains("ToolConfigActivity.class")
+                && TOOL_METHODS.get("onCreate").contains("toolkitArguments(\"status\", toolId)")
+                && !TOOL_METHODS.get("onCreate").contains("new EditText"),
                 "Bundled tools UI lacks a status entry or requires manual path configuration");
         stopToolkitExecutor(view);
         pass("toolkitUiDisplaysRealCatalogProvenanceRequirementsAndUnprobedState");
     }
     private static void toolkitRequestsUseIndependentOwnerCleanedSessions() throws Exception {
-        Object view=fixture(),dialog=toolkitDialog(view);toolkitSessions().clear();
+        Object view=fixture();toolkitSessions().clear();
         staticField(fixtureType("RunHub"),"block",false);staticField(fixtureType("RunHub"),"failCleanup",false);
         List<JSONObject> responses=java.util.Collections.synchronizedList(new ArrayList<JSONObject>());
         try {
-            toolkitRequest(view,dialog,new JSONObject().put("action","status").put("tool","apktool"),responses);
+            toolkitRequest(view,new JSONObject().put("action","status").put("tool","apktool"),responses);
             awaitUi(view);drain(view,"uiTasks");
-            toolkitRequest(view,dialog,new JSONObject().put("action","clear").put("tool","apktool"),responses);
+            toolkitRequest(view,new JSONObject().put("action","package_install"),responses);
             awaitUi(view);drain(view,"uiTasks");
-            check(toolkitSessions().size()==2 && responses.size()==2,"UI reused an agent runner or lost a completed toolkit request");
+            toolkitRequest(view,new JSONObject().put("action","package_remove"),responses);
+            awaitUi(view);drain(view,"uiTasks");
+            check(toolkitSessions().size()==3 && responses.size()==3,"UI reused an agent runner or lost a completed toolkit request");
+            check("package_install".equals(((JSONObject)get(get(toolkitSessions().get(1),"toolkit"),"arguments")).optString("action"))
+                    && "package_remove".equals(((JSONObject)get(get(toolkitSessions().get(2),"toolkit"),"arguments")).optString("action")),
+                    "Offline install/remove UI bypassed the package operation entry points");
             for(Object session:toolkitSessions()) {
                 check((Integer)get(session,"closes")==1 && get(session,"owner")!=Thread.currentThread(),
                         "Toolkit operation failed to clean its lease on the creating background thread");
@@ -1172,11 +1189,11 @@ public final class TurnUiRegressionTest {
         pass("toolkitRequestsCreateIndependentSessionsAndCleanTheirOwnerLeasesOffUi");
     }
     private static void cancellingToolkitDoesNotChangeAgentOrApplyLateUiResult() throws Exception {
-        Object view=fixture(),dialog=toolkitDialog(view);toolkitSessions().clear();
+        Object view=fixture();toolkitSessions().clear();
         staticField(fixtureType("RunHub"),"block",true);staticField(fixtureType("RunHub"),"failCleanup",false);
         AgentLoop root=running(100000,-1);field(view,"loop",root);int token=root.runToken();
         List<JSONObject> responses=java.util.Collections.synchronizedList(new ArrayList<JSONObject>());
-        Object operation=toolkitRequest(view,dialog,new JSONObject().put("action","install").put("tool","apktool"),responses);
+        Object operation=toolkitRequest(view,new JSONObject().put("action","package_install"),responses);
         try {
             long deadline=System.nanoTime()+2000000000L;
             while(toolkitSessions().isEmpty() && System.nanoTime()<deadline)Thread.sleep(5);
@@ -1188,19 +1205,31 @@ public final class TurnUiRegressionTest {
             check((Integer)get(session,"closes")==1 && (Boolean)get(operation,"cancelled")
                     && responses.isEmpty() && root.runToken()==token && root.busy(),
                     "Cancelling the UI toolkit altered the agent or skipped owner cleanup/applied a stale result");
-            check(METHODS.get("showToolkit").contains("setOnDismissListener")
-                    && METHODS.get("showToolkitEntry").contains("setOnDismissListener")
-                    && METHODS.get("onDestroy").contains("cancelToolkitOperation"),
-                    "Window close or activity destruction does not cancel toolkit work");
+            check(TOOL_METHODS.get("onStop").contains("cancelToolkitOperation")
+                    && TOOL_METHODS.get("onDestroy").contains("cancelToolkitOperation"),
+                    "Leaving or destroying the tool page does not cancel toolkit work");
+            for(String lifecycle:new String[]{"onStop","onDestroy"}) {
+                Object next=toolkitRequest(view,new JSONObject().put("action","package_install"),responses);
+                deadline=System.nanoTime()+2000000000L;
+                while(toolkitSessions().size()<("onStop".equals(lifecycle)?2:3) && System.nanoTime()<deadline)Thread.sleep(5);
+                check(toolkitSessions().size()==("onStop".equals(lifecycle)?2:3), "Lifecycle fixture never started its request");
+                call(view,lifecycle);
+                Object owned=toolkitSessions().get(toolkitSessions().size()-1);
+                while((Integer)get(owned,"closes")==0 && System.nanoTime()<deadline)Thread.sleep(5);
+                drain(view,"uiTasks");
+                check((Boolean)get(next,"cancelled") && (Integer)get(owned,"closes")==1 && responses.isEmpty()
+                        && root.runToken()==token && root.busy(), "Tool page lifecycle skipped cleanup or changed the agent");
+                if("onStop".equals(lifecycle))check(get(view,"active")==null, "Stopped tool page retained its active operation");
+            }
         } finally {staticField(fixtureType("RunHub"),"block",false);stopToolkitExecutor(view);}
         pass("toolkitCancellationLeavesTheAgentUntouchedAndDropsLateResultsAfterOwnerCleanup");
     }
     private static void toolkitCleanupFailureReachesTheUiCallback() throws Exception {
-        Object view=fixture(),dialog=toolkitDialog(view);toolkitSessions().clear();
+        Object view=fixture();toolkitSessions().clear();
         staticField(fixtureType("RunHub"),"block",false);staticField(fixtureType("RunHub"),"failCleanup",true);
         List<JSONObject> responses=java.util.Collections.synchronizedList(new ArrayList<JSONObject>());
         try {
-            toolkitRequest(view,dialog,new JSONObject().put("action","status").put("tool","apktool"),responses);
+            toolkitRequest(view,new JSONObject().put("action","status").put("tool","apktool"),responses);
             awaitUi(view);drain(view,"uiTasks");
             check(responses.size()==1 && "error".equals(responses.get(0).optString("state"))
                     && responses.get(0).optString("error").contains("cleanup_failed"),

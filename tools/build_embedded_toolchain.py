@@ -22,6 +22,10 @@ import zipfile
 
 BASE = "https://packages.termux.dev/apt/"
 APKTOOL = "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
+PNGJ = "https://repo.maven.apache.org/maven2/ar/com/hjg/pngj/2.1.0/pngj-2.1.0.jar"
+PNGJ_SHA256 = "e6b762f15e4891178dddd74e4d57318f518ce278000129efa41f85410b132ccc"
+PNG_PATCH = "Apktool Res9patchStreamDecoder: use bundled PNGJ 2.1.0 without desktop AWT/ImageIO or Android Bitmap JNI"
+OS_PATCH = "Apktool OSDetection: tolerate missing desktop JVM properties on Android ART"
 R2 = "https://github.com/radareorg/radare2/releases/download/6.2.2/radare2-6.2.2-android-{}.tar.gz"
 REQUIRED = ["binutils", "python", "aapt2", "termux-licenses"]
 PYTHON_PACKAGES = ["objection==1.12.5", "click", "delegator-py", "flask", "litecli", "packaging", "prompt-toolkit", "pygments", "requests", "semver", "setuptools", "tabulate", "colorama", "rich", "websockets", "pexpect", "ptyprocess", "wcwidth", "blinker", "itsdangerous", "jinja2", "werkzeug", "markdown-it-py", "mdurl", "certifi", "charset-normalizer", "idna", "urllib3", "terminaltables", "pymysql", "sqlparse", "configobj", "cli_helpers"]
@@ -73,21 +77,122 @@ def compress(source, output):
                     info.uname = info.gname = ""
                     with path.open("rb") as stream:
                         archive.addfile(info, stream)
-    return {"sha256": hashlib.sha256(output.read_bytes()).hexdigest(), "bytes": output.stat().st_size}
+    return artifact_metadata(output)
+
+
+def artifact_metadata(output):
+    tar_sha = hashlib.sha256()
+    tar_bytes = 0
+    with gzip.open(output, "rb") as stream:
+        while block := stream.read(1024 * 1024):
+            tar_sha.update(block)
+            tar_bytes += len(block)
+    return {"sha256": hashlib.sha256(output.read_bytes()).hexdigest(), "bytes": output.stat().st_size,
+            "tar_asset": "toolchain/" + output.name.removesuffix(".gz"),
+            "tar_sha256": tar_sha.hexdigest(), "tar_bytes": tar_bytes}
+
+
+def build_apktool(repo, work, args, common):
+    jar = work / "apktool.jar"
+    sources = [fetch(APKTOOL, jar, "7956eb04194300ce0d0a84ad18771eebc94b89fb8d1ddcce8ea4c056818646f4")]
+    pngj = work / "pngj.jar"
+    pngj_source = fetch(PNGJ, pngj, PNGJ_SHA256)
+    pngj_source.update({"package": "ar.com.hjg:pngj", "version": "2.1.0", "license": "Apache-2.0"})
+    sources.append(pngj_source)
+    licenses = repo / "app/src/main/assets/toolchain/licenses"
+    licenses.mkdir(exist_ok=True)
+    pngj_core = work / "pngj-android.jar"
+    with zipfile.ZipFile(pngj) as original, zipfile.ZipFile(pngj_core, "w", zipfile.ZIP_DEFLATED) as android:
+        for item in original.infolist():
+            # Optional BufferedImage adapters depend on java.desktop. PNGJ's
+            # core reader/writer does not reference those adapters.
+            if item.filename.startswith(("ar/com/hjg/pngj/pixels/ImageLineARGBbi", "ar/com/hjg/pngj/pixels/ImageLineBufferedImage", "ar/com/hjg/pngj/pixels/ImageLineSetARGBbi")):
+                continue
+            if item.filename in ("LICENSE.txt", "NOTICE.txt"):
+                (licenses / ("PNGJ-" + item.filename)).write_bytes(original.read(item))
+            android.writestr(item.filename, original.read(item))
+    replacements = work / "apktool-android-classes"
+    if replacements.exists():
+        shutil.rmtree(replacements)
+    replacements.mkdir(exist_ok=True)
+    source_root = repo / "tools/apktool_android"
+    java_sources = list(source_root.rglob("*.java"))
+    if not java_sources:
+        raise ValueError("Missing the Android compatibility sources")
+    javac = str(pathlib.Path(args.java).with_name("javac"))
+    subprocess.run([javac, "-source", "7", "-target", "7", "-encoding", "UTF-8", "-cp", os.pathsep.join(map(str, (jar, pngj_core, args.android_jar))), "-d", str(replacements)] + [str(path) for path in java_sources], check=True)
+    patched_jar = work / "apktool-android.jar"
+    replaced_owners = [path.relative_to(source_root).with_suffix("").as_posix() for path in java_sources]
+    with zipfile.ZipFile(jar) as original, zipfile.ZipFile(patched_jar, "w", zipfile.ZIP_DEFLATED) as patched:
+        for item in original.infolist():
+            if any(item.filename == owner + ".class" or item.filename.startswith(owner + "$") for owner in replaced_owners):
+                continue
+            patched.writestr(item.filename, original.read(item))
+        for replacement in sorted(replacements.rglob("*.class")):
+            patched.write(replacement, replacement.relative_to(replacements).as_posix())
+    dex = work / "android-dex"
+    if dex.exists():
+        shutil.rmtree(dex)
+    dex.mkdir(exist_ok=True)
+    subprocess.run([args.java, "-cp", str(args.r8), "com.android.tools.r8.D8", "--release", "--min-api", "26", "--lib", str(args.android_jar), "--output", str(dex), str(patched_jar), str(pngj_core)], check=True)
+    (common / "apktool").mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(jar) as original, zipfile.ZipFile(common / "apktool/apktool-dex.jar", "w", zipfile.ZIP_DEFLATED) as android:
+        for item in original.infolist():
+            if not item.filename.endswith(".class") and not item.filename.startswith(("META-INF/", "prebuilt/")) and not item.is_dir():
+                android.writestr(item.filename, original.read(item))
+        for path in sorted(dex.glob("classes*.dex")):
+            android.write(path, path.name)
+    return sources
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--work", type=pathlib.Path, required=True)
-    parser.add_argument("--r8", type=pathlib.Path, required=True)
-    parser.add_argument("--android-jar", type=pathlib.Path, required=True)
+    parser.add_argument("--refresh-manifest", action="store_true", help="Record gzip and uncompressed tar checksums without rebuilding payloads")
+    parser.add_argument("--rebuild-common", action="store_true", help="Rebuild only Apktool dex and retain the shipped Python/native dependencies")
+    parser.add_argument("--work", type=pathlib.Path)
+    parser.add_argument("--r8", type=pathlib.Path)
+    parser.add_argument("--android-jar", type=pathlib.Path)
     parser.add_argument("--java", default="java")
     args = parser.parse_args()
-    work = args.work
-    work.mkdir(parents=True, exist_ok=True)
     repo = pathlib.Path(__file__).resolve().parents[1]
     output = repo / "app/src/main/assets/toolchain"
+    if args.refresh_manifest:
+        manifest = output / "manifest.json"
+        data = json.loads(manifest.read_text())
+        for artifact in data["artifacts"]:
+            artifact.update(artifact_metadata(repo / "app/src/main/assets" / artifact["asset"]))
+        manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        return
+    if args.work is None or args.r8 is None or args.android_jar is None:
+        parser.error("--work, --r8 and --android-jar are required when rebuilding")
+    work = args.work
+    work.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
+    if args.rebuild_common:
+        manifest_path = output / "manifest.json"
+        data = json.loads(manifest_path.read_text())
+        common = work / "common"
+        common.mkdir(exist_ok=True)
+        with tarfile.open(output / "common.tar.gz") as archive:
+            archive.extractall(common, filter="data")
+        sources = build_apktool(repo, work, args, common)
+        for source in sources:
+            data["sources"] = [old for old in data["sources"] if old["url"] != source["url"]]
+            data["sources"].append(source)
+        common_artifact = next(item for item in data["artifacts"] if item["abi"] == "any")
+        common_artifact.update(compress(common, output / "common.tar.gz"))
+        data["converter"]["sha256"] = hashlib.sha256(args.r8.read_bytes()).hexdigest()
+        data["pngj"] = "2.1.0"
+        data["patches"] = [patch for patch in data["patches"] if not patch.startswith("Apktool Res9patchStreamDecoder:")]
+        for patch in (PNG_PATCH, OS_PATCH):
+            if patch not in data["patches"]:
+                data["patches"].append(patch)
+        for artifact in data["artifacts"]:
+            if artifact["abi"] != "any":
+                artifact.update(artifact_metadata(repo / "app/src/main/assets" / artifact["asset"]))
+        manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        print(json.dumps(common_artifact, indent=2))
+        return
     sources = []
     licenses = output / "licenses"
     licenses.mkdir(exist_ok=True)
@@ -99,29 +204,7 @@ def main():
         sources.append(fetch(url, licenses / name))
     common = work / "common"
     (common / "apktool").mkdir(parents=True, exist_ok=True)
-    jar = work / "apktool.jar"
-    sources.append(fetch(APKTOOL, jar, "7956eb04194300ce0d0a84ad18771eebc94b89fb8d1ddcce8ea4c056818646f4"))
-    replacements = work / "apktool-android-classes"
-    replacements.mkdir(exist_ok=True)
-    java_sources = list((repo / "tools/apktool_android").rglob("*.java"))
-    if not java_sources:
-        raise ValueError("Missing the Android Bitmap compatibility source")
-    javac = str(pathlib.Path(args.java).with_name("javac"))
-    subprocess.run([javac, "-source", "7", "-target", "7", "-encoding", "UTF-8", "-cp", str(jar) + os.pathsep + str(args.android_jar), "-d", str(replacements)] + [str(path) for path in java_sources], check=True)
-    patched_jar = work / "apktool-android.jar"
-    with zipfile.ZipFile(jar) as original, zipfile.ZipFile(patched_jar, "w", zipfile.ZIP_DEFLATED) as patched:
-        for item in original.infolist():
-            replacement = replacements / item.filename
-            patched.writestr(item.filename, replacement.read_bytes() if replacement.is_file() else original.read(item))
-    dex = work / "android-dex"
-    dex.mkdir(exist_ok=True)
-    subprocess.run([args.java, "-cp", str(args.r8), "com.android.tools.r8.D8", "--release", "--min-api", "26", "--lib", str(args.android_jar), "--output", str(dex), str(patched_jar)], check=True)
-    with zipfile.ZipFile(jar) as original, zipfile.ZipFile(common / "apktool/apktool-dex.jar", "w", zipfile.ZIP_DEFLATED) as android:
-        for item in original.infolist():
-            if not item.filename.endswith(".class") and not item.filename.startswith(("META-INF/", "prebuilt/")) and not item.is_dir():
-                android.writestr(item.filename, original.read(item))
-        for path in sorted(dex.glob("classes*.dex")):
-            android.write(path, path.name)
+    sources.extend(build_apktool(repo, work, args, common))
     wheels = work / "wheels"
     wheels.mkdir(exist_ok=True)
     subprocess.run(["python3", "-m", "pip", "download", "--no-deps", "--dest", str(wheels), "--only-binary=:all:", "--platform", "any", "--python-version", "314"] + [p for p in PYTHON_PACKAGES if not p.startswith("objection") and p not in ("flask", "websockets", "litecli")], check=True)
@@ -262,7 +345,7 @@ def main():
         if artifact["bytes"] >= 100 * 1024 * 1024:
             raise ValueError("Asset exceeds GitHub's file limit: " + abi)
         artifacts.append(artifact)
-    manifest = {"version": "2026.10.01", "apktool": "2.9.3", "radare2": "6.2.2", "objection": "1.12.5", "patches": ["Apktool Res9patchStreamDecoder: replace desktop AWT/ImageIO with Android Bitmap APIs", "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix", "Materialize upstream internal symlinks as regular copies for private extraction", "Exclude desktop aapt binaries; include Android aapt2", "Exclude unneeded pip and Frida tracer web UI"], "converter": {"tool": "Google R8/D8 8.3.37", "sha256": hashlib.sha256(args.r8.read_bytes()).hexdigest(), "dex_min_api": 26}, "artifacts": artifacts, "sources": sources}
+    manifest = {"version": "2026.10.01", "apktool": "2.9.3", "pngj": "2.1.0", "radare2": "6.2.2", "objection": "1.12.5", "patches": [PNG_PATCH, OS_PATCH, "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix", "Materialize upstream internal symlinks as regular copies for private extraction", "Exclude desktop aapt binaries; include Android aapt2", "Exclude unneeded pip and Frida tracer web UI"], "converter": {"tool": "Google R8/D8 8.3.37", "sha256": hashlib.sha256(args.r8.read_bytes()).hexdigest(), "dex_min_api": 26}, "artifacts": artifacts, "sources": sources}
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(artifacts, indent=2))
 

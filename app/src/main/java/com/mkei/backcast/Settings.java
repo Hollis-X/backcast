@@ -167,6 +167,10 @@ public class Settings {
         return prefs.getBoolean(KEY_USE_ROOT, true);
     }
 
+    public void setUseRoot(boolean enabled) {
+        prefs.edit().putBoolean(KEY_USE_ROOT, enabled).apply();
+    }
+
     /** 权限级别；未设置或值非法时按完全访问。 */
     public String accessLevel() {
         String s = prefs.getString(KEY_ACCESS, "");
@@ -517,6 +521,29 @@ public class Settings {
                 .apply();
     }
 
+    public void saveAiConfiguration(String baseUrl, String apiKey, String model, List<String> models) {
+        prefs.edit()
+                .putString(KEY_BASE_URL, baseUrl == null ? "" : baseUrl.trim())
+                .putString(KEY_API_KEY, apiKey == null ? "" : apiKey.trim())
+                .putString(KEY_MODEL, model == null ? "" : model.trim())
+                .putString(KEY_MODEL_LIST, encodeModels(models))
+                .apply();
+    }
+
+    public void saveUserPreferences(String verbosity, String summary, String language, String effort,
+                                    int concurrency, String prompt) {
+        prefs.edit()
+                .putString(KEY_OUTPUT_VERBOSITY, ResponsePreferences.normalizeVerbosity(verbosity))
+                .putString(KEY_REASONING_SUMMARY, ResponsePreferences.normalizeSummary(summary))
+                .putString(KEY_OUTPUT_LANGUAGE, ResponsePreferences.normalizeLanguage(language))
+                .putString(KEY_REASONING_EFFORT, normalizeReasoningEffort(effort))
+                .putBoolean(KEY_EFFORT_POLICY_MIGRATED, true)
+                .putString(KEY_AGENT_CONCURRENCY, Integer.toString(concurrency >= 1 && concurrency <= 4
+                        ? concurrency : DEFAULT_AGENT_CONCURRENCY))
+                .putString(KEY_SYSTEM_PROMPT, prompt == null ? "" : prompt)
+                .apply();
+    }
+
     public boolean isConfigured() {
         return baseUrl().length() > 0 && apiKey().length() > 0 && model().length() > 0;
     }
@@ -538,16 +565,24 @@ public class Settings {
     }
 
     public void saveModelList(List<String> models) {
+        prefs.edit().putString(KEY_MODEL_LIST, encodeModels(models)).apply();
+    }
+
+    private static String encodeModels(List<String> models) {
         StringBuilder sb = new StringBuilder();
+        List<String> seen = new ArrayList<String>();
         if (models != null) {
             for (String m : models) {
+                String value = m == null ? "" : m.trim();
+                if (value.length() == 0 || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0 || seen.contains(value)) continue;
+                seen.add(value);
                 if (sb.length() > 0) {
                     sb.append('\n');
                 }
-                sb.append(m);
+                sb.append(value);
             }
         }
-        prefs.edit().putString(KEY_MODEL_LIST, sb.toString()).apply();
+        return sb.toString();
     }
 
     public void setModel(String model) {

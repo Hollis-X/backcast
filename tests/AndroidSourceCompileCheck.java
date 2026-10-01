@@ -76,7 +76,7 @@ public final class AndroidSourceCompileCheck {
         sources.add(new Source("androidx.appcompat.app.AppCompatActivity",
                 "package androidx.appcompat.app; public class AppCompatActivity extends android.app.Activity { public void setSupportActionBar(androidx.appcompat.widget.Toolbar t){} }"));
         sources.add(new Source("androidx.appcompat.widget.Toolbar",
-                "package androidx.appcompat.widget; public class Toolbar extends android.view.ViewGroup { public Toolbar(android.content.Context c){super(c);} protected void onLayout(boolean changed,int l,int t,int r,int b){} public void setNavigationIcon(android.graphics.drawable.Drawable d){} public void setNavigationOnClickListener(android.view.View.OnClickListener l){} }"));
+                "package androidx.appcompat.widget; public class Toolbar extends android.view.ViewGroup { public Toolbar(android.content.Context c){super(c);} protected void onLayout(boolean changed,int l,int t,int r,int b){} public void setTitle(int title){} public void setNavigationIcon(android.graphics.drawable.Drawable d){} public void setNavigationOnClickListener(android.view.View.OnClickListener l){} }"));
         sources.add(new Source("androidx.appcompat.app.AlertDialog",
                 "package androidx.appcompat.app; public class AlertDialog extends android.app.AlertDialog { protected AlertDialog(android.content.Context c){super(c);}"
                 + "public static class Builder { public Builder(android.content.Context c){}"

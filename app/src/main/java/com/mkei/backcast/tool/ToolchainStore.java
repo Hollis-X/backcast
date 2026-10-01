@@ -7,6 +7,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -23,6 +26,16 @@ public final class ToolchainStore {
 
     private final File root, registry;
     private final EmbeddedToolchain embedded;
+    private static final ConcurrentHashMap<String, ReentrantReadWriteLock> OPERATIONS =
+            new ConcurrentHashMap<String, ReentrantReadWriteLock>();
+    private final ReentrantReadWriteLock operations;
+
+    public static final class Use {
+        private final ReentrantReadWriteLock operations;
+        private boolean closed;
+        private Use(ReentrantReadWriteLock operations) { this.operations = operations; }
+        public void close() { if (!closed) { closed = true; operations.readLock().unlock(); } }
+    }
 
     public ToolchainStore(File directory) {
         this(directory, null, "", 0);
@@ -34,6 +47,9 @@ public final class ToolchainStore {
         catch (IOException error) { throw new IllegalArgumentException("无法确认工具目录。", error); }
         registry = new File(root, "registry.json");
         embedded = assets == null ? null : new EmbeddedToolchain(this, assets, abi, sdk);
+        ReentrantReadWriteLock created = new ReentrantReadWriteLock(true);
+        ReentrantReadWriteLock shared = OPERATIONS.putIfAbsent(root.getPath(), created);
+        operations = shared == null ? created : shared;
     }
 
     public File root() { return root; }
@@ -42,8 +58,110 @@ public final class ToolchainStore {
     public boolean hasBundledAssets() { return embedded != null; }
 
     public File prepareBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
-        if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
-        return embedded.prepare(cancellation);
+        Use use = beginUse(cancellation);
+        try {
+            if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
+            if (bundledRemoved()) throw new IllegalStateException("内置工具包已删除，请在工具配置中重新安装。");
+            return embedded.prepare(cancellation);
+        } finally { use.close(); }
+    }
+
+    public Use beginUse(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        while (true) {
+            cancellation.check();
+            if (operations.readLock().tryLock(100, TimeUnit.MILLISECONDS)) {
+                try { cancellation.check(); return new Use(operations); }
+                catch (Exception cancelled) { operations.readLock().unlock(); throw cancelled; }
+            }
+        }
+    }
+
+    public synchronized boolean bundledRemoved() throws Exception { return load().optBoolean("bundled_removed", false); }
+
+    public JSONObject packageStatus() throws Exception {
+        if (embedded == null) return new JSONObject().put("state", "unconfigured").put("installed", false);
+        return embedded.packageStatus().put("busy", operations.getReadLockCount() > 0 || operations.isWriteLocked());
+    }
+
+    public JSONObject installBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
+        try {
+            if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
+            boolean wasRemoved = bundledRemoved();
+            if (wasRemoved) {
+                embedded.resetPrepared();
+                // A cancelled deletion may leave only part of a verified
+                // directory; never treat that receipt as a complete install.
+                for (File file : releasedBundles()) { cancellation.check(); removeManaged(file, cancellation); }
+            }
+            synchronized (this) { JSONObject data = load(); data.put("bundled_removed", false); save(data); }
+            try { prepareBundled(cancellation); return packageStatus(); }
+            catch (Exception failure) {
+                synchronized (this) { JSONObject data = load(); data.put("bundled_removed", wasRemoved); save(data); }
+                throw failure;
+            }
+        } finally { operations.writeLock().unlock(); }
+    }
+
+    public JSONObject removeBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
+        try {
+            if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
+            List<File> removable = releasedBundles();
+            cancellation.check();
+            // Disable implicit installation before deletion, including interrupted deletion.
+            synchronized (this) {
+                JSONObject data = load(), tools = data.optJSONObject("tools");
+                if (tools != null) {
+                    JSONArray ids = tools.names();
+                    if (ids != null) for (int i = 0; i < ids.length(); i++) {
+                        String id = ids.getString(i); JSONObject config = tools.optJSONObject(id);
+                        if (config != null && "bundled".equals(config.optString("origin"))) tools.remove(id);
+                    }
+                }
+                data.put("bundled_removed", true); save(data);
+            }
+            embedded.resetPrepared();
+            for (File file : removable) { cancellation.check(); removeManaged(file, cancellation); }
+            return packageStatus();
+        } finally { operations.writeLock().unlock(); }
+    }
+
+    private List<File> releasedBundles() throws Exception {
+        managed(root.getPath());
+        File[] files = root.listFiles();
+        List<File> removable = new ArrayList<File>();
+        if (files != null) for (File file : files) {
+            if (!file.getName().matches("builtin-(?:common|arm64-v8a|armeabi-v7a)-[A-Za-z0-9._-]+-[0-9a-f]{16}")) continue;
+            managed(file.getPath());
+            File receipt = managed(new File(file, ".verified-sha256").getPath());
+            if (!receipt.isFile() || !new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8").matches("[0-9a-f]{64}")) {
+                throw new IOException("私有工具包缺少校验记录，拒绝删除：" + file.getName());
+            }
+            removable.add(file);
+        }
+        return removable;
+    }
+
+    private void removeManaged(File file, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check(); managed(file.getPath());
+        File[] children = file.listFiles();
+        if (children != null) {
+            File receipt = null;
+            for (File child : children) {
+                if (".verified-sha256".equals(child.getName())) receipt = child;
+                else removeManaged(child, cancellation);
+            }
+            // Keep ownership evidence until the directory is empty so a
+            // cancelled deletion can be resumed by the next remove request.
+            if (receipt != null) {
+                managed(receipt.getPath());
+                if (!receipt.delete()) throw new IOException("无法删除私有工具校验记录。");
+            }
+        }
+        if (file.exists() && !file.delete()) throw new IOException("无法删除私有工具文件：" + file.getName());
     }
 
     public synchronized JSONObject configuration(String id) throws Exception {
@@ -177,10 +295,10 @@ public final class ToolchainStore {
             JSONArray prefix = new JSONArray();
             String path;
             if ("apktool".equals(id)) {
-                path = "/system/bin/app_process";
-                env.put("CLASSPATH", new File(common, "apktool/apktool-dex.jar").getPath());
+                path = "/system/bin/dalvikvm";
                 prefix.put("-Dsun.arch.data.model=" + ("arm64-v8a".equals(abi) ? "64" : "32"))
-                        .put("/system/bin").put("brut.apktool.Main");
+                        .put("-cp").put(new File(common, "apktool/apktool-dex.jar").getPath())
+                        .put("brut.apktool.Main");
                 config.put("aapt2", new File(usr, "bin/aapt2").getPath());
             } else if ("radare2".equals(id) || "rabin2".equals(id)) {
                 File r2 = new File(nativeTools, "radare2");
