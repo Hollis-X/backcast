@@ -13,6 +13,7 @@ public final class AndroidDependencyDexCheck {
     private static final String MAVEN = "https://dl.google.com/dl/android/maven2/";
     private static final Map<String, Path> programs = new LinkedHashMap<>();
     private static final Set<String> visited = new HashSet<>();
+    private static final Map<String, String> resourceNamespaces = new TreeMap<>();
     private static Path cache;
     private static DocumentBuilder parser;
     private static Path fetch(String relative) throws Exception {
@@ -51,6 +52,14 @@ public final class AndroidDependencyDexCheck {
         if ("aar".equals(format)) {
             Path classes = artifact.resolveSibling(name + "-" + version + "-classes.jar");
             try (ZipFile archive = new ZipFile(artifact.toFile())) {
+                ZipEntry symbols = archive.getEntry("R.txt"), manifest = archive.getEntry("AndroidManifest.xml");
+                if (symbols != null && symbols.getSize() > 0 && manifest != null) {
+                    try (InputStream input = archive.getInputStream(manifest)) {
+                        String namespace = parser.parse(input).getDocumentElement().getAttribute("package");
+                        if (namespace.isEmpty()) throw new IOException("Missing AAR resource namespace: " + coordinate);
+                        resourceNamespaces.put(namespace, coordinate);
+                    }
+                }
                 ZipEntry entry = archive.getEntry("classes.jar");
                 if (entry != null) {
                     try (InputStream input = archive.getInputStream(entry)) { Files.copy(input, classes, StandardCopyOption.REPLACE_EXISTING); }
@@ -113,7 +122,7 @@ public final class AndroidDependencyDexCheck {
                 Files.copy(file, archive); archive.closeEntry();
             }
         }
-        System.out.println("Compiled " + files.size() + " production Java files against real AndroidX/Material; only application R is generated.");
+        System.out.println("Compiled " + files.size() + " production Java files against real AndroidX; only referenced application R is generated.");
         return jar;
     }
     private static int dex(Path d8, Path api, Path work, String mode, Path application, boolean legacy) throws Exception {
@@ -151,8 +160,10 @@ public final class AndroidDependencyDexCheck {
         try (var files = Files.list(output)) {
             for (Path file : files.filter(p -> p.toString().endsWith(".dex")).sorted().toList()) {
                 byte[] header = Files.readAllBytes(file);
+                int fields = (header[80] & 255) | (header[81] & 255) << 8 | (header[82] & 255) << 16 | (header[83] & 255) << 24;
                 int methods = (header[88] & 255) | (header[89] & 255) << 8 | (header[90] & 255) << 16 | (header[91] & 255) << 24;
-                System.out.println(file.getFileName() + " method_ids=" + methods + " bytes=" + header.length);
+                if (fields > 65536 || methods > 65536) throw new AssertionError("DEX reference limit exceeded: " + file);
+                System.out.println(file.getFileName() + " field_ids=" + fields + " method_ids=" + methods + " bytes=" + header.length);
             }
         }
         return exit;
@@ -164,15 +175,17 @@ public final class AndroidDependencyDexCheck {
         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); parser = factory.newDocumentBuilder();
         // This reproduces the currently pinned app/build.gradle dependencies.
         // Update these roots when production dependency versions change.
-        resolve("androidx.appcompat", "appcompat", "1.0.0"); resolve("com.google.android.material", "material", "1.0.0");
+        resolve("androidx.appcompat", "appcompat", "1.0.0");
         resolve("androidx.multidex", "multidex", "2.0.1");
         System.out.println("Resolved " + programs.size() + " real compile/runtime artifacts from Google Maven:");
         for (var entry : programs.entrySet()) System.out.println(entry.getKey() + " " + Files.size(entry.getValue()) + " bytes");
+        System.out.println("Resolved " + resourceNamespaces.size() + " dependency resource namespaces (plus application namespace):");
+        for (var entry : resourceNamespaces.entrySet()) System.out.println(entry.getKey() + " " + entry.getValue());
         Path work = Files.createTempDirectory("backcast-real-d8-");
         try {
-            dex(d8, api, work, "dependencies", null, false);
+            if (dex(d8, api, work, "dependencies", null, false) != 0) throw new AssertionError("Real dependency single DEX compilation failed; diagnostics printed above");
             Path application = compileApplication(root, api, work);
-            dex(d8, api, work, "application", application, false);
+            if (dex(d8, api, work, "application", application, false) != 0) throw new AssertionError("Real dependency/application single DEX compilation failed; diagnostics printed above");
             if (dex(d8, api, work, "legacy-multidex", application, true) != 0) throw new AssertionError("Real dependency/application legacy D8 compilation failed; diagnostics printed above");
         } finally {
             try (var files = Files.walk(work)) { for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); }

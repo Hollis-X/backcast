@@ -69,6 +69,10 @@ if [ "${3:-}" = "multidex" ]; then
     java "$root/tests/MultiDexConfigRegressionTest.java" "$root"
     exit "$?"
 fi
+if [ "${3:-}" = "resource-budget" ]; then
+    java "$root/tests/AideResourceBudgetRegressionTest.java" "$root"
+    exit "$?"
+fi
 if [ "${3:-}" = "shell" ]; then
     java -cp "$build:$json" com.mkei.backcast.tool.ShellGuardRegressionTest
     exit "$?"
@@ -130,7 +134,9 @@ java "$root/tests/AiConfigRegressionTest.java" "$root"
 ai_config_status=$?
 java "$root/tests/MultiDexConfigRegressionTest.java" "$root"
 multidex_status=$?
+java "$root/tests/AideResourceBudgetRegressionTest.java" "$root"
+resource_budget_status=$?
 java "$root/tests/TranscriptScrollRegressionTest.java" "$root"
 scroll_status=$?
-if [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ]; then exit 1; fi
+if [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ]; then exit 1; fi
 if [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi
