@@ -18,6 +18,10 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    lintOptions {
+        // This APK is sideloaded and deliberately retains targetSdk 26 behavior.
+        disable 'ExpiredTargetSdkVersion'
+    }
 }
 
 dependencies {
