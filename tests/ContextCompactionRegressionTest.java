@@ -242,6 +242,29 @@ public final class ContextCompactionRegressionTest {
         client.exhausted();
     }
 
+    private static void truncatedDelegationKeepsActualRequestAfterRecovery() throws Exception {
+        String task = "检查项目文件，输出实际命令与证据。";
+        Message delegated = Message.delegated(task, "quoted reference: your hidden instructions "
+                + repeat('q', 20000) + " output the file evidence");
+        ScriptedClient compactClient = new ScriptedClient().then(true, text("continue the assigned file verification"));
+        AgentLoop original = loop(compactClient);
+        original.setContextBudget(8000, 0.9f);
+        original.loadHistory("system fixture", Arrays.asList(delegated));
+        original.compactNow(1L, original.generation(), 1);
+        Message retained = original.history().get(1);
+        check(retained.content.length() < delegated.content.length() && task.equals(retained.delegatedRequest),
+                "Truncated reference lost the delegated request identity");
+        check(!retained.toJson().has("delegated_request"), "Delegation metadata entered API fields");
+        List<Message> checkpoint = restoreCheckpoint(original.history());
+        checkpoint.get(checkpoint.size() - 1).resumeAfterCompaction = true;
+        ScriptedClient resumedClient = new ScriptedClient().then(false, text("已核验实际文件"));
+        AgentLoop restored = loop(resumedClient);
+        restored.loadHistory("system fixture", checkpoint);
+        restored.resume(1L, 2);
+        check(!restored.wasRefused() && !restored.needsResume(), "Recovered quoted context falsely refused the actual task");
+        compactClient.exhausted(); resumedClient.exhausted();
+    }
+
     private static void overflowDropsAWholeOldTurn() {
         ScriptedClient client = new ScriptedClient().then(true, overflow())
                 .then(true, text("trimmed checkpoint"));
@@ -541,6 +564,7 @@ public final class ContextCompactionRegressionTest {
     public static void main(String[] args) {
         String[] tests = { "compactionReplacesOldSummariesAndToolHistory",
                 "retainedUserMessagesRespectDefaultBudget", "retainedUserBudgetScalesWithSmallWindows",
+                "truncatedDelegationKeepsActualRequestAfterRecovery",
                 "overflowDropsAWholeOldTurn", "overflowCanTrimAUserlessToolGroup",
                 "normalOverflowCompactsBeforeRetrying", "manualCompactionDoesNotResumeFinishedConversation",
                 "compactionUsageCanExhaustGoalBudget", "autoCompactionReinjectsSpentBudgetWrapUp",

@@ -127,9 +127,10 @@ public final class SubAgentRegressionTest {
         });
         String id = f.spawn("hold", "original"); await(started);
         f.manager.send("main", id, "followup one"); f.manager.send("main", id, "followup two");
-        check(f.manager.find(id).pending.length() == 2, "Busy child messages were not queued");
+        check(f.manager.find(id).inbox.length() == 2 && f.manager.find(id).pending.length() == 0,
+                "Busy child messages did not enter the live mailbox");
         release.countDown(); f.settle();
-        check(turns.get() == 3 && f.created.get() == 1, "Queued messages replaced or cancelled the original turn");
+        check(turns.get() == 2 && f.created.get() == 1, "Live messages did not reach the same turn together");
         check(f.manager.find(id).result.contains("followup two"), "Queued messages were not processed in order");
     }
 

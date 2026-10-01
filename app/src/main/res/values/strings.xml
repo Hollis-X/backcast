@@ -58,6 +58,15 @@
     <string name="sub_agents_idle">空闲</string>
     <string name="sub_agents_failed">失败</string>
     <string name="sub_agents_closed">已停止</string>
+    <string name="sub_agents_phase_model">请求模型</string>
+    <string name="sub_agents_phase_thinking">思考中</string>
+    <string name="sub_agents_phase_responding">输出中</string>
+    <string name="sub_agents_phase_tool">执行工具</string>
+    <string name="sub_agents_phase_reviewing">核验结果</string>
+    <string name="sub_agents_phase_compacting">压缩上下文</string>
+    <string name="sub_agents_phase_retrying">重试请求</string>
+    <string name="sub_agents_phase_completed">本次任务已完成</string>
+    <string name="sub_agents_updated">最近活动：%1$s</string>
     <string name="toolkit_title">工具目录</string>
     <string name="toolkit_loading">读取工具目录…</string>
     <string name="toolkit_storage">工具位置：%1$s\n设备 ABI：%2$s</string>

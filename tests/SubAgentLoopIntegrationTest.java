@@ -28,7 +28,11 @@ public final class SubAgentLoopIntegrationTest {
         Client() { super(new Config("http://fixture", "fixture", "fixture")); }
         @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
             int count = calls.incrementAndGet(); check(count <= 10, "Parent loop unexpectedly kept requesting");
-            try { return script.next(fixture, messages, tools); }
+            try {
+                Reply reply = script.next(fixture, messages, tools);
+                if (reply.content != null && reply.content.length() > 0) sink.onContent(reply.content);
+                return reply;
+            }
             catch (Exception error) { throw new IllegalStateException(error); }
         }
     }
@@ -38,6 +42,7 @@ public final class SubAgentLoopIntegrationTest {
         final AgentLoop root;
         final SubAgentManager manager;
         final List<String> errors = new ArrayList<String>();
+        final List<String> visibleAnswers = new ArrayList<String>();
         final AtomicInteger childCalls = new AtomicInteger(), writes = new AtomicInteger(), writeAborts = new AtomicInteger();
         CountDownLatch childStarted, childRelease;
         CountDownLatch usageStarted, usageRelease;
@@ -50,6 +55,7 @@ public final class SubAgentLoopIntegrationTest {
         Fixture(SubAgentManager.Store store) throws Exception {
             root = new AgentLoop(client, registry, new AgentLoop.Quiet() {
                 @Override public void onError(int gen, String error) { synchronized (errors) { errors.add(error); } }
+                @Override public void onAssistantText(int gen, String text) { visibleAnswers.add(text); }
             });
             client.fixture = this; root.bindSession(1L); root.reset("fixture trusted policy");
             manager = new SubAgentManager(1, this, store); manager.attachRoot(root); root.setSubAgents(manager);
@@ -139,6 +145,49 @@ public final class SubAgentLoopIntegrationTest {
         check(f.errors.isEmpty() && f.client.calls.get() == 3 && f.childCalls.get() == 1 && !f.root.needsResume(),
                 "Parent final handoff failed: " + f.errors);
         check(!f.manager.hasUncollectedResults(), "Parent final left a duplicate result delivery");
+        check(f.visibleAnswers.equals(java.util.Arrays.asList("parent verified child result and finished")),
+                "Parent streamed a final answer before delegated evidence: " + f.visibleAnswers);
+        for (Message message : f.root.historySnapshot()) check(!message.content.contains("premature parent answer"),
+                "A provisional parent final was retained as a delivered answer");
+    }
+
+    private static void parentRunsIndependentToolsWhileItsChildIsWorking() throws Exception {
+        final Fixture f = new Fixture(); f.childStarted = new CountDownLatch(1); f.childRelease = new CountDownLatch(1);
+        final AtomicInteger checks = new AtomicInteger();
+        f.registry.register(new Tool() {
+            @Override public String name() { return "parent_probe"; }
+            @Override public String description() { return "Verify the parent's independent integration work"; }
+            @Override public JSONObject parameters() { return new JSONObject(); }
+            @Override public String run(JSONObject args) {
+                check(f.manager.hasPendingWork() && f.childRelease.getCount() == 1,
+                        "Parent integration waited until its child finished");
+                checks.incrementAndGet(); return "parent_integration_evidence";
+            }
+            @Override public void abort() { }
+        });
+        f.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
+                if (f.client.calls.get() == 1) return call("spawn_agent", "{\"name\":\"review\",\"task\":\"check independently\",\"fork\":false}");
+                if (f.client.calls.get() == 2) {
+                    await(f.childStarted);
+                    LlmClient.Reply reply = call("parent_probe", "{}"); reply.content = "checking integration"; return reply;
+                }
+                if (f.client.calls.get() == 3) {
+                    check(checks.get() == 1, "Parent did not execute its own tool");
+                    f.childRelease.countDown(); return text("unverified provisional final");
+                }
+                check(f.client.calls.get() == 4 && resultNotes(messages) == 1 && !f.manager.hasPendingWork(),
+                        "Parent did not wait for and collect its child's evidence");
+                return text("parent and child evidence verified");
+            }
+        };
+        try {
+            f.submit();
+            check(f.errors.isEmpty() && checks.get() == 1 && f.client.calls.get() == 4,
+                    "Parallel parent integration failed: " + f.errors);
+            check(f.visibleAnswers.equals(java.util.Arrays.asList("checking integration", "parent and child evidence verified")),
+                    "Parent commentary or final ordering was wrong: " + f.visibleAnswers);
+        } finally { f.childRelease.countDown(); f.root.cancel(); }
     }
 
     private static void goalCompletionRejectsPendingAndUncollectedChildResults() throws Exception {
@@ -496,7 +545,8 @@ public final class SubAgentLoopIntegrationTest {
     }
 
     public static void main(String[] args) throws Exception {
-        String[] tests = {"prematureParentFinalWaitsAndReceivesExactlyOneChildResult", "goalCompletionRejectsPendingAndUncollectedChildResults",
+        String[] tests = {"prematureParentFinalWaitsAndReceivesExactlyOneChildResult", "parentRunsIndependentToolsWhileItsChildIsWorking",
+                "goalCompletionRejectsPendingAndUncollectedChildResults",
                 "childUsageExhaustsParentBudgetBeforeItsToolCanExecute", "endedGoalDoesNotChargeExternalUsage",
                 "parentCancellationInterruptsChildWaitAndKeepsIdleContextReusable", "parentResumeStartsRestoredChildBeforeItsFinalAnswer",
                 "childApprovalUsesAndClearsItsOwnCallingSource", "cancelledOldChildReplyNeverChargesANewGoal",

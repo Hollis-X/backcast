@@ -24,9 +24,9 @@ public final class SubAgentTools implements Tool {
     @Override public String description() {
         if ("spawn_agent".equals(name)) return "创建独立子任务并并行执行。只委派可独立推进的具体工作；可选携带有界父上下文。"
                 + "返回任务 id 后可发送追加任务复用空闲子 agent，最终交付前必须等待并收集结果，不要重复自己已委派的工作。";
-        if ("send_message".equals(name)) return "向同会话 agent 发送消息。目标 id=main 表示父会话；忙碌子任务排队处理，空闲子任务复用已有上下文继续执行。";
+        if ("send_message".equals(name)) return "向同会话 agent 通信。目标main表示主会话；忙碌子任务在下一次模型请求前收到消息，空闲子任务复用上下文执行。主动汇报阶段、证据、问题和完成结果。";
         if ("list_agents".equals(name)) return "查看当前会话子任务状态、最终结果、待处理消息及发给自己的收件箱。";
-        if ("wait_agent".equals(name)) return "等待指定子任务或所有子任务完成，最长60秒。返回结果与pending状态；仍有pending时继续等待或推进其他工作。";
+        if ("wait_agent".equals(name)) return "等待子任务的新阶段、消息或完成，最长60秒。返回实时阶段、当前工具、进度和cursor；下次传cursor避免重复旧状态。pending仍真时任务没有全部完成，不可最终交付。";
         if ("read_agent_result".equals(name)) return "分片读取子任务完整最终结果；list或wait返回resultTruncated时用本工具取剩余片段并核验。";
         return "关闭不再需要的子任务及其后代，取消模型与工具执行。不能关闭父会话；关闭后不能再复用。";
     }
@@ -44,6 +44,7 @@ public final class SubAgentTools implements Tool {
             } else if ("wait_agent".equals(name)) {
                 properties.put("target", field("string", "目标agent id，省略表示等待所有子任务"));
                 properties.put("timeout_ms", field("integer", "0到60000，默认30000"));
+                properties.put("cursor", field("integer", "上一次wait返回的cursor；仅等待该版本之后的新进度"));
             } else if ("close_agent".equals(name)) {
                 properties.put("target", field("string", "要关闭的子任务id")); required.put("target");
             } else if ("list_agents".equals(name)) {
@@ -71,8 +72,11 @@ public final class SubAgentTools implements Tool {
                 args.optInt("offset", 0), args.optInt("limit", 8000)).toString();
         if ("wait_agent".equals(name)) {
             String target = args.optString("target", "");
-            manager.waitFor(owner, target, args.optLong("timeout_ms", 30000L));
-            return manager.collectResults(owner, target).toString();
+            JSONObject update = manager.waitForUpdate(owner, target, args.optLong("timeout_ms", 30000L), args.optLong("cursor", -1L));
+            JSONObject collected = manager.collectResults(owner, target);
+            update.put("results", collected.getJSONArray("agents")).put("inbox", collected.getJSONArray("inbox"))
+                    .put("moreResults", collected.optBoolean("moreResults"));
+            return update.toString();
         }
         return manager.close(owner, args.optString("target", "")).toString();
     }

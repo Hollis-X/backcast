@@ -34,7 +34,10 @@ public final class SubAgentManager {
 
     public static final class Record {
         public String id, parentId, name, task, status, result = "", error = "", inFlight = "";
+        public String phase = QUEUED, activeTool = "", progress = "";
+        public String inFlightRequest = "", inFlightReference = "";
         public long sessionId, revision, tokensUsed, collectedRevision, acknowledgedRevision;
+        public long lastActivityAt, progressRevision, inboxRevision;
         public JSONArray history = new JSONArray();
         public JSONArray pending = new JSONArray();
         public JSONArray inbox = new JSONArray();
@@ -52,7 +55,10 @@ public final class SubAgentManager {
                     .put("history", history).put("pending", pending).put("inbox", inbox).put("resume", resume)
                     .put("inFlightStarted", inFlightStarted).put("deliveredChildren", deliveredChildren)
                     .put("acknowledgedChildren", acknowledgedChildren).put("deliveredInbox", deliveredInbox)
-                    .put("managerCancelled", managerCancelled);
+                    .put("managerCancelled", managerCancelled).put("phase", phase).put("activeTool", activeTool)
+                    .put("progress", progress).put("lastActivityAt", lastActivityAt).put("progressRevision", progressRevision)
+                    .put("inboxRevision", inboxRevision)
+                    .put("inFlightRequest", inFlightRequest).put("inFlightReference", inFlightReference);
         }
 
         public static Record fromJson(JSONObject json) throws Exception {
@@ -70,12 +76,22 @@ public final class SubAgentManager {
             task.resume = json.optBoolean("resume", false);
             task.inFlightStarted = json.optBoolean("inFlightStarted", false);
             task.managerCancelled = json.optBoolean("managerCancelled", false);
+            task.phase = json.optString("phase", task.status); task.activeTool = json.optString("activeTool", "");
+            task.progress = json.optString("progress", ""); task.lastActivityAt = json.optLong("lastActivityAt", 0L);
+            task.progressRevision = json.optLong("progressRevision", 0L);
+            task.inboxRevision = json.optLong("inboxRevision", 0L);
+            task.inFlightRequest = json.optString("inFlightRequest", "");
+            task.inFlightReference = json.optString("inFlightReference", "");
             task.deliveredChildren = json.optJSONObject("deliveredChildren");
             if (task.deliveredChildren == null) task.deliveredChildren = new JSONObject();
             task.acknowledgedChildren = json.optJSONObject("acknowledgedChildren");
             if (task.acknowledgedChildren == null) task.acknowledgedChildren = new JSONObject();
             task.deliveredInbox = json.optJSONArray("deliveredInbox");
             if (task.deliveredInbox == null) task.deliveredInbox = new JSONArray();
+            if (IDLE.equals(task.status) && task.error.length() == 0 && PromptGuard.REFUSAL.equals(task.result)) {
+                task.status = FAILED; task.phase = FAILED; task.activeTool = "";
+                task.error = PromptGuard.REFUSAL; task.result = ""; task.revision++;
+            }
             return task;
         }
     }
@@ -84,9 +100,12 @@ public final class SubAgentManager {
         final Record task;
         AgentLoop loop;
         boolean executing, suspended, ready = true;
+        boolean acceptingLive;
         volatile boolean stop;
         int uiToken;
         long usageLease = -1L;
+        long lastProgressPersist;
+        final Map<String, Long> observedProgress = new LinkedHashMap<String, Long>();
         Slot(Record task) { this.task = task; }
     }
 
@@ -124,6 +143,7 @@ public final class SubAgentManager {
                 if (copy.id.length() == 0 || slots.containsKey(copy.id)) throw new IllegalStateException("重复或无效子任务登记。");
                 if (RUNNING.equals(copy.status) || WAITING.equals(copy.status)) {
                     copy.status = QUEUED; copy.resume = copy.history.length() > 0;
+                    copy.phase = QUEUED; copy.activeTool = "";
                 }
                 slots.put(copy.id, new Slot(copy));
             }
@@ -164,10 +184,11 @@ public final class SubAgentManager {
             record.id = "agent_" + UUID.randomUUID().toString(); record.parentId = owner;
             record.name = name == null || name.trim().length() == 0 ? record.id : name.trim();
             record.task = task; record.status = QUEUED;
+            record.phase = QUEUED; record.lastActivityAt = System.currentTimeMillis(); record.progressRevision = 1L;
             record.sessionId = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
             if (record.sessionId == 0) record.sessionId = 1;
             String context = fork && parent.loop != null ? forkContext(parent.loop.historySnapshot()) : "";
-            record.pending.put(mail(owner, context + task).put("usageLease", lease)); record.revision++;
+            record.pending.put(mail(owner, task).put("reference", context).put("usageLease", lease)); record.revision++;
             Slot created = new Slot(record); created.ready = false; slots.put(record.id, created);
         }
         try { persist(record.id); }
@@ -184,10 +205,20 @@ public final class SubAgentManager {
             if (CLOSED.equals(slot.task.status)) throw new IllegalStateException("子任务已关闭。");
             if (slot.stop && slot.executing) throw new IllegalStateException("子任务仍在停止，请等待清理完成后复用。");
             slot.stop = false;
-            JSONArray queue = ROOT.equals(target) ? slot.task.inbox : slot.task.pending;
+            JSONArray queue = ROOT.equals(target) || slot.executing && slot.acceptingLive
+                    || QUEUED.equals(slot.task.status) && !slot.executing
+                    ? slot.task.inbox : slot.task.pending;
             if (queue.length() >= MAX_MAIL) throw new IllegalStateException("待处理消息已达上限，请先等待现有任务完成。");
             queue.put(mail(owner, message).put("usageLease", lease)); slot.task.revision++;
-            if (!ROOT.equals(target) && !slot.executing) { slot.task.status = QUEUED; slot.ready = false; }
+            if (queue == slot.task.inbox) slot.task.inboxRevision++;
+            if (!ROOT.equals(target) && (!slot.executing || !slot.acceptingLive) && !QUEUED.equals(slot.task.status)) {
+                slot.task.status = QUEUED; slot.task.phase = QUEUED; slot.task.activeTool = ""; slot.ready = false;
+            }
+            if (!ROOT.equals(owner)) {
+                Record sender = requireSlot(owner).task;
+                sender.progress = clipped(message, 600); sender.lastActivityAt = System.currentTimeMillis();
+                sender.progressRevision++; sender.revision++;
+            }
             lock.notifyAll();
         }
         try { persist(target); }
@@ -201,11 +232,48 @@ public final class SubAgentManager {
             }
             throw error;
         }
+        if (!ROOT.equals(owner) && !owner.equals(target)) persistQuietly(owner);
         synchronized (lock) { requireSlot(target).ready = true; schedulingEnabled = true; scheduleLocked(); return view(requireSlot(target)); }
     }
 
     public JSONObject list(String owner) throws Exception {
         return list(owner, 0);
+    }
+
+    public boolean hasInbox(String owner) {
+        synchronized (lock) { return requireSlot(owner).task.inbox.length() > 0; }
+    }
+
+    /** Keep messages queued until their complete note has reached the receiver's checkpoint. */
+    public JSONObject peekInbox(String owner) throws Exception {
+        synchronized (lock) {
+            JSONArray messages = new JSONArray(); int chars = 0;
+            Record receiver = requireSlot(owner).task;
+            for (int i = 0; i < receiver.inbox.length(); i++) {
+                JSONObject entry = new JSONObject(receiver.inbox.getJSONObject(i).toString()); entry.remove("usageLease");
+                int size = entry.toString().length();
+                if (chars + size > RESULT_BATCH_CHARS) break;
+                messages.put(entry); chars += size;
+            }
+            return new JSONObject().put("messages", messages).put("moreMessages", messages.length() < receiver.inbox.length());
+        }
+    }
+
+    public void acknowledgeInbox(String owner, JSONArray messageIds) throws Exception {
+        synchronized (lock) {
+            Record receiver = requireSlot(owner).task;
+            JSONArray retained = new JSONArray(); boolean changed = false;
+            for (int i = 0; i < receiver.inbox.length(); i++) {
+                JSONObject entry = receiver.inbox.getJSONObject(i); boolean acknowledged = false;
+                for (int j = 0; j < messageIds.length(); j++) if (entry.optString("id").equals(messageIds.optString(j))) {
+                    acknowledged = true; break;
+                }
+                if (acknowledged) changed = true; else retained.put(entry);
+            }
+            if (!changed) return;
+            receiver.inbox = retained; receiver.revision++; lock.notifyAll();
+        }
+        persist(owner);
     }
 
     public JSONObject list(String owner, int cursor) throws Exception {
@@ -229,6 +297,14 @@ public final class SubAgentManager {
 
     /** Wait for a selected task or for all work, yielding a child's execution slot. */
     public JSONObject waitFor(String owner, String target, long timeoutMs) throws Exception {
+        return waitInternal(owner, target, timeoutMs, false, -1L);
+    }
+
+    public JSONObject waitForUpdate(String owner, String target, long timeoutMs, long cursor) throws Exception {
+        return waitInternal(owner, target, timeoutMs, true, cursor);
+    }
+
+    private JSONObject waitInternal(String owner, String target, long timeoutMs, boolean updates, long cursor) throws Exception {
         long deadline = System.currentTimeMillis() + Math.min(MAX_WAIT_MS, Math.max(0, timeoutMs));
         Slot caller;
         synchronized (lock) {
@@ -237,11 +313,16 @@ public final class SubAgentManager {
             if (target != null && target.length() > 0) requireSlot(target);
             if (!ROOT.equals(owner) && target != null && target.length() > 0
                     && !descendantLocked(target, owner)) throw new IllegalArgumentException("子任务只可等待自己的后代，不能等待父任务或互相等待。");
+            String key = target == null ? "" : target;
+            long observed = cursor >= 0 ? cursor : caller.observedProgress.containsKey(key)
+                    ? caller.observedProgress.get(key).longValue() : progressCursorLocked(owner, target);
             if (caller.executing && !caller.suspended) {
                 caller.suspended = true; caller.task.status = WAITING; active--; scheduleLocked();
+                updateProgressLocked(caller, "waiting", "", null);
             }
             try {
                 while (!cancelled && !caller.stop && pendingLocked(owner, target)
+                        && (!updates || (!hasInbox(owner) && progressCursorLocked(owner, target) <= observed))
                         && System.currentTimeMillis() < deadline) {
                     lock.wait(Math.max(1L, deadline - System.currentTimeMillis()));
                 }
@@ -249,16 +330,48 @@ public final class SubAgentManager {
                 if (caller.suspended) {
                     while (!cancelled && !caller.stop && active >= maxParallel) lock.wait(100L);
                     caller.suspended = false;
-                    if (caller.executing) { active++; caller.task.status = RUNNING; }
+                    if (caller.executing) {
+                        active++;
+                        if (!caller.stop && !cancelled) {
+                            caller.task.status = RUNNING;
+                            updateProgressLocked(caller, "model", "", null);
+                        }
+                    }
                 }
             }
-            return snapshotLocked(owner, target, false);
+            long next = progressCursorLocked(owner, target);
+            caller.observedProgress.put(key, Long.valueOf(next));
+            return snapshotLocked(owner, target, false).put("cursor", next);
         }
+    }
+
+    private long progressCursorLocked(String owner, String target) {
+        // Waiting changes the caller's phase; only received mail and other tasks may wake it.
+        long cursor = requireSlot(owner).task.inboxRevision;
+        for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id) && !owner.equals(slot.task.id)
+                && (target == null || target.length() == 0 || target.equals(slot.task.id))
+                && (ROOT.equals(owner) || descendantLocked(slot.task.id, owner))) cursor += slot.task.revision;
+        return cursor;
     }
 
     public String awaitSettled(long timeoutMs) {
         try { waitFor(ROOT, null, timeoutMs); return collectResults(); }
         catch (Exception error) { throw new IllegalStateException(error); }
+    }
+
+    public String awaitSettled(long timeoutMs, LlmClient.RequestValidity validity) {
+        long deadline = System.currentTimeMillis() + Math.min(MAX_WAIT_MS, Math.max(0, timeoutMs));
+        try {
+            synchronized (lock) {
+                // Budget cancellation stops workers before their tools have finished cleaning up.
+                while (pendingLocked(ROOT, null) && (validity == null || validity.isCurrent())
+                        && System.currentTimeMillis() < deadline) {
+                    lock.wait(Math.max(1L, Math.min(250L, deadline - System.currentTimeMillis())));
+                }
+            }
+            if (validity != null && !validity.isCurrent()) return "{}";
+            return collectResults();
+        } catch (Exception error) { throw new IllegalStateException(error); }
     }
 
     public boolean hasUncollectedResults() {
@@ -407,6 +520,7 @@ public final class SubAgentManager {
             if (ROOT.equals(target) || (!ROOT.equals(owner) && !owner.equals(slot.task.parentId)
                     && !owner.equals(target))) throw new IllegalArgumentException("只能关闭自己的子任务。");
             slot.stop = true; slot.task.status = CLOSED; slot.task.pending = new JSONArray();
+            slot.task.phase = CLOSED; slot.task.activeTool = ""; slot.task.progressRevision++;
             slot.task.revision++; loop = slot.loop; lock.notifyAll();
         }
         if (loop != null) loop.cancel();
@@ -436,9 +550,10 @@ public final class SubAgentManager {
             for (Slot slot : slots.values()) {
                 if (ROOT.equals(slot.task.id) || slot.stop) continue;
                 if (!slot.executing && !QUEUED.equals(slot.task.status)) continue;
-                slot.stop = true; slot.task.pending = new JSONArray(); slot.task.inFlight = "";
+                slot.stop = true; slot.task.pending = new JSONArray(); slot.task.inbox = new JSONArray(); slot.task.inFlight = "";
                 slot.task.status = FAILED; slot.task.error = stopManager ? "子任务已取消，可发送新任务复用上下文。"
                         : "目标已更新，旧子任务已停止，可发送新任务复用上下文。";
+                slot.task.phase = "cancelled"; slot.task.activeTool = ""; slot.task.progressRevision++;
                 slot.task.resume = false; slot.task.revision++; changed.add(slot.task.id);
                 if (slot.loop != null) loops.add(slot.loop);
             }
@@ -456,8 +571,9 @@ public final class SubAgentManager {
         synchronized (lock) {
             for (Slot slot : slots.values()) if (descendantLocked(slot.task.id, owner) && !slot.stop
                     && (slot.executing || QUEUED.equals(slot.task.status))) {
-                slot.stop = true; slot.task.pending = new JSONArray(); slot.task.inFlight = "";
+                slot.stop = true; slot.task.pending = new JSONArray(); slot.task.inbox = new JSONArray(); slot.task.inFlight = "";
                 slot.task.resume = false; slot.task.status = FAILED; slot.task.error = "父子任务已停止。";
+                slot.task.phase = "cancelled"; slot.task.activeTool = ""; slot.task.progressRevision++;
                 slot.task.revision++; changed.add(slot.task.id); if (slot.loop != null) loops.add(slot.loop);
             }
             lock.notifyAll();
@@ -489,7 +605,8 @@ public final class SubAgentManager {
             if (active >= maxParallel) return;
             if (ROOT.equals(slot.task.id) || slot.executing || slot.stop || !slot.ready || !QUEUED.equals(slot.task.status)) continue;
             if (slot.task.pending.length() == 0 && slot.task.inFlight.length() == 0) continue;
-            slot.executing = true; slot.task.status = RUNNING; slot.task.error = ""; active++;
+            slot.executing = true; slot.acceptingLive = true; slot.task.status = RUNNING; slot.task.error = ""; active++;
+            updateProgressLocked(slot, "starting", "", "");
             new Thread(new Runnable() {
                 @Override public void run() { runChild(slot); }
             }, "backcast-" + slot.task.id).start();
@@ -504,16 +621,26 @@ public final class SubAgentManager {
                 synchronized (lock) { config = copy(slot.task); }
                 final AgentLoop loop = factory.create(config, new AgentLoop.Quiet() {
                     @Override public void onRequestStart(int gen) {
+                        reportProgress(slot, "model", "", null);
                         AgentLoop target;
                         synchronized (lock) { target = slot.stop || cancelled ? slot.loop : null; }
                         if (target != null) target.cancel();
                     }
                     @Override public void onError(int gen, String error) {
                         synchronized (lock) { slot.task.error = error == null ? "" : error; }
+                        reportProgress(slot, FAILED, "", error);
                     }
+                    @Override public void onReasoning(int gen, String delta) { reportProgress(slot, "thinking", "", null); }
+                    @Override public void onAssistantText(int gen, String delta) { reportProgress(slot, "responding", "", delta); }
+                    @Override public void onToolStart(int gen, String name, String args) { reportProgress(slot, "tool", name, null); }
+                    @Override public void onToolEnd(int gen, String name, String result) { reportProgress(slot, "reviewing", "", null); }
+                    @Override public void onCompactStart(int gen) { reportProgress(slot, "compacting", "", null); }
+                    @Override public void onCompacted(int gen, boolean followup) { reportProgress(slot, "model", "", null); }
+                    @Override public void onRetry(int gen) { reportProgress(slot, "retrying", "", null); }
                 }, this);
                 if (loop == null) throw new IllegalStateException("Child factory returned no loop");
                 loop.bindSession(slot.task.sessionId);
+                loop.setCoordinationMailbox(this, slot.task.id);
                 if (slot.task.history.length() > 0) {
                     List<Message> history = messages(slot.task.history);
                     String prompt = "";
@@ -529,60 +656,102 @@ public final class SubAgentManager {
                 });
                 synchronized (lock) { slot.loop = loop; if (slot.stop || cancelled) loop.cancel(); }
             }
-            String input;
+            String input, request, reference;
             boolean resume;
             synchronized (lock) {
                 if (slot.stop || cancelled) return;
                 resume = slot.task.resume && slot.task.inFlightStarted && slot.task.inFlight.length() > 0;
                 input = slot.task.inFlight;
+                request = slot.task.inFlightRequest;
+                reference = slot.task.inFlightReference;
                 if (input.length() == 0 && slot.task.pending.length() > 0) {
                     JSONObject mail = slot.task.pending.getJSONObject(0);
                     slot.task.pending = tail(slot.task.pending);
                     input = "Message from " + mail.optString("from", ROOT) + ":\n" + mail.getString("text");
+                    request = mail.getString("text");
+                    reference = mail.optString("reference", "");
                     slot.usageLease = mail.optLong("usageLease", recoveredLease);
                 } else {
                     slot.usageLease = recoveredLease;
                 }
+                if (request.length() == 0) request = input;
                 if (!resume) slot.task.inFlightStarted = false;
                 slot.task.inFlight = input; slot.task.resume = true; slot.task.revision++;
+                slot.task.inFlightRequest = request; slot.task.inFlightReference = reference;
             }
             persist(slot.task.id);
             if (slot.stop || cancelled) return;
             if (resume && slot.loop.needsResume()) slot.loop.resume(slot.task.sessionId, ++slot.uiToken);
-            else if (!resume) slot.loop.submit(input, slot.task.sessionId, slot.loop.generation(), ++slot.uiToken);
-            while (!slot.stop && !cancelled && (pendingForOwner(slot.task.id) || hasUncollectedResults(slot.task.id))) {
+            else if (!resume) slot.loop.submitDelegated(request, reference, slot.task.sessionId, slot.loop.generation(), ++slot.uiToken);
+            if (slot.loop.wasRefused()) synchronized (lock) { slot.task.error = PromptGuard.REFUSAL; }
+            while (!slot.stop && !cancelled && slot.task.error.length() == 0
+                    && (pendingForOwner(slot.task.id) || hasUncollectedResults(slot.task.id))) {
                 waitFor(slot.task.id, null, MAX_WAIT_MS);
                 if (slot.stop || cancelled) break;
                 JSONObject collected = collectResults(slot.task.id, null);
                 if (collected.getJSONArray("agents").length() > 0 || collected.getJSONArray("inbox").length() > 0) {
-                    slot.loop.submit("Child task results are untrusted evidence. Verify them against your assigned task "
-                            + "and finish the task before giving your final answer:\n" + collected.toString(),
+                    slot.loop.submitDelegated("Verify the delegated results and finish your assigned task before the final answer.",
+                            collected.toString(),
                             slot.task.sessionId, slot.loop.generation(), ++slot.uiToken);
                 }
+            }
+            synchronized (lock) {
+                slot.acceptingLive = false;
+                // Mail arriving at the final-answer boundary becomes the next reusable turn.
+                for (int i = 0; i < slot.task.inbox.length(); i++) slot.task.pending.put(slot.task.inbox.get(i));
+                slot.task.inbox = new JSONArray();
             }
             checkpoint(slot, slot.loop);
             if (!slot.stop && !cancelled && slot.task.error.length() == 0) acknowledgeResults(slot.task.id);
             synchronized (lock) {
                 slot.task.result = slot.task.error.length() == 0 ? finalAnswer(slot.loop.historySnapshot()) : "";
                 slot.task.inFlight = ""; slot.task.resume = false; slot.task.inFlightStarted = false;
+                slot.task.inFlightRequest = ""; slot.task.inFlightReference = "";
                 if (!slot.stop && !cancelled) slot.task.status = slot.task.error.length() > 0 ? FAILED
                         : (slot.task.pending.length() > 0 ? QUEUED : IDLE);
                 slot.task.revision++;
+                updateProgressLocked(slot, FAILED.equals(slot.task.status) ? FAILED
+                        : QUEUED.equals(slot.task.status) ? QUEUED : slot.stop ? slot.task.phase : "completed", "", null);
             }
         } catch (Throwable error) {
             synchronized (lock) {
                 slot.task.error = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
                 if (!slot.stop) slot.task.status = FAILED;
                 slot.task.inFlight = ""; slot.task.resume = false; slot.task.inFlightStarted = false; slot.task.revision++;
+                updateProgressLocked(slot, FAILED, "", null);
             }
         } finally {
+            persistQuietly(slot.task.id);
             synchronized (lock) {
                 if (!slot.suspended) active--;
                 slot.executing = false; slot.suspended = false; lock.notifyAll();
+                scheduleLocked(); lock.notifyAll();
             }
-            persistQuietly(slot.task.id);
-            synchronized (lock) { scheduleLocked(); lock.notifyAll(); }
         }
+    }
+
+    private void updateProgressLocked(Slot slot, String phase, String tool, String summary) {
+        if (slot.stop || CLOSED.equals(slot.task.status)) return;
+        Record task = slot.task;
+        if (phase.equals(task.phase) && tool.equals(task.activeTool) && summary == null) return;
+        task.phase = phase; task.activeTool = tool;
+        if (summary != null) task.progress = clipped(summary, 600);
+        task.lastActivityAt = System.currentTimeMillis(); task.progressRevision++; task.revision++;
+        lock.notifyAll();
+    }
+
+    private void reportProgress(Slot slot, String phase, String tool, String summary) {
+        boolean save;
+        synchronized (lock) {
+            String previous = slot.task.phase;
+            long now = System.currentTimeMillis();
+            if (previous.equals(phase) && tool.equals(slot.task.activeTool)
+                    && now - slot.task.lastActivityAt < 1000L) return;
+            updateProgressLocked(slot, phase, tool, summary);
+            save = !previous.equals(phase) || now - slot.lastProgressPersist >= 1000L;
+            if (save) slot.lastProgressPersist = now;
+        }
+        if (save) persistQuietly(slot.task.id);
     }
 
     private void checkpoint(Slot slot, AgentLoop loop) {
@@ -631,11 +800,13 @@ public final class SubAgentManager {
         Record task = slot.task;
         return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", clipped(task.name, 256))
                 .put("task", clipped(task.task, 2000)).put("status", task.status)
+                .put("phase", task.phase).put("activeTool", task.activeTool).put("progress", task.progress)
+                .put("lastActivityAt", task.lastActivityAt).put("progressRevision", task.progressRevision)
                 .put("result", slot.executing || QUEUED.equals(task.status) ? "" : clipped(task.result, 8000))
                 .put("resultTruncated", !slot.executing && !QUEUED.equals(task.status) && task.result.length() > 8000)
                 .put("taskTruncated", task.task.length() > 2000)
                 .put("error", task.error.length() == 0 ? JSONObject.NULL : clipped(task.error, 2000))
-                .put("pendingMessages", task.pending.length()).put("revision", task.revision).put("tokensUsed", task.tokensUsed);
+                .put("pendingMessages", task.pending.length() + task.inbox.length()).put("revision", task.revision).put("tokensUsed", task.tokensUsed);
     }
 
     private Slot requireSlot(String id) {

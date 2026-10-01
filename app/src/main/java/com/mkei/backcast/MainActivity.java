@@ -139,6 +139,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private static final int HISTORY_FRAME_SIZE = 4;
     private final ExecutorService historyReader = Executors.newSingleThreadExecutor();
     private final ExecutorService childReader = Executors.newSingleThreadExecutor();
+    private final Map<AlertDialog, ChildRefresh> childRefreshers = new HashMap<AlertDialog, ChildRefresh>();
     private final ExecutorService toolkitReader = Executors.newCachedThreadPool();
     private final List<ToolkitOperation> toolkitOperations = new ArrayList<ToolkitOperation>();
     private final List<Runnable> historyEvents = new LinkedList<Runnable>();
@@ -664,6 +665,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         resetHistoryLoading();
         historyReader.shutdownNow();
         childReader.shutdownNow();
+        for (AlertDialog dialog : new ArrayList<AlertDialog>(childRefreshers.keySet())) dialog.dismiss();
         List<ToolkitOperation> pendingTools;
         synchronized (toolkitOperations) { pendingTools = new ArrayList<ToolkitOperation>(toolkitOperations); }
         for (ToolkitOperation operation : pendingTools) cancelToolkitOperation(operation);
@@ -1931,6 +1933,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 .setNegativeButton(android.R.string.cancel, null)
                 .setNeutralButton(R.string.sub_agents_refresh, null).create();
         dialog.show();
+        watchChildDialog(dialog, rows, source, sid, new Runnable() {
+            @Override public void run() { loadSubAgents(dialog, rows, source, sid); }
+        });
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { loadSubAgents(dialog, rows, source, sid); }
         });
@@ -1939,9 +1944,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private void loadSubAgents(final AlertDialog dialog, final LinearLayout rows,
             final AgentLoop source, final long sid) {
+        pauseChildRefresh(dialog);
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
-        rows.removeAllViews();
-        rows.addView(popupText(getString(R.string.sub_agents_loading), 14, R.color.text_secondary));
+        if (rows.getChildCount() == 0) rows.addView(popupText(getString(R.string.sub_agents_loading), 14, R.color.text_secondary));
         childReader.execute(new Runnable() {
             @Override public void run() {
                 final List<SubAgentManager.Record> records = new ArrayList<SubAgentManager.Record>();
@@ -1956,7 +1961,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 final String error = failure;
                 ui(new Runnable() {
                     @Override public void run() {
-                        if (isFinishing() || !dialog.isShowing()) return;
+                        if (activityDestroyed || isFinishing() || !dialog.isShowing()) return;
                         if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
                         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
                         rows.removeAllViews();
@@ -1967,12 +1972,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                                     ? R.string.sub_agents_disabled : R.string.sub_agents_empty), 14, R.color.text_secondary));
                         } else for (final SubAgentManager.Record record : records) {
                             TextView row = popupText(record.name + " · " + childStatus(record.status)
-                                    + "\n" + shortChildText(record.task, 180), 14, R.color.text_primary);
+                                    + "\n" + childPhase(record.phase) + (record.activeTool.length() == 0 ? "" : " · " + record.activeTool)
+                                    + "\n" + shortChildText(record.progress.length() == 0 ? record.task : record.progress, 180), 14, R.color.text_primary);
                             row.setPadding(0, dp(12), 0, dp(12));
                             row.setOnClickListener(new View.OnClickListener() {
                                 @Override public void onClick(View view) { showSubAgent(source, sid, record.id); }
                             });
                             rows.addView(row, fullWidth());
+                        }
+                        for (SubAgentManager.Record record : records) if (childActive(record.status)) {
+                            resumeChildRefresh(dialog); break;
                         }
                     }
                 });
@@ -2005,6 +2014,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 .setNeutralButton(R.string.sub_agents_refresh, null)
                 .setPositiveButton(R.string.sub_agents_stop, null).create();
         dialog.show();
+        watchChildDialog(dialog, body, source, sid, new Runnable() {
+            @Override public void run() { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -2); }
+        });
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -1); }
         });
@@ -2028,6 +2040,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private void loadSubAgent(final AlertDialog dialog, final TextView body, final Button earlier,
             final Button later, final int[] bounds, final AgentLoop source,
             final long sid, final String id, final boolean stop, final int before) {
+        pauseChildRefresh(dialog);
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
         earlier.setEnabled(false);
@@ -2045,25 +2058,28 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     SubAgentManager.Record record = manager.find(id);
                     status = record.status;
                     total = record.history.length();
-                    end = before < 0 ? total : Math.min(before, total);
+                    end = before == -2 && bounds[1] < bounds[2] ? Math.min(bounds[1], total)
+                            : before < 0 ? total : Math.min(before, total);
                     start = Math.max(0, end - 40);
                     text = childDetails(record, start, end);
                 } catch (Exception error) { text = getString(R.string.sub_agents_error, String.valueOf(error.getMessage())); }
                 final String details = text;
                 final int from = start, to = end, count = total;
                 final boolean canStop = !SubAgentManager.CLOSED.equals(status);
+                final boolean active = childActive(status);
                 ui(new Runnable() {
                     @Override public void run() {
-                        if (isFinishing() || !dialog.isShowing()) return;
+                        if (activityDestroyed || isFinishing() || !dialog.isShowing()) return;
                         if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
                         body.setText(details);
                         bounds[0] = from; bounds[1] = to; bounds[2] = count;
                         earlier.setEnabled(from > 0);
                         later.setEnabled(to < count);
                         ViewParent parent = body.getParent();
-                        if (parent instanceof ScrollView) ((ScrollView) parent).scrollTo(0, 0);
+                        if (before != -2 && parent instanceof ScrollView) ((ScrollView) parent).scrollTo(0, 0);
                         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
                         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(canStop);
+                        if (active) resumeChildRefresh(dialog);
                     }
                 });
             }
@@ -2072,7 +2088,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private String childDetails(SubAgentManager.Record record, int from, int to) throws Exception {
         StringBuilder text = new StringBuilder(record.name).append(" · ").append(childStatus(record.status))
-                .append("\n").append(record.id).append("\n\n")
+                .append("\n").append(record.id).append("\n").append(childPhase(record.phase));
+        if (record.activeTool.length() > 0) text.append(" · ").append(record.activeTool);
+        if (record.lastActivityAt > 0) text.append("\n").append(getString(R.string.sub_agents_updated,
+                android.text.format.DateFormat.format("HH:mm:ss", record.lastActivityAt)));
+        if (record.progress.length() > 0) text.append("\n").append(shortChildText(record.progress, 600));
+        text.append("\n\n")
                 .append(getString(R.string.sub_agents_task)).append('\n').append(shortChildText(record.task, 8000));
         if (record.result.length() > 0) text.append("\n\n").append(getString(R.string.sub_agents_result))
                 .append('\n').append(shortChildText(record.result, 8000));
@@ -2093,6 +2114,59 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             if (messageText.length() > limit) text.append('\n').append(getString(R.string.sub_agents_text_truncated));
         }
         return text.toString();
+    }
+
+    private final class ChildRefresh implements Runnable {
+        final AlertDialog dialog;
+        final View host;
+        final AgentLoop source;
+        final long sid;
+        final Runnable refresh;
+        ChildRefresh(AlertDialog dialog, View host, AgentLoop source, long sid, Runnable refresh) {
+            this.dialog = dialog; this.host = host; this.source = source; this.sid = sid; this.refresh = refresh;
+        }
+        @Override public void run() {
+            if (activityDestroyed || isFinishing() || !dialog.isShowing()) return;
+            if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
+            refresh.run();
+        }
+    }
+
+    private void watchChildDialog(final AlertDialog dialog, View host, AgentLoop source, long sid, Runnable refresh) {
+        childRefreshers.put(dialog, new ChildRefresh(dialog, host, source, sid, refresh));
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface ignored) {
+                pauseChildRefresh(dialog); childRefreshers.remove(dialog);
+            }
+        });
+    }
+
+    private void pauseChildRefresh(AlertDialog dialog) {
+        ChildRefresh refresh = childRefreshers.get(dialog);
+        if (refresh != null) refresh.host.removeCallbacks(refresh);
+    }
+
+    private void resumeChildRefresh(AlertDialog dialog) {
+        ChildRefresh refresh = childRefreshers.get(dialog);
+        if (refresh != null && dialog.isShowing()) {
+            refresh.host.removeCallbacks(refresh); refresh.host.postDelayed(refresh, 1000L);
+        }
+    }
+
+    private static boolean childActive(String status) {
+        return SubAgentManager.RUNNING.equals(status) || SubAgentManager.QUEUED.equals(status) || SubAgentManager.WAITING.equals(status);
+    }
+
+    private String childPhase(String phase) {
+        if ("tool".equals(phase)) return getString(R.string.sub_agents_phase_tool);
+        if ("thinking".equals(phase)) return getString(R.string.sub_agents_phase_thinking);
+        if ("responding".equals(phase)) return getString(R.string.sub_agents_phase_responding);
+        if ("reviewing".equals(phase)) return getString(R.string.sub_agents_phase_reviewing);
+        if ("compacting".equals(phase)) return getString(R.string.sub_agents_phase_compacting);
+        if ("retrying".equals(phase)) return getString(R.string.sub_agents_phase_retrying);
+        if ("completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
+        if ("model".equals(phase) || "starting".equals(phase)) return getString(R.string.sub_agents_phase_model);
+        return childStatus("cancelled".equals(phase) ? SubAgentManager.CLOSED : phase);
     }
 
     private static String shortChildText(String text, int limit) {

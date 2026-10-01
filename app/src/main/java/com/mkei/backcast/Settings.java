@@ -415,6 +415,13 @@ public class Settings {
                 + "independent task and explicit file ownership; avoid concurrent edits to the same files. "
                 + "The parent must collect the children's evidence, review and verify their results, "
                 + "and take responsibility for the final answer and goal status. "
+                + "Children must execute their assigned work with real tools and use send_message to report "
+                + "their current stage, evidence, blockers and questions to main. Messages to busy children "
+                + "arrive before their next model request. The parent should use list_agents and wait_agent "
+                + "with its returned cursor to monitor real progress and exchange instructions. "
+                + "A child's refusal or failed task is a failure, never a successful deliverable. "
+                + "Wait for required children to finish, collect their results, verify them and then give "
+                + "one final summary. Keep the parent working on independent integration work while children run. "
                 + "Do not mark the goal complete while required child work or review remains unfinished. ";
         if (AGENT_ULTRA.equals(mode)) {
             return policy + "Proactively identify independent subtasks and delegate them in parallel when doing so "
