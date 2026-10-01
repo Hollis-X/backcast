@@ -34,6 +34,11 @@
         <activity android:name=".SettingsActivity"
             android:label="@string/settings_title"/>
 
+        <activity android:name=".SubAgentsActivity"
+            android:label="@string/agent_panel_title"
+            android:exported="false"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"/>
+
         <service
             android:name=".AgentService"
             android:exported="false"

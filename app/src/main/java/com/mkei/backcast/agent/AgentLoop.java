@@ -187,6 +187,8 @@ public class AgentLoop {
     private volatile Tool runningTool;
     private volatile UsageObserver usageObserver;
     private volatile SubAgentManager subAgents;
+    private volatile boolean automaticDelegation;
+    private volatile AgentLoop delegationParent;
     private volatile SubAgentManager coordinationMailbox;
     private String coordinationOwner;
     private volatile boolean refused;
@@ -331,6 +333,10 @@ public class AgentLoop {
     public void setUsageObserver(UsageObserver observer) { usageObserver = observer; }
 
     public void setSubAgents(SubAgentManager manager) { subAgents = manager; }
+
+    public void setAutomaticDelegation(boolean enabled) { automaticDelegation = enabled; }
+
+    public void setDelegationParent(AgentLoop parent) { delegationParent = parent; }
 
     /** 设置权限级别，取值见 ApprovalGate。 */
     public void setAccessLevel(String level) {
@@ -693,9 +699,72 @@ public class AgentLoop {
     }
 
     public boolean delegationAllowed() {
+        AgentLoop parent = delegationParent;
+        if (parent != null) return parent.delegationAllowed();
         synchronized (lock) {
-            return !(goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus));
+            if (goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)) return false;
+            if (delegationForbidden()) return false;
+            return automaticDelegation || explicitDelegationAuthorized();
         }
+    }
+
+    public boolean delegationBudgetAllowsWork() {
+        synchronized (lock) { return !(goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)); }
+    }
+
+    private boolean explicitDelegationAuthorized() {
+        synchronized (lock) {
+            for (int i = history.size() - 1; i >= 0; i--) {
+                Message message = history.get(i);
+                if (!Message.USER.equals(message.role) || Goal.isSteer(message.content)
+                        || Goal.isNote(message.content) || message.coordinationIds != null
+                        || message.delegatedRequest != null) continue;
+                if (message.delegationAuthorized != null) return message.delegationAuthorized.booleanValue();
+                if (!Compactor.isSummary(message)) return !explicitlyForbidsDelegation(message.content)
+                        && (explicitlyRequestsDelegation(message.content) || goalOpen() && explicitlyRequestsDelegation(goalText));
+            }
+            return goalOpen() && explicitlyRequestsDelegation(goalText);
+        }
+    }
+
+    private boolean delegationForbidden() {
+        synchronized (lock) {
+            if (goalOpen() && explicitlyForbidsDelegation(goalText)) return true;
+            for (int i = history.size() - 1; i >= 0; i--) {
+                Message message = history.get(i);
+                if (!Message.USER.equals(message.role) || Goal.isSteer(message.content)
+                        || Goal.isNote(message.content) || message.coordinationIds != null
+                        || message.delegatedRequest != null) continue;
+                return message.delegationForbidden || !Compactor.isSummary(message)
+                        && explicitlyForbidsDelegation(message.content);
+            }
+            return false;
+        }
+    }
+
+    public static boolean explicitlyRequestsDelegation(String text) {
+        if (text == null) return false;
+        String request = delegationRequestText(text);
+        String agents = "(?:子\\s*agent|子代理|子智能体|sub[ -]?agents?|[两二三四五六七八九十0-9]+个\\s*agents?|多个\\s*agents?|多代理)";
+        if (explicitlyForbidsDelegation(text)) return false;
+        String chineseModifiers = "(?:\\s|[一两二三四五六七八九十0-9]+[个名]?|多个|新的|现有的|可用的){0,8}";
+        String englishModifiers = "\\s+(?:(?:a|an|the|two|multiple|new|existing|[0-9]+)\\s+)*";
+        return java.util.regex.Pattern.compile("(?:调用|使用|启动|创建|开启|开|委派给|分配给|派给|派|让|测试|交给)"
+                + chineseModifiers + agents + "|(?:use|spawn|start|create|delegate to|launch|test)" + englishModifiers + agents)
+                .matcher(request).find();
+    }
+
+    private static String delegationRequestText(String text) {
+        return text.toLowerCase(java.util.Locale.US).replaceAll("(?m)^>.*$", "")
+                .replaceAll("(?s)```.*?```", "")
+                .replaceAll("\"[^\"]*\"|“[^”]*”|‘[^’]*’|「[^」]*」", "");
+    }
+
+    private static boolean explicitlyForbidsDelegation(String text) {
+        if (text == null) return false;
+        String agents = "(?:子\\s*agent|子代理|子智能体|sub[ -]?agents?|[两二三四五六七八九十0-9]+个\\s*agents?|多个\\s*agents?|多代理)";
+        return java.util.regex.Pattern.compile("(?:不要|不许|禁止|不用|别|do not|don't|never)[^。.!?\\n]{0,32}"
+                + agents).matcher(delegationRequestText(text)).find();
     }
 
     /** 把当前这一段计时收进累计，之后不再往上走。 */
@@ -1169,6 +1238,15 @@ public class AgentLoop {
                 resumeAfter = false;
                 armTurnClock();
                 user.workDir = workspace;
+                if (user.delegatedRequest == null) {
+                    String text = user.content == null ? "" : user.content.trim();
+                    boolean continuing = "继续".equals(text) || "继续啊".equals(text)
+                            || "continue".equalsIgnoreCase(text) || "resume".equalsIgnoreCase(text);
+                    user.delegationForbidden = explicitlyForbidsDelegation(text) || continuing && delegationForbidden();
+                    user.delegationAuthorized = Boolean.valueOf(!user.delegationForbidden && (explicitlyRequestsDelegation(text)
+                            || continuing && explicitDelegationAuthorized()
+                            || goalOpen() && explicitlyRequestsDelegation(goalText)));
+                }
                 history.add(user);
             }
             beginTemporaryTurn();
@@ -1407,6 +1485,8 @@ public class AgentLoop {
 
             Message handoff = Message.user(Compactor.wrap(summary));
             handoff.resumeAfterCompaction = followup;
+            handoff.delegationAuthorized = Boolean.valueOf(explicitDelegationAuthorized());
+            handoff.delegationForbidden = delegationForbidden();
             handoff.goalFinalReply = followup && lastToolsClosedGoal();
             List<Message> fresh;
             synchronized (lock) {
@@ -1458,6 +1538,8 @@ public class AgentLoop {
                         Message tail = Message.user(truncateUserText(m.content, remaining - 4));
                         tail.workDir = m.workDir;
                         tail.delegatedRequest = m.delegatedRequest;
+                        tail.delegationAuthorized = m.delegationAuthorized;
+                        tail.delegationForbidden = m.delegationForbidden;
                         users.add(0, tail);
                     }
                     break;
@@ -1726,7 +1808,7 @@ public class AgentLoop {
         if (refuseDisclosure(sessionId, gen, token)) {
             return;
         }
-        JSONArray schema = registry.isEmpty() ? null : registry.toSchema();
+        JSONArray schema = requestSchema();
         int strikes = 0;
         boolean compactedAfterOverflow = false;
         boolean finishingGoal = lastToolsClosedGoal();
@@ -1762,6 +1844,7 @@ public class AgentLoop {
                 collectDelegatedResults(childrenReady, false, token, gen);
             }
             primeSteer(token, gen, sessionId);
+            schema = requestSchema();
             if (budgetPromptDue()) addSteer(token, gen, sessionId, false);
             synchronized (lock) {
                 if (stale(token, gen)) {
@@ -2391,6 +2474,21 @@ public class AgentLoop {
             sb.append(t.name());
         }
         return sb.length() == 0 ? "（无）" : sb.toString();
+    }
+
+    private JSONArray requestSchema() {
+        if (registry.isEmpty()) return null;
+        JSONArray all = registry.toSchema();
+        if (delegationAllowed()) return all;
+        JSONArray allowed = new JSONArray();
+        for (int i = 0; i < all.length(); i++) {
+            JSONObject item = all.optJSONObject(i);
+            JSONObject function = item == null ? null : item.optJSONObject("function");
+            String name = function == null ? "" : function.optString("name", "");
+            if ("spawn_agent".equals(name) || delegationParent == null && "send_message".equals(name)) continue;
+            allowed.put(item);
+        }
+        return allowed.length() == 0 ? null : allowed;
     }
 
     /** 首次提交、压缩恢复、目标改写都在请求前补规则，不创建新的界面轮次。 */

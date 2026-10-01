@@ -23,6 +23,7 @@ public final class SubAgentTools implements Tool {
     @Override public String name() { return name; }
     @Override public String description() {
         if ("spawn_agent".equals(name)) return "创建独立子任务并并行执行。只委派可独立推进的具体工作；可选携带有界父上下文。"
+                + "只有 ultra 允许主动派活；其他思考程度仅在真实用户明确要求子 agent 时可调用。"
                 + "返回任务 id 后可发送追加任务复用空闲子 agent，最终交付前必须等待并收集结果，不要重复自己已委派的工作。";
         if ("send_message".equals(name)) return "向同会话 agent 通信。目标main表示主会话；忙碌子任务在下一次模型请求前收到消息，空闲子任务复用上下文执行。主动汇报阶段、证据、问题和完成结果。";
         if ("list_agents".equals(name)) return "查看当前会话子任务状态、最终结果、待处理消息及发给自己的收件箱。";

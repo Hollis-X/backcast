@@ -138,18 +138,17 @@ public final class SettingsChoiceRegressionTest {
                 + "static class Icons { static Object tinted(SettingsActivity a,int id,int color,int size){return new Object();} }"
                 + "static class android { static class R { static class layout { static final int simple_spinner_item=1; } } }"
                 + "static class R { static class layout { static final int settings_choice_item=2; }"
-                + "static class string {static final int toast_saved=20,agent_status_ultra=21,agent_status_normal=22,agent_status_off=23;}"
+                + "static class string {static final int toast_saved=20,agent_status_ultra=21,agent_status_normal=22;}"
                 + "static class color { static final int text_primary=3; }"
                 + "static class drawable { static final int bg_settings_choice_selected=4,ic_ds_checkmark_lg_regular_24=5; }"
                 + "static class id { static final int choice_title=6,choice_description=7,choice_check=8; } }"
                 + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(SettingsActivity a,int r,int d){return new Toast();}void show(){}}"
-                + "static class Settings{static final String AGENT_ULTRA=\"ultra\",AGENT_OFF=\"off\",EFFORT_MAX=\"max\";"
+                + "static class Settings{static final String AGENT_ULTRA=\"ultra\",AGENT_MANUAL=\"manual\",EFFORT_ULTRA=\"ultra\";"
                 + "Map<String,Object> preferences=new HashMap<String,Object>();int writes;Settings(){}Settings(SettingsActivity a){preferences=a.settings.preferences;}"
                 + "void save(String u,String k,String m,boolean r,String p){preferences.put(\"root\",r);preferences.put(\"prompt\",p);writes++;}"
                 + "void setOutputVerbosity(String s){preferences.put(\"verbosity\",s);writes++;}"
                 + "void setReasoningSummary(String s){preferences.put(\"summary\",s);writes++;}"
                 + "void setOutputLanguage(String s){preferences.put(\"language\",s);writes++;}"
-                + "void setAgentMode(String s){preferences.put(\"mode\",s);writes++;}"
                 + "void setAgentConcurrency(int s){preferences.put(\"concurrency\",s);writes++;}"
                 + "void setReasoningEffort(String s){preferences.put(\"effort\",s);writes++;}"
                 + "String environmentContext(boolean r,String m,int c){return r+\"/\"+m+\"/\"+c;}}"
@@ -157,10 +156,10 @@ public final class SettingsChoiceRegressionTest {
                 + "Settings settings=new Settings();int finishes,lastStatus;Object[] lastStatusArgs;void finish(){finishes++;}"
                 + "String getString(int r,Object...args){lastStatus=r;lastStatusArgs=args;return r+Arrays.toString(args);}"
                 + "EditText baseUrl=new EditText(),apiKey=new EditText(),model=new EditText(),systemPrompt=new EditText();CheckBox useRoot=new CheckBox();"
-                + "Spinner outputVerbosity=new Spinner(),reasoningSummary=new Spinner(),outputLanguage=new Spinner(),agentMode=new Spinner(),agentConcurrency=new Spinner(),reasoningEffort=new Spinner();"
+                + "Spinner outputVerbosity=new Spinner(),reasoningSummary=new Spinner(),outputLanguage=new Spinner(),agentConcurrency=new Spinner(),reasoningEffort=new Spinner();"
                 + "Resources getResources(){return resources;} View findViewById(int id){return description;} Inflater getLayoutInflater(){return new Inflater();}"
                 + members.get("OUTPUT_VERBOSITY_VALUES")+members.get("REASONING_SUMMARY_VALUES")+members.get("OUTPUT_LANGUAGE_VALUES")
-                + members.get("AGENT_MODE_VALUES")+members.get("AGENT_CONCURRENCY_VALUES")+members.get("REASONING_EFFORT_VALUES")
+                + members.get("AGENT_CONCURRENCY_VALUES")+members.get("REASONING_EFFORT_VALUES")
                 + members.get("saveSettings")+members.get("refreshAgentPreview")+members.get("onChoiceChanged")
                 + "View.OnClickListener saveAction="+members.get("saveAction")+";View.OnClickListener backAction="+members.get("backAction")+";"
                 + members.get("bindChoices") + members.get("ChoiceAdapter") + members.get("ChoiceRow")
@@ -180,10 +179,10 @@ public final class SettingsChoiceRegressionTest {
         Class<?> activityType=loader.loadClass("SettingsActivity"), spinnerType=loader.loadClass("SettingsActivity$Spinner"),
                 viewType=loader.loadClass("SettingsActivity$View"),groupType=loader.loadClass("SettingsActivity$ViewGroup");
         java.lang.reflect.Constructor<?> spinnerConstructor=spinnerType.getDeclaredConstructor();spinnerConstructor.setAccessible(true);
-        String[] keys={"output_verbosity","reasoning_summary","output_language","agent_mode","agent_concurrency","reasoning_effort"};
+        String[] keys={"output_verbosity","reasoning_summary","output_language","agent_concurrency","reasoning_effort"};
         String[][] values={{"default","low","medium","high"},{"auto","concise","detailed","none"},
-                {"zh-CN","zh-TW","en","ja","ko","es","fr","de"}, {"off","manual","ultra"},
-                {"1","2","3","4"},{"off","low","medium","high","max"}};
+                {"zh-CN","zh-TW","en","ja","ko","es","fr","de"},
+                {"1","2","3","4"},{"off","low","medium","high","max","ultra"}};
         for(int k=0;k<keys.length;k++) {
             String[] labels=array(strings,keys[k]+"_labels"),descriptions=array(strings,keys[k]+"_descriptions");
             check(labels.length==values[k].length && descriptions.length==labels.length,"aligned arrays "+keys[k]);
@@ -237,38 +236,40 @@ public final class SettingsChoiceRegressionTest {
     private static void saveAndPreviewBehaviors(Class<?> type) throws Exception {
         Object activity=type.getConstructor().newInstance(), settings=field(activity,"settings");
         for(String name:new String[]{"baseUrl","apiKey","model","systemPrompt"}) field(field(activity,name),"text",name);
-        String[] spinners={"outputVerbosity","reasoningSummary","outputLanguage","agentMode","agentConcurrency","reasoningEffort"};
-        int[] selected={2,3,2,2,3,0};
+        String[] spinners={"outputVerbosity","reasoningSummary","outputLanguage","agentConcurrency","reasoningEffort"};
+        int[] selected={2,3,2,3,5};
         for(int i=0;i<spinners.length;i++) field(field(activity,spinners[i]),"position",selected[i]);
         call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
         @SuppressWarnings("unchecked") Map<String,Object> values=(Map<String,Object>)field(settings,"preferences");
         check(values.isEmpty() && (Integer)field(settings,"writes")==0,"unsaved preview wrote settings");
-        check(!(Boolean)field(field(activity,"reasoningEffort"),"enabled")
-                && "max".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"ultra did not show/lock effective max");
-        check((Integer)field(field(activity,"reasoningEffort"),"position")==0,"ultra destroyed configured off");
+        check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
+                && "ultra".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"ultra was mapped to another effort or locked the selector");
+        check((Integer)field(field(activity,"reasoningEffort"),"position")==5,"ultra was not an independent effort choice");
         check("false/ultra/4".equals(field(field(activity,"envContext"),"text")),"unsaved mode/count preview was stale");
-        pass("ultra preview uses max without saving or changing the user's off selection");
+        pass("ultra preview keeps the selected ultra value without persisting the draft");
         Object back=field(activity,"backAction");
         call(back,"onClick",new Class[]{Class.forName("SettingsActivity$View",true,type.getClassLoader())},(Object)null);
         check(values.isEmpty() && (Integer)field(activity,"finishes")==1,"returning from settings persisted drafts");
         pass("returning from settings discards the unsaved agent draft");
         Object save=field(activity,"saveAction");
         call(save,"onClick",new Class[]{Class.forName("SettingsActivity$View",true,type.getClassLoader())},(Object)null);
-        check("ultra".equals(values.get("mode")) && Integer.valueOf(4).equals(values.get("concurrency"))
-                && "off".equals(values.get("effort")) && "en".equals(values.get("language"))
+        check(!values.containsKey("mode") && Integer.valueOf(4).equals(values.get("concurrency"))
+                && "ultra".equals(values.get("effort")) && "en".equals(values.get("language"))
                 && "none".equals(values.get("summary")) && "medium".equals(values.get("verbosity")),"save ignored one of the choices");
         check((Integer)field(activity,"finishes")==2,"save did not retain the existing return behavior");
         pass("explicit save writes all agent and response choices before returning");
-        field(field(activity,"agentMode"),"position",0);
+        field(field(activity,"reasoningEffort"),"position",4);
         call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
         check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
-                && !(Boolean)field(field(activity,"agentConcurrency"),"enabled"),"off did not disable the unused concurrency control");
-        field(field(activity,"agentMode"),"position",1);
+                && (Boolean)field(field(activity,"agentConcurrency"),"enabled")
+                && "max".equals(((Object[])field(activity,"lastStatusArgs"))[1])
+                && "false/manual/4".equals(field(field(activity,"envContext"),"text")),"max preview still used ultra delegation");
+        field(field(activity,"reasoningEffort"),"position",0);
         call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
         check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
                 && (Boolean)field(field(activity,"agentConcurrency"),"enabled")
                 && "off".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"manual did not restore the user's configured effort");
-        pass("mode switching restores off compatibility and enables only relevant controls");
+        pass("max and off remain independently selectable and require explicit delegation");
     }
     public static void main(String[] args) throws Exception {
         Path root=Paths.get(args[0]),build=Files.createTempDirectory("backcast-settings-choice-");

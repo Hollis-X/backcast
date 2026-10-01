@@ -1,0 +1,723 @@
+{
+  "version": "2026.10.01",
+  "apktool": "2.9.3",
+  "radare2": "6.2.2",
+  "objection": "1.12.5",
+  "patches": [
+    "Apktool Res9patchStreamDecoder: replace desktop AWT/ImageIO with Android Bitmap APIs",
+    "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix",
+    "Materialize upstream internal symlinks as regular copies for private extraction",
+    "Exclude desktop aapt binaries; include Android aapt2",
+    "Exclude unneeded pip and Frida tracer web UI"
+  ],
+  "converter": {
+    "tool": "Google R8/D8 8.3.37",
+    "sha256": "900dfbc649519969fc5a4c7520d6b7355338e565fa1249874e0190b8d61b1199",
+    "dex_min_api": 26
+  },
+  "artifacts": [
+    {
+      "asset": "toolchain/common.tar.gz",
+      "abi": "any",
+      "min_sdk": 26,
+      "sha256": "1bde3177dc1ff3efbd737de35ce8596839a98a6db40daf9da74380dc84bd5653",
+      "bytes": 9465375
+    },
+    {
+      "asset": "toolchain/arm64-v8a.tar.gz",
+      "abi": "arm64-v8a",
+      "min_sdk": 24,
+      "sha256": "43e5d4244b0d58c256a8ba2b95d0fd9ca1d419d8fc927580bf01deb93bf8f87c",
+      "bytes": 91523495,
+      "excluded_upstream_host_tools": [
+        "radare2/bin/r2sdb"
+      ]
+    },
+    {
+      "asset": "toolchain/armeabi-v7a.tar.gz",
+      "abi": "armeabi-v7a",
+      "min_sdk": 24,
+      "sha256": "7420915b916e12faa7c3f9f701812fce1fc72be0c4387ca2e953c8f5cbf39635",
+      "bytes": 64829051,
+      "excluded_upstream_host_tools": [
+        "radare2/bin/r2sdb"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/iBotPeaches/Apktool/v2.9.3/LICENSE.md",
+      "sha256": "c49c53fdc79e1143a1892eb7333b595eecdbe40623e72be325267db28cb72114",
+      "bytes": 10766
+    },
+    {
+      "url": "https://raw.githubusercontent.com/radareorg/radare2/6.2.2/COPYING.md",
+      "sha256": "c4154ac363318953bc18c8faf4b41dad3457ee51475d63e708db7b41570ffa79",
+      "bytes": 825
+    },
+    {
+      "url": "https://raw.githubusercontent.com/frida/frida-core/17.2.14/COPYING",
+      "sha256": "5ea1544b51a28bc823b03159190d4108f9fb4f4ef912389f5137c6d295e175b2",
+      "bytes": 2416
+    },
+    {
+      "url": "https://raw.githubusercontent.com/sensepost/objection/1.12.5/LICENSE",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "bytes": 35147
+    },
+    {
+      "url": "https://raw.githubusercontent.com/python/cpython/v3.14.6/LICENSE",
+      "sha256": "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231",
+      "bytes": 13804
+    },
+    {
+      "url": "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar",
+      "sha256": "7956eb04194300ce0d0a84ad18771eebc94b89fb8d1ddcce8ea4c056818646f4",
+      "bytes": 23254968
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/26/79/e329b43f31c6ee0f665c1511593e9742d4912e14fff4d40a6ab666cf6e47/objection-1.12.5-py3-none-any.whl",
+      "sha256": "dad1e06f6f79a31f82fef067e5f29a27b02729157c72bb91974289f4742b0d64",
+      "bytes": 342189
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/7f/9c/34f6962f9b9e9c71f6e5ed806e0d0ff03c9d1b0b2340088a0cf4bce09b18/flask-3.1.3-py3-none-any.whl",
+      "sha256": "f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c",
+      "bytes": 103424
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz",
+      "sha256": "722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698",
+      "bytes": 80313
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/41/63/23572870e01836a98346075b9e17a8bc24a6ddd9800a3204ceee58677f3c/websockets-17.1-py3-none-any.whl",
+      "sha256": "f221081107b8c48184d99f7019604486376e7ef826037e70aad6b02540732c23",
+      "bytes": 211134
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/db/a1/2221a671b7f7bca22d72beca6bfa14ee252f3a4d08272bece10ed96cc2f5/litecli-1.17.1-py3-none-any.whl",
+      "sha256": "4d1743dfa086b178de6543b36f1780203e8a9bc99643af4b721f6c880c5aa7a9",
+      "bytes": 57156
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/1e/dd/39ecd612e3c26f86e635f958237a8def3296543168c1b50433a3a5aa6872/cli_helpers-2.15.1-py3-none-any.whl",
+      "sha256": "e2674e890db63b2451750d3441f42aabb95bd5b4bcdcdb64ca92538e59a7621f",
+      "bytes": 21514
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a6/c4/0679472c60052c27efa612b4cd3ddd2a23e885dcdc73461781d2c802d39e/configobj-5.0.9-py2.py3-none-any.whl",
+      "sha256": "1ba10c5b6ee16229c79a05047aeda2b55eb4e80d7c7d8ecf17ec1ca600c79882",
+      "bytes": 35615
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/d9/50/f00935da0ec7cbf325f8dc4f772ae46fbc7b672dd62876e73f0a94adda57/sqlparse-0.6.0-py3-none-any.whl",
+      "sha256": "b861c0288ce2fa56209a9a6412d2e066ac664b3873b89c26c9d8415e8e32996f",
+      "bytes": 50070
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl",
+      "sha256": "ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc",
+      "bytes": 8458
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "bytes": 136983
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/fc/ad/d07d7862a62ffa6d79d68074d14823243dd235a77c45262acbf6adeb28bf/charset_normalizer-3.5.2-py3-none-any.whl",
+      "sha256": "b6b751274acb69d77b3323d6b7dbaa3c7fdfc1eb829b7eb61d262f32e1af9685",
+      "bytes": 68872
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl",
+      "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+      "bytes": 125251
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+      "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6",
+      "bytes": 25335
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a7/c2/2860c52ef858c4672b6cf637f473e9139342cdb281135db9b3c32cfb0a85/delegator.py-0.1.1-py2.py3-none-any.whl",
+      "sha256": "814657d96b98a244c479e3d5f6e9e850ac333e85f807d6bc846e72bbb2537806",
+      "bytes": 5036
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+      "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+      "bytes": 69583
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl",
+      "sha256": "c6242fc49e35958c8b15141343aa660db5fc54d4f13a1db01a3f5891b98700ef",
+      "bytes": 16234
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "bytes": 134899
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl",
+      "sha256": "9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a",
+      "bytes": 91687
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl",
+      "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8",
+      "bytes": 9979
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "bytes": 129956
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/9e/c3/059298687310d527a58bb01f3b1965787ee3b40dce76752eda8b44e9a2c5/pexpect-4.9.0-py2.py3-none-any.whl",
+      "sha256": "7236d1e080e4936be2dc3e326cec0af72acf9212a7e1d060210e70a47e253523",
+      "bytes": 63772
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/54/6f/84908cad2d6aa5144abcf7b42709fe4fdb459bc640ec7ac5786e7693dabc/prompt_toolkit-3.0.53-py3-none-any.whl",
+      "sha256": "01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2",
+      "bytes": 392288
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/22/a6/858897256d0deac81a172289110f31629fc4cee19b6f01283303e18c8db3/ptyprocess-0.7.0-py2.py3-none-any.whl",
+      "sha256": "4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35",
+      "bytes": 13993
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl",
+      "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9",
+      "bytes": 1250147
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a9/4b/0a906d8184f011ff8dbd4722743783867589b33269d2c5fff238d636fdcb/pymysql-1.2.3-py3-none-any.whl",
+      "sha256": "14f1c68e2ed859243ae5ca41ffbe677027fc46bc136a9f0be8a4e928e5e7415a",
+      "bytes": 46740
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "bytes": 73075
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl",
+      "sha256": "33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb",
+      "bytes": 310654
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/be/02/bce7a1d70e9d0f6ea8623c16386138c251b5855af6cd3a11433d3fba4e66/semver-3.1.0-py3-none-any.whl",
+      "sha256": "6e4998f8b4762acdfea85f9bfd5b4032e0bb50038dc04bf82011b42d5d1145c5",
+      "bytes": 18783
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl",
+      "sha256": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+      "bytes": 818216
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/99/55/db07de81b5c630da5cbf5c7df646580ca26dfaefa593667fc6f2fe016d2e/tabulate-0.10.0-py3-none-any.whl",
+      "sha256": "f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3",
+      "bytes": 39814
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/c4/fb/ea621e0a19733e01fe4005d46087d383693c0f4a8f824b47d8d4122c87e0/terminaltables-3.1.10-py2.py3-none-any.whl",
+      "sha256": "e4fdc4179c9e4aab5f674d80f09d76fa436b96fdc698a8505e0a36bf0804a874",
+      "bytes": 15155
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "bytes": 135717
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/96/a2/f06f2e0be4895e5943d358755b51968ace85774cf0a4cc42b4dafb793832/wcwidth-0.9.1-py3-none-any.whl",
+      "sha256": "e0c3a1c45c5b9550c6919a4449e95f5b177f6e165786376981db8f1addae9b21",
+      "bytes": 300656
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a1/38/df03f564f43cec2684823f3cccae1a652ee7face1cbaa76fb223096e64d7/werkzeug-3.1.9-py3-none-any.whl",
+      "sha256": "6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab",
+      "bytes": 228700
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/a/aapt2/aapt2_16.0.0.4-2_aarch64.deb",
+      "sha256": "ae91c1c1cf743098a4d847e6d44e37a8fd8b83e00548ad7e50e8fbdc4ef0741e",
+      "bytes": 962720,
+      "package": "aapt2",
+      "version": "16.0.0.4-2",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/a/abseil-cpp/abseil-cpp_20260526.0_aarch64.deb",
+      "sha256": "e489fac652cddc39d9436141e627285f1034a545a06fbb19c420514a419ad877",
+      "bytes": 1197740,
+      "package": "abseil-cpp",
+      "version": "20260526.0",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/b/binutils/binutils_2.47_aarch64.deb",
+      "sha256": "332175eb2621c591f4ef80e335ddd42af8fef0d34cccd28123fc19ace8be8f74",
+      "bytes": 2445400,
+      "package": "binutils",
+      "version": "2.47",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/c/ca-certificates/ca-certificates_1:2026.09.25_all.deb",
+      "sha256": "57fab24bf4561bfdd35afe71bc1929914e51c35458cfd1fca2b15e54bc8df7af",
+      "bytes": 105404,
+      "package": "ca-certificates",
+      "version": "1:2026.09.25",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/f/fmt/fmt_1:11.2.0-1_aarch64.deb",
+      "sha256": "dad595afcb3b1096d725c6772c0c5531764caa5841affba3c533c6298a32ab08",
+      "bytes": 168824,
+      "package": "fmt",
+      "version": "1:11.2.0-1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-root/pool/stable/f/frida/frida_17.2.14-4_aarch64.deb",
+      "sha256": "dc10033ad58942bcdc82b491ba74c4764ca6883d2dfacc88a4b36b469f5a5a24",
+      "bytes": 31643684,
+      "package": "frida",
+      "version": "17.2.14-4",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-root/pool/stable/f/frida-python/frida-python_17.2.14-4_aarch64.deb",
+      "sha256": "2abca9c0b6d209c2c5665318b13d7379df9e5be144c7c8d1a0be6f175676bbd6",
+      "bytes": 19696164,
+      "package": "frida-python",
+      "version": "17.2.14-4",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/g/gdbm/gdbm_1.26-1_aarch64.deb",
+      "sha256": "c378de833aae3cf41f3028491ea11836479d9833ab653edc27d0c0e0e691d5c5",
+      "bytes": 150284,
+      "package": "gdbm",
+      "version": "1.26-1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-posix-semaphore/libandroid-posix-semaphore_0.1-4_aarch64.deb",
+      "sha256": "0efa8677a0166315ba4e685863712eba0ca0a1732827492f38226e2723730c7a",
+      "bytes": 4076,
+      "package": "libandroid-posix-semaphore",
+      "version": "0.1-4",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-support/libandroid-support_29-1_aarch64.deb",
+      "sha256": "f2f145d6135ad4843ac9670153be3e3944dc1e6f1736d46d2306c28f2b86f517",
+      "bytes": 10880,
+      "package": "libandroid-support",
+      "version": "29-1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libb/libbz2/libbz2_1.0.8-8_aarch64.deb",
+      "sha256": "4335d7f060650b0aabef545d1334c2f9f280223d5962e13c24a00ec934b794ba",
+      "bytes": 26116,
+      "package": "libbz2",
+      "version": "1.0.8-8",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libc++/libc++_30_aarch64.deb",
+      "sha256": "53d0b84a7ba7459024257cb94d5b136fe13ef858567f65a8064b35950799f2ca",
+      "bytes": 341604,
+      "package": "libc++",
+      "version": "30",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libcrypt/libcrypt_0.2-6_aarch64.deb",
+      "sha256": "6c283eed576b98cc3568f99638156f8588f77d979579d03bef8683d6eb8601e1",
+      "bytes": 8880,
+      "package": "libcrypt",
+      "version": "0.2-6",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libe/libexpat/libexpat_2.8.5_aarch64.deb",
+      "sha256": "3b2c9b061fa890b69b88d2f5dd993efba902d678fe8e1990268892d1faf15e5e",
+      "bytes": 98900,
+      "package": "libexpat",
+      "version": "2.8.5",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libf/libffi/libffi_3.8.0_aarch64.deb",
+      "sha256": "4f255badf74cd31f6a2801c17fa1444199c84c834b517b7c843e2fe9ebe91d77",
+      "bytes": 37592,
+      "package": "libffi",
+      "version": "3.8.0",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libl/liblzma/liblzma_5.8.4_aarch64.deb",
+      "sha256": "44e95e6e60dddb3705e60a344a4f009a1085a210797342b721eaff41b44033c0",
+      "bytes": 194796,
+      "package": "liblzma",
+      "version": "5.8.4",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libp/libpng/libpng_1.6.59_aarch64.deb",
+      "sha256": "32d61f0b1a60cf7283aa3a80e288737493df2c6b84c8c749606b77c94a10f2b2",
+      "bytes": 195892,
+      "package": "libpng",
+      "version": "1.6.59",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libp/libprotobuf/libprotobuf_2:35.1_aarch64.deb",
+      "sha256": "a1ba7c7f0e5903a2134662653d3e7b9ffceaa78bdd00e07ac985e2d313ebc738",
+      "bytes": 1387016,
+      "package": "libprotobuf",
+      "version": "2:35.1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libs/libsqlite/libsqlite_3.53.4_aarch64.deb",
+      "sha256": "0e909ce0d50fe123305446cd22e0c5edf535d40344b9b065fbdcdee52f53198d",
+      "bytes": 759764,
+      "package": "libsqlite",
+      "version": "3.53.4",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libz/libzopfli/libzopfli_1.0.3-5_aarch64.deb",
+      "sha256": "95cd7cb2209fbafb25825f5fcd4f86f021512175608e038b1c3d8d3fa0a4fe40",
+      "bytes": 119064,
+      "package": "libzopfli",
+      "version": "1.0.3-5",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/ncurses/ncurses_6.6.20260307+really6.5.20250830_aarch64.deb",
+      "sha256": "f44bbfdc3d42ec0217bffa978309390e59cea5a48a9a83226d4a496c42ad0b99",
+      "bytes": 557792,
+      "package": "ncurses",
+      "version": "6.6.20260307+really6.5.20250830",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/ncurses-ui-libs/ncurses-ui-libs_6.6.20260307+really6.5.20250830_aarch64.deb",
+      "sha256": "7393f369009be189b3d4ec1f9b16ebd57621d6a1b22949ae07685573950d1f37",
+      "bytes": 32940,
+      "package": "ncurses-ui-libs",
+      "version": "6.6.20260307+really6.5.20250830",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/o/openssl/openssl_1:3.6.5_aarch64.deb",
+      "sha256": "a2fb7856875e63ef6b90442752e05974813372c3ca86d2513a78ea43c67a0f8b",
+      "bytes": 2482764,
+      "package": "openssl",
+      "version": "1:3.6.5",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python/python_3.14.6-1_aarch64.deb",
+      "sha256": "3166e56c2b6c03fff41191fbb9d736302978e7c484702814d9f6dc99dd6006bd",
+      "bytes": 4816756,
+      "package": "python",
+      "version": "3.14.6-1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python-pip/python-pip_26.2.1_all.deb",
+      "sha256": "92a9cb4b3c99dd20086f90fedc95c604eefc5bd0f88d1862690884474f82de44",
+      "bytes": 1190440,
+      "package": "python-pip",
+      "version": "26.2.1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/r/readline/readline_8.3.6_aarch64.deb",
+      "sha256": "616cc73009bc0223f61caed8dd09455714455aa5ea5e180126e2f69c4c775136",
+      "bytes": 294164,
+      "package": "readline",
+      "version": "8.3.6",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/t/termux-licenses/termux-licenses_2.2_all.deb",
+      "sha256": "a3265cd1cf7d04754f2fb683eaf5b21918263792fd714457127900c1d6d9bcd9",
+      "bytes": 52276,
+      "package": "termux-licenses",
+      "version": "2.2",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zlib/zlib_1.3.2_aarch64.deb",
+      "sha256": "75e7d0af17fcc3b40004309fdc00a1ddb9ae08346dce5e269902c34ac3966ac9",
+      "bytes": 62840,
+      "package": "zlib",
+      "version": "1.3.2",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zstd/zstd_1.5.7-1_aarch64.deb",
+      "sha256": "e1b4a5113648da8de189620ba1fce74c48b2d0833d9043391b9a1c91fb606fd3",
+      "bytes": 360488,
+      "package": "zstd",
+      "version": "1.5.7-1",
+      "abi": "arm64-v8a"
+    },
+    {
+      "url": "https://github.com/radareorg/radare2/releases/download/6.2.2/radare2-6.2.2-android-aarch64.tar.gz",
+      "sha256": "228bf58c44fbd9f3afd37ba545ef73155415150849dbd576ad1fd89789082c9f",
+      "bytes": 24450877
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/a/aapt2/aapt2_16.0.0.4-2_arm.deb",
+      "sha256": "63a284f66678e2037642d5aa551cb37cf7a07d086859858485fbb3bbfd5c8901",
+      "bytes": 955328,
+      "package": "aapt2",
+      "version": "16.0.0.4-2",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/a/abseil-cpp/abseil-cpp_20260526.0_arm.deb",
+      "sha256": "cd2eda63e5d68e794ed014a88371897d1da4295ec1856c944e5f905960bba8e6",
+      "bytes": 1099640,
+      "package": "abseil-cpp",
+      "version": "20260526.0",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/b/binutils/binutils_2.47_arm.deb",
+      "sha256": "5c8a692ff23abd09079f8ae40ed53993a970bc5ff0cb737617d7ec2f10e257ae",
+      "bytes": 2038128,
+      "package": "binutils",
+      "version": "2.47",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/c/ca-certificates/ca-certificates_1:2026.09.25_all.deb",
+      "sha256": "57fab24bf4561bfdd35afe71bc1929914e51c35458cfd1fca2b15e54bc8df7af",
+      "bytes": 105404,
+      "package": "ca-certificates",
+      "version": "1:2026.09.25",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/f/fmt/fmt_1:11.2.0-1_arm.deb",
+      "sha256": "8f429c433963cfec57d8f069821965613628ef0351e7b15359ee802535681499",
+      "bytes": 157672,
+      "package": "fmt",
+      "version": "1:11.2.0-1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-root/pool/stable/f/frida/frida_17.2.14-4_arm.deb",
+      "sha256": "ff1cc698910fa68e567f750b3d5d09a945b5d19294769ab9937b558161591ccf",
+      "bytes": 15187588,
+      "package": "frida",
+      "version": "17.2.14-4",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-root/pool/stable/f/frida-python/frida-python_17.2.14-4_arm.deb",
+      "sha256": "481d25de3e2678f0ddc905227e3f2deb0112144cddb8c1cea7e1ce145b2aeefb",
+      "bytes": 10893696,
+      "package": "frida-python",
+      "version": "17.2.14-4",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/g/gdbm/gdbm_1.26-1_arm.deb",
+      "sha256": "52ce193d089b36f31432fc23b788ec25bcbf5f91427b117d6bb9b79a025a285c",
+      "bytes": 141316,
+      "package": "gdbm",
+      "version": "1.26-1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-posix-semaphore/libandroid-posix-semaphore_0.1-4_arm.deb",
+      "sha256": "317f87d9a3e127bc9d694a558dccac7ff8080f36cbcc33d9c478819f029b6055",
+      "bytes": 3592,
+      "package": "libandroid-posix-semaphore",
+      "version": "0.1-4",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-support/libandroid-support_29-1_arm.deb",
+      "sha256": "67150f1cb050d4852cb21d2b138676c68920b2ec7f059795b287b75cf2cf6cb6",
+      "bytes": 10316,
+      "package": "libandroid-support",
+      "version": "29-1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libb/libbz2/libbz2_1.0.8-8_arm.deb",
+      "sha256": "e432fbc010384ebb73c7f381e6016312870152fff01a0d413a274ba6bfe9bd4c",
+      "bytes": 23968,
+      "package": "libbz2",
+      "version": "1.0.8-8",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libc++/libc++_30_arm.deb",
+      "sha256": "5d4e4dfea77402c0b3ee05b6cb4c73108bb69cc149e2d3a73d4ec6ee6919fd16",
+      "bytes": 329384,
+      "package": "libc++",
+      "version": "30",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libcrypt/libcrypt_0.2-6_arm.deb",
+      "sha256": "111ff17330ac375b12677bd14d8d44edea2e423dffabc2dd26583d5940e4fcb1",
+      "bytes": 8260,
+      "package": "libcrypt",
+      "version": "0.2-6",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libe/libexpat/libexpat_2.8.5_arm.deb",
+      "sha256": "6df31a6b28ad533e829e9a419ebf788fd55ee7f26a69dfd78c19bc9cec96b841",
+      "bytes": 93420,
+      "package": "libexpat",
+      "version": "2.8.5",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libf/libffi/libffi_3.8.0_arm.deb",
+      "sha256": "27fc13bac4366ea270689a59a4a41fde52dfdbbd13418b29ac32ee66a0c43396",
+      "bytes": 34324,
+      "package": "libffi",
+      "version": "3.8.0",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libl/liblzma/liblzma_5.8.4_arm.deb",
+      "sha256": "428f2a7b3b6e1ccaa69a87ef60e2748985516b48ee4b7e37c4183b84ae454871",
+      "bytes": 190892,
+      "package": "liblzma",
+      "version": "5.8.4",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libp/libpng/libpng_1.6.59_arm.deb",
+      "sha256": "391c55ae9dc7b8805322448e3f45732b3204688196af6b41c8ebc36ecb4b1ca5",
+      "bytes": 187648,
+      "package": "libpng",
+      "version": "1.6.59",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libp/libprotobuf/libprotobuf_2:35.1_arm.deb",
+      "sha256": "200fd1d14eecabc319e03d04d096797935e87591ee17c29d5bdbe25e36d0eb8b",
+      "bytes": 1399420,
+      "package": "libprotobuf",
+      "version": "2:35.1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libs/libsqlite/libsqlite_3.53.4_arm.deb",
+      "sha256": "0ff2b4cccfd0b4925659e91f0c72fb1e5bce7a3d08169d2701416273436f9f8b",
+      "bytes": 689608,
+      "package": "libsqlite",
+      "version": "3.53.4",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libz/libzopfli/libzopfli_1.0.3-5_arm.deb",
+      "sha256": "e57962eaa8c9af8fbf114674e233575ec8675c181eb2617d402cdae3ce23d4e1",
+      "bytes": 99300,
+      "package": "libzopfli",
+      "version": "1.0.3-5",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/ncurses/ncurses_6.6.20260307+really6.5.20250830_arm.deb",
+      "sha256": "a729f77be4109f8123aeb59702e49bf2d30f67a213d305c276859af52e12a3bb",
+      "bytes": 544556,
+      "package": "ncurses",
+      "version": "6.6.20260307+really6.5.20250830",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/ncurses-ui-libs/ncurses-ui-libs_6.6.20260307+really6.5.20250830_arm.deb",
+      "sha256": "1379d901c39abf9a5ca1a6f408fb0ab0047a6f23e95a28573fcea05675450877",
+      "bytes": 28364,
+      "package": "ncurses-ui-libs",
+      "version": "6.6.20260307+really6.5.20250830",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/o/openssl/openssl_1:3.6.5_arm.deb",
+      "sha256": "4271df34c1cad73da0143b6d9013df4b80a4f6fc4d8a107f4069ef864606e0a9",
+      "bytes": 1812572,
+      "package": "openssl",
+      "version": "1:3.6.5",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python/python_3.14.6-1_arm.deb",
+      "sha256": "19d9cac2a69502bdeb11230c8fb13f16b5ab52353f556d7e771cd6ceaa446412",
+      "bytes": 4760760,
+      "package": "python",
+      "version": "3.14.6-1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/python-pip/python-pip_26.2.1_all.deb",
+      "sha256": "92a9cb4b3c99dd20086f90fedc95c604eefc5bd0f88d1862690884474f82de44",
+      "bytes": 1190440,
+      "package": "python-pip",
+      "version": "26.2.1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/r/readline/readline_8.3.6_arm.deb",
+      "sha256": "4b3bdacdbee97503a9062a81e5e460ff5c4f3b35fed4b1cb3a612c5b8c79e64f",
+      "bytes": 283896,
+      "package": "readline",
+      "version": "8.3.6",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/t/termux-licenses/termux-licenses_2.2_all.deb",
+      "sha256": "a3265cd1cf7d04754f2fb683eaf5b21918263792fd714457127900c1d6d9bcd9",
+      "bytes": 52276,
+      "package": "termux-licenses",
+      "version": "2.2",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zlib/zlib_1.3.2_arm.deb",
+      "sha256": "c63ee590f2f02254725bdd8e415582c70737b63712a20d5395b45e4b13ffffc5",
+      "bytes": 63520,
+      "package": "zlib",
+      "version": "1.3.2",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zstd/zstd_1.5.7-1_arm.deb",
+      "sha256": "87031a6369a7fd14108e4612d35e6296f8b933c6bc4d383b8aa18044d26f11f5",
+      "bytes": 416004,
+      "package": "zstd",
+      "version": "1.5.7-1",
+      "abi": "armeabi-v7a"
+    },
+    {
+      "url": "https://github.com/radareorg/radare2/releases/download/6.2.2/radare2-6.2.2-android-arm.tar.gz",
+      "sha256": "1ecca02220f0309a7a6d5349fc914e1d930b73dca09a27567abc862dd9df6c2b",
+      "bytes": 25091011
+    }
+  ]
+}

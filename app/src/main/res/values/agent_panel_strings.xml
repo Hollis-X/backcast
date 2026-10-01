@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agent_panel_title">子任务</string>
+    <string name="agent_panel_empty">当前会话还没有子任务</string>
+    <string name="agent_panel_loading">正在读取子任务</string>
+    <string name="agent_panel_count">%1$d 个任务 · %2$d 个正在运行</string>
+    <string name="agent_panel_refresh">刷新</string>
+    <string name="agent_panel_back">返回子任务列表</string>
+    <string name="agent_panel_stop">停止此子任务</string>
+    <string name="agent_panel_stop_confirm">停止后会关闭此子任务及它派出的子任务。</string>
+    <string name="agent_panel_send">发送消息</string>
+    <string name="agent_panel_message_hint">给此子任务的消息或补充要求</string>
+    <string name="agent_panel_message_sent">消息已发送</string>
+    <string name="agent_panel_no_result">尚未提交结果</string>
+    <string name="agent_panel_no_activity">暂无执行记录</string>
+    <string name="agent_panel_task_tab">任务</string>
+    <string name="agent_panel_activity_tab">活动</string>
+    <string name="agent_panel_result_tab">结果</string>
+    <string name="agent_panel_assigned">派发的任务</string>
+    <string name="agent_panel_stage">当前阶段</string>
+    <string name="agent_panel_tool">执行工具</string>
+    <string name="agent_panel_progress">最近进展</string>
+    <string name="agent_panel_failure">执行错误</string>
+    <string name="agent_panel_parent">派发者</string>
+    <string name="agent_panel_main">主会话</string>
+    <string name="agent_panel_identity">任务 ID</string>
+    <string name="agent_panel_usage">已用 token</string>
+    <string name="agent_panel_updated">最近活动 %1$s</string>
+    <string name="agent_panel_page">第 %1$d–%2$d 条，共 %3$d 条</string>
+    <string name="agent_panel_result_page">%1$d–%2$d / %3$d 字</string>
+    <string name="agent_panel_older">上一页</string>
+    <string name="agent_panel_newer">下一页</string>
+    <string name="agent_panel_latest">最新活动</string>
+    <string name="agent_panel_role_user">任务要求</string>
+    <string name="agent_panel_role_assistant">子任务回复</string>
+    <string name="agent_panel_role_tool">工具结果</string>
+    <string name="agent_panel_role_message">协作消息</string>
+    <string name="agent_panel_phase_starting">正在准备</string>
+    <string name="agent_panel_stopped">已停止</string>
+    <string name="agent_panel_read_error">无法读取子任务：%1$s</string>
+</resources>

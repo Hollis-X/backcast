@@ -21,6 +21,7 @@ import com.mkei.backcast.tool.TemporaryWorkspace;
 import com.mkei.backcast.tool.SubAgentTools;
 import com.mkei.backcast.tool.ToolkitTool;
 import com.mkei.backcast.tool.ToolchainStore;
+import com.mkei.backcast.tool.EmbeddedToolchain;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -68,7 +69,12 @@ public final class RunHub {
         app = context.getApplicationContext();
         store = new ChatStore(app);
         settings = new Settings(app);
-        toolchains = new ToolchainStore(new java.io.File(app.getFilesDir(), "toolchains"));
+        toolchains = new ToolchainStore(new java.io.File(app.getFilesDir(), "toolchains"),
+                new EmbeddedToolchain.Assets() {
+                    @Override public java.io.InputStream open(String name) throws Exception {
+                        return app.getAssets().open(name);
+                    }
+                }, android.os.Build.CPU_ABI, android.os.Build.VERSION.SDK_INT);
         uiMaterials = new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
                 new java.io.File(app.getFilesDir(), "temporary-workspaces/tool-ui"), 0);
         recorder = new AgentLoop.Recorder() {
@@ -89,11 +95,7 @@ public final class RunHub {
                         boolean budgetWrapFinished) {
                 store.saveRun(sessionId, running, goal, status, elapsedMs, turnAt, turnWall, seenAt,
                         tokensUsed, tokenBudget, budgetWrapFinished);
-                if (running || hasWork()) {
-                    AgentService.start(app);
-                } else {
-                    app.stopService(new Intent(app, AgentService.class));
-                }
+                syncService(running);
             }
         };
     }
@@ -339,7 +341,13 @@ public final class RunHub {
                 return true;
             }
         }
+        for (SubAgentManager manager : children.values()) if (manager.hasLiveWork()) return true;
         return false;
+    }
+
+    private synchronized void syncService(boolean parentRunning) {
+        if (parentRunning || hasWork()) AgentService.start(app);
+        else app.stopService(new Intent(app, AgentService.class));
     }
 
     public synchronized String noteText() {
@@ -386,6 +394,7 @@ public final class RunHub {
         loop.setDurability(durability);
         loop.setContextBudget(AgentLoop.DEFAULT_CONTEXT_LIMIT, settings.compactRatio());
         loop.setAccessLevel(settings.accessLevel());
+        loop.setAutomaticDelegation(Settings.EFFORT_ULTRA.equals(settings.effectiveReasoningEffort()));
     }
 
     /** 换到另一个会话时，旧循环继续跑，只是不再往这个界面上画。 */
@@ -434,21 +443,16 @@ public final class RunHub {
         next.register(new ToolkitTool(shell, toolchains, dir, materials, android.os.Build.CPU_ABI));
         ChildOwner owner = childOwners.get(loop);
         if (owner != null) {
-            if (!Settings.AGENT_OFF.equals(settings.agentMode())) SubAgentTools.register(next, owner.manager, owner.id);
+            loop.setDelegationParent(owner.root);
+            SubAgentTools.register(next, owner.manager, owner.id);
             return next;
         }
         next.register(new GoalTool(loop));
         next.register(new GetGoalTool(loop));
-        if (Settings.AGENT_OFF.equals(settings.agentMode())) {
-            SubAgentManager manager = children.get(loop);
-            if (manager != null) manager.cancelAll();
-            loop.setSubAgents(null);
-        } else {
-            SubAgentManager manager = manager(loop);
-            manager.setMaxParallel(settings.agentConcurrency());
-            loop.setSubAgents(manager);
-            SubAgentTools.register(next, manager, SubAgentManager.ROOT);
-        }
+        SubAgentManager manager = manager(loop);
+        manager.setMaxParallel(settings.agentConcurrency());
+        loop.setSubAgents(manager);
+        SubAgentTools.register(next, manager, SubAgentManager.ROOT);
         return next;
     }
 
@@ -488,6 +492,9 @@ public final class RunHub {
             created.attachRoot(parent);
             childStores.put(parent, checkpoint);
             children.put(parent, created);
+            created.setWorkObserver(new SubAgentManager.WorkObserver() {
+                @Override public void onWorkChanged() { syncService(false); }
+            });
             return created;
         } catch (Exception failure) {
             throw new IllegalStateException("无法初始化子 agent：" + failure.getMessage(), failure);

@@ -21,7 +21,7 @@ public final class ToolCatalog {
             for (String alias : aliases) commands.put(alias);
             return new JSONObject().put("id", id).put("name", name).put("group", group)
                     .put("source", source).put("requirements", requirements).put("commands", commands)
-                    .put("download_available", "apktool".equals(id) || "radare2".equals(id));
+                    .put("bundled", true).put("download_available", false);
         }
     }
 
@@ -39,15 +39,15 @@ public final class ToolCatalog {
     private static final List<Entry> ENTRIES = new ArrayList<Entry>();
     static {
         ENTRIES.add(new Entry("apktool", "Apktool", "android", "https://github.com/iBotPeaches/Apktool",
-                "需要设备可执行的 Java 8+ JVM；Android ART 不能直接运行普通 JAR。重打包还需要兼容 Android 的 aapt/aapt2。", "apktool"));
+                "APK 内置 Apktool 2.9.3 DEX JAR，使用 Android ART 运行，附带 Android aapt2。需要 Android 8.0+ ARM/ARM64。", "apktool"));
         ENTRIES.add(new Entry("radare2", "radare2", "native", "https://github.com/radareorg/radare2",
-                "官方 Android arm/arm64 包可私有安装；ABI、动态链接器和 SELinux 是否允许执行须以探测结果为准。", "radare2", "r2"));
+                "APK 内置官方 Android ARM/ARM64 原生包与数据库，自动释放到 App 私有路径。执行权限以设备探测为准。", "radare2", "r2"));
         ENTRIES.add(new Entry("rabin2", "rabin2", "native", "https://github.com/radareorg/radare2",
                 "随 radare2 Android 包安装，用于二进制信息提取。", "rabin2"));
         ENTRIES.add(new Entry("objection", "Objection", "dynamic", "https://github.com/sensepost/objection",
-                "需要可执行的 Python、已安装的 objection/Frida 依赖和匹配的 Frida server 或 Gadget；Android 支持指目标设备，不能直接运行桌面 wheel。", "objection"));
+                "APK 内置 Objection 1.12.5、Android Python、Frida Python 绑定及 server 和全部依赖。跨应用动态分析需要 root。", "objection"));
         String source = "https://sourceware.org/binutils/";
-        String dependencies = "需要为 Android ABI 编译的工具及其共享库；可绑定已有安装。Termux GNU 版本可能使用 g 前缀。";
+        String dependencies = "APK 内置 GNU binutils Android ARM/ARM64 编译版本及全部共享库，无需安装 Termux 或配置路径。";
         for (String id : new String[]{"readelf", "objdump", "nm", "strings", "addr2line", "size", "objcopy", "ar", "strip"}) {
             ENTRIES.add(new Entry(id, id, "binutils", source, dependencies, id, "g" + id, "llvm-" + id));
         }

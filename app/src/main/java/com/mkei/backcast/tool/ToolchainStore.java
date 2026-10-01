@@ -14,21 +14,37 @@ import org.json.JSONObject;
 public final class ToolchainStore {
     public static final class Launcher {
         public final String id, executable;
+        public String companion = "";
+        public String aapt2 = "";
         public final List<String> prefix = new ArrayList<String>();
         public final JSONObject environment = new JSONObject();
         Launcher(String id, String executable) { this.id = id; this.executable = executable; }
     }
 
     private final File root, registry;
+    private final EmbeddedToolchain embedded;
 
     public ToolchainStore(File directory) {
+        this(directory, null, "", 0);
+    }
+
+    public ToolchainStore(File directory, EmbeddedToolchain.Assets assets, String abi, int sdk) {
         if (directory == null) throw new IllegalArgumentException("工具安装需要 App 私有路径。");
         try { root = directory.getCanonicalFile(); }
         catch (IOException error) { throw new IllegalArgumentException("无法确认工具目录。", error); }
         registry = new File(root, "registry.json");
+        embedded = assets == null ? null : new EmbeddedToolchain(this, assets, abi, sdk);
     }
 
     public File root() { return root; }
+
+    public boolean bundled(String id) { return embedded != null && embedded.supports(id); }
+    public boolean hasBundledAssets() { return embedded != null; }
+
+    public File prepareBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
+        return embedded.prepare(cancellation);
+    }
 
     public synchronized JSONObject configuration(String id) throws Exception {
         ToolCatalog.get(id);
@@ -101,14 +117,38 @@ public final class ToolchainStore {
     }
 
     public Launcher launcher(String id) throws Exception {
+        return launcher(id, new ToolchainInstaller.Cancellation() {
+            public void check() throws InterruptedException {
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedException("工具准备已取消。");
+            }
+        });
+    }
+
+    Launcher launcher(String id, ToolchainInstaller.Cancellation cancellation) throws Exception {
         JSONObject config = configuration(id);
+        if (bundled(id) && (!"bundled".equals(config.optString("origin", "")) || !embedded.isPrepared())) {
+            prepareBundled(cancellation); config = configuration(id);
+        }
         String path = config.optString("path", "");
         if (path.length() == 0) return null;
         if (path.startsWith(root.getPath() + File.separator)) managed(path);
         File file = absolute(path);
         String runtime = config.optString("runtime", "");
         Launcher result;
-        if ("apktool".equals(id) && file.getName().endsWith(".jar")) {
+        if ("bundled".equals(config.optString("origin", ""))) {
+            result = new Launcher(id, file.getPath());
+            JSONArray prefix = config.optJSONArray("prefix");
+            if (prefix != null) for (int i = 0; i < prefix.length(); i++) result.prefix.add(prefix.getString(i));
+            JSONObject environment = config.optJSONObject("environment");
+            if (environment != null) {
+                java.util.Iterator<String> keys = environment.keys();
+                while (keys.hasNext()) { String key = keys.next(); result.environment.put(key, environment.getString(key)); }
+            }
+            String companion = config.optString("companion", "");
+            if (companion.length() > 0) result.companion = managed(companion).getPath();
+            String aapt2 = config.optString("aapt2", "");
+            if (aapt2.length() > 0) result.aapt2 = managed(aapt2).getPath();
+        } else if ("apktool".equals(id) && file.getName().endsWith(".jar")) {
             if (runtime.length() == 0) return null;
             result = new Launcher(id, absolute(runtime).getPath());
             result.prefix.add("-jar"); result.prefix.add(file.getPath());
@@ -122,6 +162,54 @@ public final class ToolchainStore {
             result.environment.put("LD_LIBRARY_PATH", new File(prefix, "lib").getPath());
         }
         return result;
+    }
+
+    synchronized void bundledInstalled(File common, File nativeTools, JSONObject manifest, String abi) throws Exception {
+        JSONObject data = load(), tools = data.optJSONObject("tools");
+        if (tools == null) { tools = new JSONObject(); data.put("tools", tools); }
+        File usr = new File(nativeTools, "usr"), lib = new File(usr, "lib");
+        JSONArray catalog = ToolCatalog.list();
+        for (int i = 0; i < catalog.length(); i++) {
+            String id = catalog.getJSONObject(i).getString("id");
+            JSONObject config = new JSONObject().put("origin", "bundled").put("abi", abi)
+                    .put("version", manifest.getString("version"));
+            JSONObject env = new JSONObject().put("LD_LIBRARY_PATH", lib.getPath());
+            JSONArray prefix = new JSONArray();
+            String path;
+            if ("apktool".equals(id)) {
+                path = "/system/bin/app_process";
+                env.put("CLASSPATH", new File(common, "apktool/apktool-dex.jar").getPath());
+                prefix.put("-Dsun.arch.data.model=" + ("arm64-v8a".equals(abi) ? "64" : "32"))
+                        .put("/system/bin").put("brut.apktool.Main");
+                config.put("aapt2", new File(usr, "bin/aapt2").getPath());
+            } else if ("radare2".equals(id) || "rabin2".equals(id)) {
+                File r2 = new File(nativeTools, "radare2");
+                path = new File(r2, "bin/" + id).getPath();
+                env.put("R2_PREFIX", r2.getPath()).put("LD_LIBRARY_PATH", new File(r2, "lib").getPath() + ":" + lib.getPath());
+            } else if ("objection".equals(id)) {
+                path = new File(usr, "bin/python3").getPath();
+                env.put("PYTHONHOME", usr.getPath()).put("PYTHONPATH", new File(common, "python-site").getPath())
+                        .put("SSL_CERT_FILE", new File(usr, "etc/tls/cert.pem").getPath());
+                prefix.put("-c").put("import os,sys,time,json,frida\nfrom datetime import datetime\n"
+                        + "cache=os.path.join(os.path.expanduser('~'),'.objection')\nos.makedirs(cache,exist_ok=True)\n"
+                        + "with open(os.path.join(cache,'version_info'),'w') as cached:\n"
+                        + " json.dump({'remote_version':'1.12.5','last_check':datetime.now().strftime('%d%m%y %H:%M:%S')},cached)\n"
+                        + "from objection.console.cli import cli\n"
+                        + "port=os.environ.get('BACKCAST_FRIDA_PORT','27043')\n"
+                        + "if not any(x in sys.argv[1:] for x in ('--help','--version','version')):\n"
+                        + " for attempt in range(30):\n"
+                        + "  os.kill(int(os.environ['BACKCAST_FRIDA_PID']),0)\n"
+                        + "  try:\n   frida.get_device_manager().add_remote_device('127.0.0.1:'+port).enumerate_processes(); break\n"
+                        + "  except (frida.TransportError,frida.ServerNotRunningError):\n   time.sleep(0.1)\n"
+                        + "cli(args=['--network','--host','127.0.0.1','--port',port]+sys.argv[1:],prog_name='objection')");
+                config.put("companion", new File(usr, "bin/frida-server").getPath());
+            } else {
+                path = new File(usr, "bin/g" + id).getPath();
+            }
+            config.put("path", path).put("prefix", prefix).put("environment", env);
+            tools.put(id, config);
+        }
+        save(data);
     }
 
     Object toolLock(String id) {

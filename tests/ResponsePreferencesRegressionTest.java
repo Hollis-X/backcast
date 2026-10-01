@@ -236,13 +236,13 @@ public final class ResponsePreferencesRegressionTest {
                 "Fresh settings do not choose manual mode and three children");
         for(String mode:new String[]{"off","manual","ultra"}) {
             set(settings,"setAgentMode",mode);
-            check(mode.equals(get(settings(context),"agentMode")),"Agent mode did not persist");
+            check(("ultra".equals(mode)?"ultra":"manual").equals(get(settings(context),"agentMode")),"Compatibility mode did not derive from effort");
         }
         for(int count=1;count<=4;count++) {
             concurrency(settings,count);
             check(concurrency(settings(context))==count,"Child concurrency did not persist");
         }
-        for(String effort:new String[]{"off","low","medium","high","max"}) {
+        for(String effort:new String[]{"off","low","medium","high","max","ultra"}) {
             set(settings,"setReasoningEffort",effort);
             check(effort.equals(get(settings(context),"reasoningEffort")),"Reasoning effort did not persist");
         }
@@ -268,16 +268,16 @@ public final class ResponsePreferencesRegressionTest {
         check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3
                 && "low".equals(get(settings,"effectiveReasoningEffort")),"Malformed persisted settings escaped validation");
     }
-    private static void ultraUsesMaxWhilePreservingUserOffAndLanguage() throws Exception {
+    private static void maxAndUltraRemainSeparateWhilePreservingLanguage() throws Exception {
         Object settings=settings(context());
-        set(settings,"setReasoningEffort","off");set(settings,"setOutputLanguage","ja");
-        for(String mode:new String[]{"manual","ultra","off","ultra","manual"}) {
-            set(settings,"setAgentMode",mode);
-            check("off".equals(get(settings,"reasoningEffort")),"Mode switch destroyed the user's effort choice");
-            String expected="ultra".equals(mode)?"max":"off";
-            check(expected.equals(get(settings,"effectiveReasoningEffort")),"Ultra sent a mode name or ignored max override");
+        set(settings,"setOutputLanguage","ja");
+        for(String effort:new String[]{"off","max","ultra","max","low"}) {
+            set(settings,"setReasoningEffort",effort);
+            check(effort.equals(get(settings,"reasoningEffort")),"Selected effort was changed");
+            check(effort.equals(get(settings,"effectiveReasoningEffort")),"Selected effort was mapped to another value");
+            check(("ultra".equals(effort)?"ultra":"manual").equals(get(settings,"agentMode")),"Max inherited automatic delegation");
             boolean enabled=(Boolean)settingsType.getMethod("reasoningEnabled").invoke(settings);
-            check(enabled=="ultra".equals(mode),"Effective off compatibility is inconsistent");
+            check(enabled!= "off".equals(effort),"Effective off compatibility is inconsistent");
             check("ja".equals(get(settings,"outputLanguage")) && get(settings,"fullSystemPrompt")
                     .contains(policy("languageInstruction","ja")),"Mode switch changed the output language");
         }
@@ -292,10 +292,25 @@ public final class ResponsePreferencesRegressionTest {
                 "Ultra lacks limits, reuse, independence or parent evidence review");
         set(settings,"setAgentMode","manual");
         check(!get(settings,"fullSystemPrompt").contains("Proactively identify independent subtasks")
-                && get(settings,"fullSystemPrompt").contains("model judges it useful"),"Manual inherited ultra delegation");
+                && get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Manual inherited automatic delegation");
         set(settings,"setAgentMode","off");
-        check(get(settings,"fullSystemPrompt").contains("Coordination tools are disabled")
-                && !get(settings,"fullSystemPrompt").contains("At most 4 child agents"),"Off inherited child execution policy");
+        check(get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Legacy off bypassed explicit-user policy");
+    }
+    @SuppressWarnings("unchecked")
+    private static void legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection() throws Exception {
+        Object context=context();
+        java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
+        values.put("agent_mode","ultra");values.put("reasoning_effort","off");
+        Object settings=settings(context);
+        check("ultra".equals(get(settings,"effectiveReasoningEffort")),"Legacy ultra did not migrate");
+        set(settings,"setReasoningEffort","max");
+        check("max".equals(get(settings(context),"effectiveReasoningEffort"))
+                && "manual".equals(get(settings(context),"agentMode")),"Legacy ultra resurrected after selecting max");
+        Object second=context();
+        values=(java.util.Map<String,Object>)contextType.getField("values").get(second);
+        values.put("agent_mode","ultra");
+        set(settings(second),"setReasoningEffort","high");
+        check("high".equals(get(settings(second),"effectiveReasoningEffort")),"Explicit effort was overwritten before first migration");
     }
     private static void unsavedModePreviewDoesNotPersistOrAlterPrompt() throws Exception {
         Object settings=settings(context());String raw=get(settings,"systemPrompt");
@@ -325,7 +340,8 @@ public final class ResponsePreferencesRegressionTest {
                     "languageSwitchReplacesPolicyWithoutAccumulation", "verbositySwitchPreservesLanguageAndCustomPrompt",
                     "languageRulesCoverAllVisibleTextAndConflictingPrompts", "childDefaultsAndEveryChoicePersist",
                     "invalidChildAndEffortValuesReturnDefaults", "malformedStoredChildSettingsReturnDefaults",
-                    "ultraUsesMaxWhilePreservingUserOffAndLanguage", "childPoliciesRequireEvidenceReviewAndSelectiveDelegation",
+                    "maxAndUltraRemainSeparateWhilePreservingLanguage", "childPoliciesRequireEvidenceReviewAndSelectiveDelegation",
+                    "legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection",
                     "unsavedModePreviewDoesNotPersistOrAlterPrompt"}) run(name);
             System.out.println(passed + " response preference tests passed");
         } finally {

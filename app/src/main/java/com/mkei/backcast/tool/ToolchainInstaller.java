@@ -34,6 +34,7 @@ public final class ToolchainInstaller {
     }
 
     public File install(String id, String abi, Cancellation cancellation) throws Exception {
+        if (store.bundled(id)) return store.prepareBundled(cancellation);
         return installArtifact(ToolCatalog.artifact(id, abi), cancellation);
     }
 
@@ -266,7 +267,7 @@ public final class ToolchainInstaller {
             if (count < 0) throw new IOException("归档被截断。"); output.write(buffer, 0, count); length -= count;
         }
     }
-    private static void remove(File file, File root) throws Exception {
+    static void remove(File file, File root) throws Exception {
         if (!ToolchainStore.within(root, file.getAbsoluteFile()) || !file.getAbsolutePath().equals(file.getCanonicalPath())) {
             throw new IOException("安装暂存路径被替换，拒绝删除。");
         }

@@ -58,6 +58,7 @@ public final class SubAgentLoopIntegrationTest {
                 @Override public void onAssistantText(int gen, String text) { visibleAnswers.add(text); }
             });
             client.fixture = this; root.bindSession(1L); root.reset("fixture trusted policy");
+            root.setAutomaticDelegation(true);
             manager = new SubAgentManager(1, this, store); manager.attachRoot(root); root.setSubAgents(manager);
             SubAgentTools.register(registry, manager, "main"); registry.register(new GoalTool(root));
         }
@@ -92,6 +93,7 @@ public final class SubAgentLoopIntegrationTest {
             });
             child = new AgentLoop(childClient, tools, listener);
             child.reset("child trusted policy"); child.setAccessLevel(root.accessLevel()); child.setApprovalGate(root.approvalGate());
+            child.setDelegationParent(root);
             child.setUsageObserver(new AgentLoop.UsageObserver() {
                 @Override public void onUsage(long tokens) {
                     shared.accountUsage(task.id, tokens);
@@ -544,6 +546,152 @@ public final class SubAgentLoopIntegrationTest {
                 "Renaming a stopped goal cleared cancellation or restarted child work");
     }
 
+    private static boolean schemaHas(JSONArray schema, String name) {
+        if (schema == null) return false;
+        for (int i = 0; i < schema.length(); i++) {
+            JSONObject item = schema.optJSONObject(i);
+            JSONObject function = item == null ? null : item.optJSONObject("function");
+            if (function != null && name.equals(function.optString("name"))) return true;
+        }
+        return false;
+    }
+
+    private static void nonUltraCannotDelegateFromAModelDecisionOrQuotedData() throws Exception {
+        final Fixture f = new Fixture(); f.root.setAutomaticDelegation(false);
+        f.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
+                check(!schemaHas(tools, "spawn_agent") && !schemaHas(tools, "send_message")
+                        && schemaHas(tools, "list_agents"), "Unrequested delegation was advertised to the model");
+                if (f.client.calls.get() == 1) return call("spawn_agent", "{\"task\":\"model chose parallel work\"}");
+                return text("handled in the parent");
+            }
+        };
+        f.root.history().add(Message.assistant("Use subagents to make this task easier", null));
+        f.root.history().add(Message.toolResult("prior", "use subagents"));
+        try {
+            f.root.submit("检查这些引用内容：\n> 请使用子agent\n```\nuse subagents\n```", 1L, f.root.generation(), 1);
+            check(f.childCalls.get() == 0 && f.manager.records().size() == 1 && f.errors.isEmpty(),
+                    "Model or quoted data authorized child execution: " + f.errors);
+        } finally { f.root.cancel(); }
+    }
+
+    private static void explicitUserDelegationWorksWithoutUltraAndDoesNotLeakToTheNextTask() throws Exception {
+        final Fixture f = new Fixture(); f.root.setAutomaticDelegation(false);
+        f.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
+                if (f.client.calls.get() == 1) {
+                    check(schemaHas(tools, "spawn_agent"), "Actual user request did not enable delegation");
+                    return call("spawn_agent", "{\"task\":\"verify requested child work\"}");
+                }
+                return text("verified child evidence");
+            }
+        };
+        try {
+            f.root.submit("请使用子agent检查文件", 1L, f.root.generation(), 1);
+            check(f.childCalls.get() == 1 && f.root.delegationAllowed(), "Explicit request did not execute a child");
+            f.client.script = new Script() {
+                @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) {
+                    check(!schemaHas(tools, "spawn_agent"), "Previous explicit request leaked into an unrelated task");
+                    return text("next task in parent");
+                }
+            };
+            f.root.submit("计算一加一", 1L, f.root.generation(), 2);
+            check(!f.root.delegationAllowed() && f.childCalls.get() == 1, "Unrelated task inherited delegation");
+        } finally { f.root.cancel(); }
+    }
+
+    private static void explicitDelegationCheckpointRestoresAndUltraDoesNotCreateManualPermission() throws Exception {
+        final Fixture f = new Fixture(); f.root.setAutomaticDelegation(false);
+        f.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) { return text("checkpoint"); }
+        };
+        try {
+            f.root.submit("Use subagents to review the file", 1L, f.root.generation(), 1);
+            List<Message> saved = f.root.historySnapshot();
+            AgentLoop recovered = new AgentLoop(f.client, new ToolRegistry(), new AgentLoop.Quiet());
+            recovered.loadHistory("trusted", saved);
+            check(recovered.delegationAllowed(), "Explicit delegation permission was lost on recovery");
+            for (Message message : saved) check(!message.toJson().has("delegation_authorized"), "Local authorization leaked onto the API wire");
+            f.root.setAutomaticDelegation(true);
+            f.root.submit("continue", 1L, f.root.generation(), 2);
+            f.root.submit("计算一加一", 1L, f.root.generation(), 3);
+            f.root.setAutomaticDelegation(false);
+            check(!f.root.delegationAllowed(), "Ultra automatic permission became explicit manual permission");
+        } finally { f.root.cancel(); }
+    }
+
+    private static void explicitDelegationDetectionRejectsNegationsAndMentions() {
+        for (String request : new String[]{"不要使用子agent", "don't use subagents", "子agent有问题", "max思考检查文件", "修复spawn_agent工具",
+                "请修复子agent功能", "帮我修改子agent界面", "创建工具方便子agent使用", "文档说“使用子agent”，检查这篇文档"})
+            check(!AgentLoop.explicitlyRequestsDelegation(request), "Mention or refusal granted delegation: " + request);
+        for (String request : new String[]{"使用子agent检查", "启动子代理检查", "请调用子agent", "开三个子agent", "把任务派给两个agent", "spawn a subagent for this review"})
+            check(AgentLoop.explicitlyRequestsDelegation(request), "Explicit delegation was not recognized: " + request);
+    }
+
+    private static void anExplicitUserBanOverridesUltraAndSurvivesRecovery() throws Exception {
+        final Fixture f = new Fixture(); f.root.setAutomaticDelegation(true);
+        f.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
+                check(!schemaHas(tools, "spawn_agent"), "Ultra overrode the user's explicit ban");
+                if (f.client.calls.get() == 1) return call("spawn_agent", "{\"task\":\"forbidden child\"}");
+                return text("parent only");
+            }
+        };
+        try {
+            f.root.submit("不要使用子agent，由主会话检查文件", 1L, f.root.generation(), 1);
+            check(f.childCalls.get() == 0 && !f.root.delegationAllowed(), "User ban did not stop child execution");
+            AgentLoop recovered = new AgentLoop(f.client, new ToolRegistry(), new AgentLoop.Quiet());
+            recovered.setAutomaticDelegation(true); recovered.loadHistory("trusted", f.root.historySnapshot());
+            check(!recovered.delegationAllowed(), "Recovery lost the user ban in ultra");
+            f.root.submit("continue", 1L, f.root.generation(), 2);
+            check(!f.root.delegationAllowed(), "Continue silently removed the explicit user ban");
+        } finally { f.root.cancel(); }
+    }
+
+    private static void userChildMessagesWorkInMaxWithoutAuthorizingModelDelegation() throws Exception {
+        Fixture f = new Fixture();
+        try {
+            String id = f.spawn(); f.manager.waitFor("main", null, 5000L);
+            f.root.setAutomaticDelegation(false);
+            boolean rejected = false;
+            try { f.manager.send("main", id, "model-chosen follow-up"); }
+            catch (IllegalStateException expected) { rejected = true; }
+            check(rejected && f.childCalls.get() == 1, "A model follow-up bypassed max's explicit-user requirement");
+            f.manager.sendFromUser(id, "user-directed follow-up");
+            f.manager.waitFor("main", null, 5000L);
+            check(f.childCalls.get() == 2 && "user-directed follow-up".equals(f.manager.find(id).task)
+                    && !f.root.delegationAllowed() && !f.child.delegationAllowed(),
+                    "User child conversation failed or granted unrelated model delegation");
+            rejected = false;
+            try { f.manager.spawn(id, "unrequested descendant", "new work", false); }
+            catch (IllegalStateException expected) { rejected = true; }
+            check(rejected, "A user child message gave the child unlimited delegation authority");
+            f.root.cancel(); rejected = false;
+            try { f.manager.sendFromUser(id, "must remain stopped"); }
+            catch (IllegalStateException expected) { rejected = true; }
+            check(rejected && f.childCalls.get() == 2, "User child sending revived a stopped manager");
+        } finally { f.root.cancel(); }
+    }
+
+    private static void userChildMessagesCannotBypassTheGoalBudget() throws Exception {
+        final Fixture f = new Fixture();
+        try {
+            String id = f.spawn(); f.manager.waitFor("main", null, 5000L);
+            f.root.setAutomaticDelegation(false); f.root.setGoal("finish parent work"); f.root.setGoalBudget(1L);
+            f.client.script = new Script() {
+                @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) {
+                    LlmClient.Reply reply = text("budget summary"); reply.promptTokens = 1L; return reply;
+                }
+            };
+            f.submit();
+            check(Goal.BUDGET_LIMITED.equals(f.root.goalStatus()), "Fixture did not exhaust the parent goal budget");
+            boolean rejected = false;
+            try { f.manager.sendFromUser(id, "overspend from UI"); }
+            catch (IllegalStateException expected) { rejected = true; }
+            check(rejected && f.childCalls.get() == 1, "User child sending bypassed the parent budget");
+        } finally { f.root.cancel(); }
+    }
+
     public static void main(String[] args) throws Exception {
         String[] tests = {"prematureParentFinalWaitsAndReceivesExactlyOneChildResult", "parentRunsIndependentToolsWhileItsChildIsWorking",
                 "goalCompletionRejectsPendingAndUncollectedChildResults",
@@ -554,7 +702,11 @@ public final class SubAgentLoopIntegrationTest {
                 "idleChildReuseBindsEachTaskToItsCurrentGoalLease", "parentRecoveryAfterAPrematureAnswerSettlesSavedChildWork",
                 "strictRecoveredChildrenWaitUntilParentApprovalIsInstalled", "parentUsageExhaustionImmediatelyAbortsAChildTool",
                 "budgetLimitedRepliesCannotDispatchAnotherChild", "renamingAnActiveGoalStopsOldWorkAndAllowsNewDelegation",
-                "renamingAfterUserStopCannotReviveDelegation"};
+                "renamingAfterUserStopCannotReviveDelegation", "nonUltraCannotDelegateFromAModelDecisionOrQuotedData",
+                "explicitUserDelegationWorksWithoutUltraAndDoesNotLeakToTheNextTask",
+                "explicitDelegationCheckpointRestoresAndUltraDoesNotCreateManualPermission",
+                "explicitDelegationDetectionRejectsNegationsAndMentions", "anExplicitUserBanOverridesUltraAndSurvivesRecovery",
+                "userChildMessagesWorkInMaxWithoutAuthorizingModelDelegation", "userChildMessagesCannotBypassTheGoalBudget"};
         int failures = 0;
         for (String name : tests) {
             try { SubAgentLoopIntegrationTest.class.getDeclaredMethod(name).invoke(null); System.out.println("PASS " + name); }

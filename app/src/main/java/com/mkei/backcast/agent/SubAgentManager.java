@@ -32,6 +32,10 @@ public final class SubAgentManager {
         void save(Record task) throws Exception;
     }
 
+    public interface WorkObserver {
+        void onWorkChanged();
+    }
+
     public static final class Record {
         public String id, parentId, name, task, status, result = "", error = "", inFlight = "";
         public String phase = QUEUED, activeTool = "", progress = "";
@@ -118,6 +122,7 @@ public final class SubAgentManager {
     private boolean schedulingEnabled;
     private volatile boolean cancelled;
     private String persistenceError = "";
+    private volatile WorkObserver workObserver;
 
     public SubAgentManager(int maxParallel, Factory factory, Store store) throws Exception {
         if (factory == null) throw new IllegalArgumentException("Child factory is required");
@@ -158,6 +163,28 @@ public final class SubAgentManager {
         synchronized (lock) { slots.get(ROOT).loop = root; }
     }
 
+    public void setWorkObserver(WorkObserver observer) {
+        workObserver = observer;
+    }
+
+    /** Restored queues remain dormant until an explicit resume or new user task. */
+    public boolean hasLiveWork() {
+        synchronized (lock) {
+            for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id)) {
+                if (slot.executing || !cancelled && schedulingEnabled && !slot.stop
+                        && QUEUED.equals(slot.task.status)) return true;
+            }
+            return false;
+        }
+    }
+
+    /** Invoke outside lock: hub observers may query this manager under their own lock. */
+    private void notifyWorkChanged() {
+        WorkObserver observer = workObserver;
+        if (observer != null) try { observer.onWorkChanged(); }
+        catch (RuntimeException ignored) { }
+    }
+
     public void resumePending() {
         synchronized (lock) {
             cancelled = false;
@@ -166,10 +193,12 @@ public final class SubAgentManager {
         }
         persistQuietly(ROOT);
         synchronized (lock) { schedulingEnabled = true; scheduleLocked(); }
+        notifyWorkChanged();
     }
 
     public void setMaxParallel(int count) {
         synchronized (lock) { maxParallel = Math.max(1, Math.min(8, count)); scheduleLocked(); lock.notifyAll(); }
+        notifyWorkChanged();
     }
 
     public JSONObject spawn(String owner, String name, String task, boolean fork) throws Exception {
@@ -193,12 +222,25 @@ public final class SubAgentManager {
         }
         try { persist(record.id); }
         catch (Exception error) { synchronized (lock) { slots.remove(record.id); } throw error; }
-        synchronized (lock) { requireSlot(record.id).ready = true; schedulingEnabled = true; scheduleLocked(); return view(requireSlot(record.id)); }
+        JSONObject result;
+        synchronized (lock) { requireSlot(record.id).ready = true; schedulingEnabled = true; scheduleLocked(); result = view(requireSlot(record.id)); }
+        notifyWorkChanged();
+        return result;
     }
 
     public JSONObject send(String owner, String target, String message) throws Exception {
+        return send(owner, target, message, false);
+    }
+
+    /** Called only by the user-facing child conversation; never exposed as a model tool. */
+    public JSONObject sendFromUser(String target, String message) throws Exception {
+        if (ROOT.equals(target)) throw new IllegalArgumentException("请选择一个子 agent。");
+        return send(ROOT, target, message, true);
+    }
+
+    private JSONObject send(String owner, String target, String message, boolean fromUser) throws Exception {
         requireText(message);
-        long lease = taskUsageLease(owner, ROOT.equals(target));
+        long lease = taskUsageLease(owner, ROOT.equals(target), fromUser);
         synchronized (lock) {
             requireOwner(owner);
             Slot slot = requireSlot(target);
@@ -233,7 +275,10 @@ public final class SubAgentManager {
             throw error;
         }
         if (!ROOT.equals(owner) && !owner.equals(target)) persistQuietly(owner);
-        synchronized (lock) { requireSlot(target).ready = true; schedulingEnabled = true; scheduleLocked(); return view(requireSlot(target)); }
+        JSONObject result;
+        synchronized (lock) { requireSlot(target).ready = true; schedulingEnabled = true; scheduleLocked(); result = view(requireSlot(target)); }
+        notifyWorkChanged();
+        return result;
     }
 
     public JSONObject list(String owner) throws Exception {
@@ -492,6 +537,10 @@ public final class SubAgentManager {
     }
 
     private long taskUsageLease(String owner, boolean reportOnly) {
+        return taskUsageLease(owner, reportOnly, false);
+    }
+
+    private long taskUsageLease(String owner, boolean reportOnly, boolean fromUser) {
         AgentLoop root;
         long childLease;
         synchronized (lock) {
@@ -499,8 +548,8 @@ public final class SubAgentManager {
             childLease = caller.usageLease;
             root = slots.get(ROOT).loop;
         }
-        if (!reportOnly && root != null && !root.delegationAllowed())
-            throw new IllegalStateException("目标预算已用尽，不能派发新的子任务。");
+        if (!reportOnly && root != null && !(fromUser ? root.delegationBudgetAllowsWork() : root.delegationAllowed()))
+            throw new IllegalStateException("当前没有派发子任务的授权：只有 ultra 可以主动派活，其他思考程度需要用户明确要求；目标预算用尽时也不能继续派活。");
         return ROOT.equals(owner) ? (root == null ? -1L : root.goalUsageLease()) : childLease;
     }
 
@@ -526,7 +575,10 @@ public final class SubAgentManager {
         if (loop != null) loop.cancel();
         closeDescendants(target);
         persist(target);
-        synchronized (lock) { return view(requireSlot(target)); }
+        JSONObject result;
+        synchronized (lock) { result = view(requireSlot(target)); }
+        notifyWorkChanged();
+        return result;
     }
 
     public void cancelAll() {
@@ -562,6 +614,7 @@ public final class SubAgentManager {
         if (stopManager) persistQuietly(ROOT);
         for (AgentLoop loop : loops) loop.cancel();
         for (String id : changed) if (!ROOT.equals(id)) persistQuietly(id);
+        notifyWorkChanged();
     }
 
     /** A child's own cancellation affects descendants without cancelling its peers or parent. */
@@ -580,6 +633,7 @@ public final class SubAgentManager {
         }
         for (AgentLoop loop : loops) loop.cancel();
         for (String id : changed) persistQuietly(id);
+        notifyWorkChanged();
     }
 
     public List<Record> records() throws Exception {
@@ -615,6 +669,7 @@ public final class SubAgentManager {
 
     private void runChild(final Slot slot) {
         try {
+            notifyWorkChanged();
             long recoveredLease = taskUsageLease(ROOT, true);
             if (slot.loop == null) {
                 Record config;
@@ -641,6 +696,7 @@ public final class SubAgentManager {
                 if (loop == null) throw new IllegalStateException("Child factory returned no loop");
                 loop.bindSession(slot.task.sessionId);
                 loop.setCoordinationMailbox(this, slot.task.id);
+                synchronized (lock) { loop.setDelegationParent(slots.get(ROOT).loop); }
                 if (slot.task.history.length() > 0) {
                     List<Message> history = messages(slot.task.history);
                     String prompt = "";
@@ -669,6 +725,11 @@ public final class SubAgentManager {
                     slot.task.pending = tail(slot.task.pending);
                     input = "Message from " + mail.optString("from", ROOT) + ":\n" + mail.getString("text");
                     request = mail.getString("text");
+                    slot.task.task = request;
+                    slot.task.progress = "";
+                    slot.task.activeTool = "";
+                    slot.task.lastActivityAt = System.currentTimeMillis();
+                    slot.task.progressRevision++;
                     reference = mail.optString("reference", "");
                     slot.usageLease = mail.optLong("usageLease", recoveredLease);
                 } else {
@@ -727,6 +788,7 @@ public final class SubAgentManager {
                 slot.executing = false; slot.suspended = false; lock.notifyAll();
                 scheduleLocked(); lock.notifyAll();
             }
+            notifyWorkChanged();
         }
     }
 

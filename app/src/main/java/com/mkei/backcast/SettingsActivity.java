@@ -34,9 +34,8 @@ public class SettingsActivity extends AppCompatActivity {
     private static final String[] OUTPUT_LANGUAGE_VALUES = {
             "zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de"
     };
-    private static final String[] AGENT_MODE_VALUES = { "off", "manual", "ultra" };
     private static final String[] AGENT_CONCURRENCY_VALUES = { "1", "2", "3", "4" };
-    private static final String[] REASONING_EFFORT_VALUES = { "off", "low", "medium", "high", "max" };
+    private static final String[] REASONING_EFFORT_VALUES = { "off", "low", "medium", "high", "max", "ultra" };
 
     private EditText baseUrl;
     private EditText apiKey;
@@ -50,7 +49,6 @@ public class SettingsActivity extends AppCompatActivity {
     private Spinner outputVerbosity;
     private Spinner reasoningSummary;
     private Spinner outputLanguage;
-    private Spinner agentMode;
     private Spinner agentConcurrency;
     private Spinner reasoningEffort;
     private TextView agentStatus;
@@ -87,7 +85,6 @@ public class SettingsActivity extends AppCompatActivity {
         outputVerbosity = (Spinner) findViewById(R.id.output_verbosity);
         reasoningSummary = (Spinner) findViewById(R.id.reasoning_summary);
         outputLanguage = (Spinner) findViewById(R.id.output_language);
-        agentMode = (Spinner) findViewById(R.id.agent_mode);
         agentConcurrency = (Spinner) findViewById(R.id.agent_concurrency);
         reasoningEffort = (Spinner) findViewById(R.id.reasoning_effort);
         agentStatus = (TextView) findViewById(R.id.agent_status);
@@ -106,9 +103,6 @@ public class SettingsActivity extends AppCompatActivity {
         bindChoices(outputLanguage, R.array.output_language_labels,
                 R.array.output_language_descriptions, R.id.output_language_description,
                 OUTPUT_LANGUAGE_VALUES, settings.outputLanguage());
-        bindChoices(agentMode, R.array.agent_mode_labels,
-                R.array.agent_mode_descriptions, R.id.agent_mode_description,
-                AGENT_MODE_VALUES, settings.agentMode());
         bindChoices(agentConcurrency, R.array.agent_concurrency_labels,
                 R.array.agent_concurrency_descriptions, R.id.agent_concurrency_description,
                 AGENT_CONCURRENCY_VALUES, Integer.toString(settings.agentConcurrency()));
@@ -156,29 +150,25 @@ public class SettingsActivity extends AppCompatActivity {
         settings.setOutputVerbosity(selectedValue(outputVerbosity, OUTPUT_VERBOSITY_VALUES));
         settings.setReasoningSummary(selectedValue(reasoningSummary, REASONING_SUMMARY_VALUES));
         settings.setOutputLanguage(selectedValue(outputLanguage, OUTPUT_LANGUAGE_VALUES));
-        settings.setAgentMode(selectedValue(agentMode, AGENT_MODE_VALUES));
         settings.setAgentConcurrency(Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES)));
         settings.setReasoningEffort(selectedValue(reasoningEffort, REASONING_EFFORT_VALUES));
     }
 
     private void onChoiceChanged(Spinner spinner) {
-        if (spinner == agentMode || spinner == agentConcurrency || spinner == reasoningEffort) {
+        if (spinner == agentConcurrency || spinner == reasoningEffort) {
             refreshAgentPreview(new Settings(this));
         }
     }
 
     private void refreshAgentPreview(Settings settings) {
-        String mode = selectedValue(agentMode, AGENT_MODE_VALUES);
+        String effort = selectedValue(reasoningEffort, REASONING_EFFORT_VALUES);
+        String mode = Settings.EFFORT_ULTRA.equals(effort) ? Settings.AGENT_ULTRA : Settings.AGENT_MANUAL;
         int concurrency = Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES));
         boolean ultra = Settings.AGENT_ULTRA.equals(mode);
-        reasoningEffort.setEnabled(!ultra);
-        agentConcurrency.setEnabled(!Settings.AGENT_OFF.equals(mode));
         if (agentStatus != null) {
-            String effective = ultra ? Settings.EFFORT_MAX : selectedValue(reasoningEffort, REASONING_EFFORT_VALUES);
-            int status = ultra ? R.string.agent_status_ultra : Settings.AGENT_OFF.equals(mode)
-                    ? R.string.agent_status_off : R.string.agent_status_normal;
+            int status = ultra ? R.string.agent_status_ultra : R.string.agent_status_normal;
             agentStatus.setText(getString(status,
-                    Integer.valueOf(concurrency), effective));
+                    Integer.valueOf(concurrency), effort));
         }
         if (envContext != null) {
             envContext.setText(settings.environmentContext(useRoot.isChecked(), mode, concurrency));

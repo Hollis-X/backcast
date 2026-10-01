@@ -463,6 +463,18 @@ public final class LlmUsageRegressionTest {
         } finally { server.stop(); }
     }
 
+    private static void maxAndUltraReachTheWireUnchanged() throws Exception {
+        for (String effort : new String[]{"max", "ultra"}) {
+            Server server = new Server(jsonSuccess("selected effort"));
+            try {
+                LlmClient.Reply reply = server.client(effort).send(messages(), null, null);
+                check(reply.error == null && effort.equals(server.request(0).optString("reasoning_effort")),
+                        "Selected reasoning effort was rewritten on the wire: " + effort);
+                server.exhausted();
+            } finally { server.stop(); }
+        }
+    }
+
     private static void run(String name) {
         try {
             LlmUsageRegressionTest.class.getDeclaredMethod(name).invoke(null);
@@ -483,7 +495,7 @@ public final class LlmUsageRegressionTest {
                 "existingPolicyIsNotDuplicated", "unsupportedVerbosityFallsBackAndCachesWithoutLosingPolicy",
                 "usageThenVerbosityFallsBackWithinThreeRequests", "verbosityThenUsageFallsBackWithinThreeRequests",
                 "rejectedVerbosityRetriesAtMostOnce", "unrelatedVerbosityErrorDoesNotRetry",
-                "cancellationBeforeAttemptDoesNotStartHttp" };
+                "cancellationBeforeAttemptDoesNotStartHttp", "maxAndUltraReachTheWireUnchanged" };
         for (String name : tests) run(name);
         if (failures != 0) throw new AssertionError(failures + " usage tests failed");
         System.out.println(tests.length + " usage tests passed");

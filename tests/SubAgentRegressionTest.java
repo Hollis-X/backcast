@@ -49,6 +49,7 @@ public final class SubAgentRegressionTest {
             root.bindSession(1L); root.reset("root system policy");
             root.setContextBudget(50000, 0.8f);
             manager = new SubAgentManager(concurrency, this, store); manager.attachRoot(root);
+            root.setAutomaticDelegation(true);
         }
         @Override public AgentLoop create(final SubAgentManager.Record task, AgentLoop.Listener listener,
                 final SubAgentManager shared) throws Exception {
@@ -99,6 +100,7 @@ public final class SubAgentRegressionTest {
         check(f.created.get() == 1 && f.calls.get() == 2, "Idle child did not reuse its loop");
         SubAgentManager.Record record = f.manager.find(id);
         check(record.history.length() == 5 && record.result.contains("second task"), "Reused child lost prior context");
+        check("second task".equals(record.task), "Reused child still advertises its original assignment");
         check(record.sessionId != f.root.sessionKey(), "Child shares the parent persistence identity");
     }
 

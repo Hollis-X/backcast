@@ -170,15 +170,28 @@ public class ShellTool implements Tool {
         java.util.Iterator<String> keys = launcher.environment.keys();
         while (keys.hasNext()) {
             String key = keys.next();
-            if (!"R2_PREFIX".equals(key) && !"LD_LIBRARY_PATH".equals(key)) throw new IllegalArgumentException("工具环境变量不合法。");
-            command.append(key).append('=').append(RootShell.quote(launcher.environment.getString(key))).append(' ');
+            if (!"R2_PREFIX".equals(key) && !"LD_LIBRARY_PATH".equals(key) && !"CLASSPATH".equals(key)
+                    && !"PYTHONHOME".equals(key) && !"PYTHONPATH".equals(key) && !"SSL_CERT_FILE".equals(key)) {
+                throw new IllegalArgumentException("工具环境变量不合法。");
+            }
+            command.append("export ").append(key).append('=').append(RootShell.quote(launcher.environment.getString(key))).append("; ");
         }
+        if (temporary != null) command.append("export HOME=").append(RootShell.quote(temporary.directory().getPath())).append("; export PYTHONDONTWRITEBYTECODE=1; ");
+        boolean probe = arguments.size() == 1 && ("--version".equals(arguments.get(0)) || "--help".equals(arguments.get(0))
+                || "objection".equals(launcher.id) && "version".equals(arguments.get(0)));
+        if (launcher.companion.length() > 0 && !probe) command.append("export BACKCAST_FRIDA_PORT=$((20000 + $$ % 40000)); ")
+                .append(RootShell.quote(launcher.companion)).append(" --listen 127.0.0.1:$BACKCAST_FRIDA_PORT >/dev/null 2>&1 & export BACKCAST_FRIDA_PID=$!; ");
         command.append(RootShell.quote(launcher.executable));
         if ("apktool".equals(launcher.id) && !launcher.prefix.isEmpty() && temporary != null) {
             command.append(' ').append(RootShell.quote("-Duser.home=" + temporary.directory().getPath()));
+            command.append(' ').append(RootShell.quote("-Djava.io.tmpdir=" + temporary.directory().getPath()));
         }
         for (String prefix : launcher.prefix) command.append(' ').append(RootShell.quote(prefix));
         for (String value : arguments) command.append(' ').append(RootShell.quote(value));
+        if (launcher.aapt2.length() > 0 && !arguments.isEmpty()
+                && ("b".equals(arguments.get(0)) || "build".equals(arguments.get(0)))) {
+            command.append(" --use-aapt2 -a ").append(RootShell.quote(launcher.aapt2));
+        }
         boolean withRoot = useRoot && rootAvailable();
         String result = exec(command.toString(), Math.min(600, Math.max(1, timeoutSec)), withRoot, temporaryCommand, mine, true);
         return useRoot && !withRoot ? "注意：root 不可用，本次按普通权限执行。\n" + result : result;

@@ -54,14 +54,12 @@ import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
-import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.agent.TokenMeter;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.mkei.backcast.tool.EditTool;
 import com.mkei.backcast.tool.ReadTool;
 import com.mkei.backcast.tool.ShellTool;
 import com.mkei.backcast.tool.WriteTool;
-import com.mkei.backcast.tool.ToolCatalog;
 import com.mkei.backcast.ui.ContextMeter;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
@@ -138,8 +136,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private static final int HISTORY_PAGE_SIZE = 48;
     private static final int HISTORY_FRAME_SIZE = 4;
     private final ExecutorService historyReader = Executors.newSingleThreadExecutor();
-    private final ExecutorService childReader = Executors.newSingleThreadExecutor();
-    private final Map<AlertDialog, ChildRefresh> childRefreshers = new HashMap<AlertDialog, ChildRefresh>();
     private final ExecutorService toolkitReader = Executors.newCachedThreadPool();
     private final List<ToolkitOperation> toolkitOperations = new ArrayList<ToolkitOperation>();
     private final List<Runnable> historyEvents = new LinkedList<Runnable>();
@@ -664,8 +660,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         cancelApprovals();
         resetHistoryLoading();
         historyReader.shutdownNow();
-        childReader.shutdownNow();
-        for (AlertDialog dialog : new ArrayList<AlertDialog>(childRefreshers.keySet())) dialog.dismiss();
         List<ToolkitOperation> pendingTools;
         synchronized (toolkitOperations) { pendingTools = new ArrayList<ToolkitOperation>(toolkitOperations); }
         for (ToolkitOperation operation : pendingTools) cancelToolkitOperation(operation);
@@ -913,11 +907,20 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                         showWorkDirSheet();
                     }
                 }), fullWidth());
-        body.addView(sheetRow(R.string.more_access, Icons.SHIELD, accessLabel(),
+        body.addView(sheetRow(R.string.sub_agents_title, Icons.CHAT, null,
                 new Runnable() {
                     @Override
                     public void run() {
-                        showAccessSheet();
+                        hideWorkSheet();
+                        showSubAgents();
+                    }
+                }), fullWidth());
+        body.addView(sheetRow(R.string.toolkit_title, Icons.TERMINAL, null,
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        hideWorkSheet();
+                        showToolkit();
                     }
                 }), fullWidth());
         body.addView(sheetRow(R.string.more_settings, Icons.SETTINGS, null,
@@ -1553,7 +1556,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /**
      * 顶部模型胶囊的弹出菜单。
-     * 显示实际生效的思考强度与当前会话的子任务入口。
+     * 思考强度与工具权限。
      */
     private void showModelPopup() {
         if (modelPopup != null && modelPopup.isShowing()) {
@@ -1585,38 +1588,20 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         addEffortOption(card, "中", Settings.EFFORT_MEDIUM);
         addEffortOption(card, "高", Settings.EFFORT_HIGH);
         addEffortOption(card, "最大 (max)", Settings.EFFORT_MAX);
-        if (Settings.AGENT_ULTRA.equals(settings.agentMode())) {
-            TextView policy = popupText(getString(R.string.agent_ultra_effort_hint), 12,
-                    R.color.text_secondary);
-            policy.setPadding(dp(12), dp(8), dp(12), 0);
-            card.addView(policy, wrapParams());
-        }
-        TextView children = popupText(getString(R.string.sub_agents_title), 16, R.color.text_primary);
-        children.setMinHeight(dp(48));
-        children.setGravity(Gravity.CENTER_VERTICAL);
-        children.setPadding(dp(12), dp(8), dp(12), 0);
-        children.setCompoundDrawables(Icons.tinted(this, Icons.CHAT, 0xFF3C3C43, dp(20)), null, null, null);
-        children.setCompoundDrawablePadding(dp(8));
-        children.setOnClickListener(new View.OnClickListener() {
+        addEffortOption(card, "Ultra (ultra)", Settings.EFFORT_ULTRA);
+        TextView permissions = popupText(getString(R.string.more_access) + " · " + accessLabel(), 16, R.color.text_primary);
+        permissions.setMinHeight(dp(48));
+        permissions.setGravity(Gravity.CENTER_VERTICAL);
+        permissions.setPadding(dp(12), dp(8), dp(12), 0);
+        permissions.setCompoundDrawables(Icons.tinted(this, Icons.SHIELD, 0xFF3C3C43, dp(20)), null, null, null);
+        permissions.setCompoundDrawablePadding(dp(8));
+        permissions.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 if (modelPopup != null) modelPopup.dismiss();
-                showSubAgents();
+                showAccessSheet();
             }
         });
-        card.addView(children, wrapParams());
-        TextView toolkit = popupText(getString(R.string.toolkit_title), 16, R.color.text_primary);
-        toolkit.setMinHeight(dp(48));
-        toolkit.setGravity(Gravity.CENTER_VERTICAL);
-        toolkit.setPadding(dp(12), dp(8), dp(12), 0);
-        toolkit.setCompoundDrawables(Icons.tinted(this, Icons.TERMINAL, 0xFF3C3C43, dp(20)), null, null, null);
-        toolkit.setCompoundDrawablePadding(dp(8));
-        toolkit.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                if (modelPopup != null) modelPopup.dismiss();
-                showToolkit();
-            }
-        });
-        card.addView(toolkit, wrapParams());
+        card.addView(permissions, wrapParams());
 
         card.measure(View.MeasureSpec.makeMeasureSpec(dp(280), View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
@@ -1689,46 +1674,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private void showToolkitEntry(final JSONObject entry) {
         final String id = entry.optString("id");
         final ToolkitOperation[] active = { null };
-        final TextView info = popupText(toolkitDetails(entry), 13, R.color.text_primary);
+        final TextView info = popupText(toolkitDetails(entry), 14, R.color.text_primary);
         info.setTextIsSelectable(true);
         info.setAutoLinkMask(android.text.util.Linkify.WEB_URLS);
-        final EditText path = new EditText(this);
-        path.setSingleLine(true);
-        path.setTextSize(14);
-        path.setHint(R.string.toolkit_path_hint);
-        path.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        final EditText runtime = new EditText(this);
-        runtime.setSingleLine(true);
-        runtime.setTextSize(14);
-        runtime.setHint(R.string.toolkit_runtime_hint);
-        runtime.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        JSONObject configuration = entry.optJSONObject("configuration");
-        if (configuration != null) {
-            path.setText(configuration.optString("path"));
-            runtime.setText(configuration.optString("runtime"));
-        }
+        info.setLineSpacing(dp(3), 1f);
         final LinearLayout fields = new LinearLayout(this);
         fields.setOrientation(LinearLayout.VERTICAL);
         fields.setPadding(dp(20), dp(8), dp(20), dp(12));
         fields.addView(info, fullWidth());
-        fields.addView(popupText(getString(R.string.toolkit_path), 12, R.color.text_secondary));
-        fields.addView(path, fullWidth());
-        if ("apktool".equals(id)) {
-            fields.addView(popupText(getString(R.string.toolkit_runtime), 12, R.color.text_secondary));
-            fields.addView(runtime, fullWidth());
-        }
-        final Button bind = toolkitButton(R.string.toolkit_bind, Icons.PENCIL);
-        final Button clear = toolkitButton(R.string.toolkit_clear, Icons.UNDO);
-        final Button install = toolkitButton(R.string.toolkit_install, Icons.PLUS);
         final Button cancel = toolkitButton(R.string.toolkit_cancel, Icons.STOP);
-        LinearLayout first = new LinearLayout(this);
-        first.setOrientation(LinearLayout.HORIZONTAL);
-        first.addView(bind, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        first.addView(clear, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        fields.addView(first, fullWidth());
-        if (entry.optBoolean("download_available") && ("apktool".equals(id) || "radare2".equals(id))) {
-            fields.addView(install, fullWidth());
-        }
         cancel.setVisibility(View.GONE);
         fields.addView(cancel, fullWidth());
         ScrollView pane = new ScrollView(this);
@@ -1745,7 +1699,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final ToolkitResult complete = new ToolkitResult() {
             @Override public void apply(JSONObject result) {
                 active[0] = null;
-                setToolkitBusy(dialog, bind, clear, install, cancel, false);
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+                cancel.setVisibility(View.GONE);
                 java.util.Iterator<String> keys = result.keys();
                 entry.remove("error");
                 while (keys.hasNext()) {
@@ -1753,47 +1708,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     try { entry.put(key, result.get(key)); } catch (Exception ignored) { }
                 }
                 info.setText(toolkitDetails(entry));
-                JSONObject configured = result.optJSONObject("configuration");
-                if (configured != null) {
-                    path.setText(configured.optString("path"));
-                    runtime.setText(configured.optString("runtime"));
-                } else if ("unconfigured".equals(result.optString("state"))) {
-                    path.setText(""); runtime.setText("");
-                    entry.remove("configuration");
-                    entry.remove("probe_output");
-                    entry.remove("ready");
-                }
             }
         };
         dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
-                setToolkitBusy(dialog, bind, clear, install, cancel, true);
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
+                cancel.setVisibility(View.VISIBLE);
                 active[0] = requestToolkit(dialog, toolkitArguments("status", id), complete);
-            }
-        });
-        bind.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                String executable = path.getText().toString().trim(), java = runtime.getText().toString().trim();
-                if (!validToolkitPath(executable) || java.length() > 0 && !validToolkitPath(java)) {
-                    path.setError(getString(R.string.toolkit_absolute_required)); return;
-                }
-                JSONObject args = toolkitArguments("configure", id);
-                try { args.put("path", executable).put("runtime", java); } catch (Exception ignored) { }
-                setToolkitBusy(dialog, bind, clear, install, cancel, true);
-                active[0] = requestToolkit(dialog, args, complete);
-            }
-        });
-        clear.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                setToolkitBusy(dialog, bind, clear, install, cancel, true);
-                active[0] = requestToolkit(dialog, toolkitArguments("clear", id), complete);
-            }
-        });
-        install.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                setToolkitBusy(dialog, bind, clear, install, cancel, true);
-                info.setText(getString(R.string.toolkit_installing));
-                active[0] = requestToolkit(dialog, toolkitArguments("install", id), complete);
             }
         });
         cancel.setOnClickListener(new View.OnClickListener() {
@@ -1801,7 +1722,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 if (active[0] != null) cancelToolkitOperation(active[0]);
                 active[0] = null;
                 info.setText(getString(R.string.toolkit_cancelled));
-                setToolkitBusy(dialog, bind, clear, install, cancel, false);
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+                cancel.setVisibility(View.GONE);
             }
         });
     }
@@ -1816,17 +1738,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return button;
     }
 
-    private void setToolkitBusy(AlertDialog dialog, Button bind, Button clear, Button install, Button cancel, boolean busy) {
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(!busy);
-        bind.setEnabled(!busy); clear.setEnabled(!busy); install.setEnabled(!busy);
-        cancel.setVisibility(busy ? View.VISIBLE : View.GONE);
-    }
-
-    private static boolean validToolkitPath(String path) {
-        return path != null && path.startsWith("/") && path.indexOf('\0') < 0
-                && path.indexOf('\n') < 0 && path.indexOf('\r') < 0;
-    }
-
     private static JSONObject toolkitArguments(String action, String id) {
         JSONObject args = new JSONObject();
         try { args.put("action", action); if (id.length() > 0) args.put("tool", id); }
@@ -1836,6 +1747,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private String toolkitState(String state) {
         if ("ready".equals(state)) return getString(R.string.toolkit_ready);
+        if ("bundled_not_probed".equals(state)) return getString(R.string.toolkit_bundled);
+        if ("unsupported".equals(state)) return getString(R.string.toolkit_unsupported);
         if ("configured_not_probed".equals(state)) return getString(R.string.toolkit_configured);
         if ("needs_runtime".equals(state)) return getString(R.string.toolkit_needs_runtime);
         if ("unavailable".equals(state)) return getString(R.string.toolkit_unavailable);
@@ -1850,16 +1763,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 .append("\n\n").append(getString(R.string.toolkit_requirements)).append('\n').append(entry.optString("requirements"));
         JSONObject config = entry.optJSONObject("configuration");
         if (config != null) {
-            text.append("\n\n").append(getString(R.string.toolkit_path)).append('\n').append(config.optString("path"));
-            if (config.optString("runtime").length() > 0) text.append('\n').append(getString(R.string.toolkit_runtime))
-                    .append("\n").append(config.optString("runtime"));
             if (config.optString("version").length() > 0) text.append("\n").append(config.optString("version"));
         }
-        if (entry.optBoolean("download_available")) try {
-            ToolCatalog.Artifact artifact = ToolCatalog.artifact(entry.optString("id"), android.os.Build.CPU_ABI);
-            text.append("\n\n").append(getString(R.string.toolkit_official_version, artifact.version))
-                    .append('\n').append(artifact.url).append("\nSHA-256: ").append(artifact.sha256);
-        } catch (IllegalArgumentException unsupported) { text.append("\n\n").append(unsupported.getMessage()); }
+        if (entry.optString("version").length() > 0) text.append("\n\n")
+                .append(getString(R.string.toolkit_official_version, entry.optString("version")));
         if (entry.optString("probe_output").length() > 0) text.append("\n\n").append(getString(R.string.toolkit_probe_output))
                 .append('\n').append(shortChildText(entry.optString("probe_output"), 8000));
         if (entry.optString("error").length() > 0) text.append("\n\n").append(entry.optString("error"));
@@ -1921,266 +1828,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void showSubAgents() {
-        final AgentLoop source = loop;
-        final long sid = sessionId;
-        final LinearLayout rows = new LinearLayout(this);
-        rows.setOrientation(LinearLayout.VERTICAL);
-        rows.setPadding(dp(20), dp(8), dp(20), dp(12));
-        ScrollView pane = new ScrollView(this);
-        pane.addView(rows);
-        final AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(R.string.sub_agents_title).setView(pane)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setNeutralButton(R.string.sub_agents_refresh, null).create();
-        dialog.show();
-        watchChildDialog(dialog, rows, source, sid, new Runnable() {
-            @Override public void run() { loadSubAgents(dialog, rows, source, sid); }
-        });
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { loadSubAgents(dialog, rows, source, sid); }
-        });
-        loadSubAgents(dialog, rows, source, sid);
+        Intent intent = new Intent(this, SubAgentsActivity.class);
+        intent.putExtra(SubAgentsActivity.EXTRA_SESSION_ID, sessionId);
+        startActivity(intent);
     }
 
-    private void loadSubAgents(final AlertDialog dialog, final LinearLayout rows,
-            final AgentLoop source, final long sid) {
-        pauseChildRefresh(dialog);
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
-        if (rows.getChildCount() == 0) rows.addView(popupText(getString(R.string.sub_agents_loading), 14, R.color.text_secondary));
-        childReader.execute(new Runnable() {
-            @Override public void run() {
-                final List<SubAgentManager.Record> records = new ArrayList<SubAgentManager.Record>();
-                String failure = "";
-                try {
-                    SubAgentManager manager = source == null || Settings.AGENT_OFF.equals(settings.agentMode())
-                            ? null : RunHub.get(MainActivity.this).subAgents(source);
-                    if (manager != null) for (SubAgentManager.Record record : manager.records()) {
-                        if (!SubAgentManager.ROOT.equals(record.id)) records.add(record);
-                    }
-                } catch (Exception error) { failure = String.valueOf(error.getMessage()); }
-                final String error = failure;
-                ui(new Runnable() {
-                    @Override public void run() {
-                        if (activityDestroyed || isFinishing() || !dialog.isShowing()) return;
-                        if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
-                        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
-                        rows.removeAllViews();
-                        if (error.length() > 0) {
-                            rows.addView(popupText(getString(R.string.sub_agents_error, error), 14, R.color.text_secondary));
-                        } else if (records.isEmpty()) {
-                            rows.addView(popupText(getString(Settings.AGENT_OFF.equals(settings.agentMode())
-                                    ? R.string.sub_agents_disabled : R.string.sub_agents_empty), 14, R.color.text_secondary));
-                        } else for (final SubAgentManager.Record record : records) {
-                            TextView row = popupText(record.name + " · " + childStatus(record.status)
-                                    + "\n" + childPhase(record.phase) + (record.activeTool.length() == 0 ? "" : " · " + record.activeTool)
-                                    + "\n" + shortChildText(record.progress.length() == 0 ? record.task : record.progress, 180), 14, R.color.text_primary);
-                            row.setPadding(0, dp(12), 0, dp(12));
-                            row.setOnClickListener(new View.OnClickListener() {
-                                @Override public void onClick(View view) { showSubAgent(source, sid, record.id); }
-                            });
-                            rows.addView(row, fullWidth());
-                        }
-                        for (SubAgentManager.Record record : records) if (childActive(record.status)) {
-                            resumeChildRefresh(dialog); break;
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    private void showSubAgent(final AgentLoop source, final long sid, final String id) {
-        final TextView body = popupText(getString(R.string.sub_agents_loading), 14, R.color.text_primary);
-        body.setPadding(dp(20), dp(8), dp(20), dp(12));
-        body.setTextIsSelectable(true);
-        ScrollView pane = new ScrollView(this);
-        pane.addView(body);
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.addView(pane, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                Math.max(dp(180), getResources().getDisplayMetrics().heightPixels / 2)));
-        LinearLayout pages = new LinearLayout(this);
-        pages.setOrientation(LinearLayout.HORIZONTAL);
-        final Button earlier = new Button(this);
-        earlier.setText(R.string.sub_agents_earlier);
-        final Button later = new Button(this);
-        later.setText(R.string.sub_agents_later);
-        pages.addView(earlier, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        pages.addView(later, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        content.addView(pages, fullWidth());
-        final int[] bounds = {0, 0, 0};
-        final AlertDialog dialog = new AlertDialog.Builder(this).setTitle(R.string.sub_agents_title).setView(content)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setNeutralButton(R.string.sub_agents_refresh, null)
-                .setPositiveButton(R.string.sub_agents_stop, null).create();
-        dialog.show();
-        watchChildDialog(dialog, body, source, sid, new Runnable() {
-            @Override public void run() { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -2); }
-        });
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -1); }
-        });
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, true, -1); }
-        });
-        earlier.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, bounds[0]);
-            }
-        });
-        later.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false,
-                        Math.min(bounds[2], bounds[1] + 40));
-            }
-        });
-        loadSubAgent(dialog, body, earlier, later, bounds, source, sid, id, false, -1);
-    }
-
-    private void loadSubAgent(final AlertDialog dialog, final TextView body, final Button earlier,
-            final Button later, final int[] bounds, final AgentLoop source,
-            final long sid, final String id, final boolean stop, final int before) {
-        pauseChildRefresh(dialog);
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
-        earlier.setEnabled(false);
-        later.setEnabled(false);
-        childReader.execute(new Runnable() {
-            @Override public void run() {
-                String text;
-                String status = SubAgentManager.CLOSED;
-                int start = 0, end = 0, total = 0;
-                try {
-                    SubAgentManager manager = Settings.AGENT_OFF.equals(settings.agentMode())
-                            ? null : RunHub.get(MainActivity.this).subAgents(source);
-                    if (manager == null) throw new IllegalStateException(getString(R.string.sub_agents_disabled));
-                    if (stop) manager.close(SubAgentManager.ROOT, id);
-                    SubAgentManager.Record record = manager.find(id);
-                    status = record.status;
-                    total = record.history.length();
-                    end = before == -2 && bounds[1] < bounds[2] ? Math.min(bounds[1], total)
-                            : before < 0 ? total : Math.min(before, total);
-                    start = Math.max(0, end - 40);
-                    text = childDetails(record, start, end);
-                } catch (Exception error) { text = getString(R.string.sub_agents_error, String.valueOf(error.getMessage())); }
-                final String details = text;
-                final int from = start, to = end, count = total;
-                final boolean canStop = !SubAgentManager.CLOSED.equals(status);
-                final boolean active = childActive(status);
-                ui(new Runnable() {
-                    @Override public void run() {
-                        if (activityDestroyed || isFinishing() || !dialog.isShowing()) return;
-                        if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
-                        body.setText(details);
-                        bounds[0] = from; bounds[1] = to; bounds[2] = count;
-                        earlier.setEnabled(from > 0);
-                        later.setEnabled(to < count);
-                        ViewParent parent = body.getParent();
-                        if (before != -2 && parent instanceof ScrollView) ((ScrollView) parent).scrollTo(0, 0);
-                        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
-                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(canStop);
-                        if (active) resumeChildRefresh(dialog);
-                    }
-                });
-            }
-        });
-    }
-
-    private String childDetails(SubAgentManager.Record record, int from, int to) throws Exception {
-        StringBuilder text = new StringBuilder(record.name).append(" · ").append(childStatus(record.status))
-                .append("\n").append(record.id).append("\n").append(childPhase(record.phase));
-        if (record.activeTool.length() > 0) text.append(" · ").append(record.activeTool);
-        if (record.lastActivityAt > 0) text.append("\n").append(getString(R.string.sub_agents_updated,
-                android.text.format.DateFormat.format("HH:mm:ss", record.lastActivityAt)));
-        if (record.progress.length() > 0) text.append("\n").append(shortChildText(record.progress, 600));
-        text.append("\n\n")
-                .append(getString(R.string.sub_agents_task)).append('\n').append(shortChildText(record.task, 8000));
-        if (record.result.length() > 0) text.append("\n\n").append(getString(R.string.sub_agents_result))
-                .append('\n').append(shortChildText(record.result, 8000));
-        if (record.error.length() > 0) text.append("\n\n").append(getString(R.string.sub_agents_failure))
-                .append('\n').append(shortChildText(record.error, 8000));
-        text.append("\n\n").append(getString(R.string.sub_agents_history_page,
-                Integer.valueOf(to > from ? from + 1 : from), Integer.valueOf(to), Integer.valueOf(record.history.length())));
-        int remaining = 32000;
-        for (int i = from; i < to; i++) {
-            Message message = Message.fromCheckpointJson(record.history.getJSONObject(i));
-            if ("system".equals(message.role)) continue;
-            text.append("\n\n[").append(message.role).append("]\n");
-            String messageText = PromptGuard.redact(message.content, settings.systemPrompt(), settings.environmentContext(), "");
-            if (message.toolCalls != null) messageText += "\n" + message.toolCalls.toString();
-            int limit = Math.min(8000, Math.max(100, remaining / Math.max(1, to - i)));
-            text.append(shortChildText(messageText, limit));
-            remaining -= Math.min(limit, messageText.length());
-            if (messageText.length() > limit) text.append('\n').append(getString(R.string.sub_agents_text_truncated));
-        }
-        return text.toString();
-    }
-
-    private final class ChildRefresh implements Runnable {
-        final AlertDialog dialog;
-        final View host;
-        final AgentLoop source;
-        final long sid;
-        final Runnable refresh;
-        ChildRefresh(AlertDialog dialog, View host, AgentLoop source, long sid, Runnable refresh) {
-            this.dialog = dialog; this.host = host; this.source = source; this.sid = sid; this.refresh = refresh;
-        }
-        @Override public void run() {
-            if (activityDestroyed || isFinishing() || !dialog.isShowing()) return;
-            if (source != loop || sid != sessionId) { dialog.dismiss(); return; }
-            refresh.run();
-        }
-    }
-
-    private void watchChildDialog(final AlertDialog dialog, View host, AgentLoop source, long sid, Runnable refresh) {
-        childRefreshers.put(dialog, new ChildRefresh(dialog, host, source, sid, refresh));
-        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
-            @Override public void onDismiss(android.content.DialogInterface ignored) {
-                pauseChildRefresh(dialog); childRefreshers.remove(dialog);
-            }
-        });
-    }
-
-    private void pauseChildRefresh(AlertDialog dialog) {
-        ChildRefresh refresh = childRefreshers.get(dialog);
-        if (refresh != null) refresh.host.removeCallbacks(refresh);
-    }
-
-    private void resumeChildRefresh(AlertDialog dialog) {
-        ChildRefresh refresh = childRefreshers.get(dialog);
-        if (refresh != null && dialog.isShowing()) {
-            refresh.host.removeCallbacks(refresh); refresh.host.postDelayed(refresh, 1000L);
-        }
-    }
-
-    private static boolean childActive(String status) {
-        return SubAgentManager.RUNNING.equals(status) || SubAgentManager.QUEUED.equals(status) || SubAgentManager.WAITING.equals(status);
-    }
-
-    private String childPhase(String phase) {
-        if ("tool".equals(phase)) return getString(R.string.sub_agents_phase_tool);
-        if ("thinking".equals(phase)) return getString(R.string.sub_agents_phase_thinking);
-        if ("responding".equals(phase)) return getString(R.string.sub_agents_phase_responding);
-        if ("reviewing".equals(phase)) return getString(R.string.sub_agents_phase_reviewing);
-        if ("compacting".equals(phase)) return getString(R.string.sub_agents_phase_compacting);
-        if ("retrying".equals(phase)) return getString(R.string.sub_agents_phase_retrying);
-        if ("completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
-        if ("model".equals(phase) || "starting".equals(phase)) return getString(R.string.sub_agents_phase_model);
-        return childStatus("cancelled".equals(phase) ? SubAgentManager.CLOSED : phase);
-    }
 
     private static String shortChildText(String text, int limit) {
         if (text == null) return "";
         return text.length() <= limit ? text : text.substring(0, limit) + "…";
-    }
-
-    private String childStatus(String status) {
-        if (SubAgentManager.QUEUED.equals(status)) return getString(R.string.sub_agents_queued);
-        if (SubAgentManager.RUNNING.equals(status)) return getString(R.string.sub_agents_running);
-        if (SubAgentManager.WAITING.equals(status)) return getString(R.string.sub_agents_waiting);
-        if (SubAgentManager.IDLE.equals(status)) return getString(R.string.sub_agents_idle);
-        if (SubAgentManager.FAILED.equals(status)) return getString(R.string.sub_agents_failed);
-        return getString(R.string.sub_agents_closed);
     }
 
     /** 芯片在底栏，菜单往上弹，避免掉到屏幕外。 */
@@ -2215,10 +1871,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         row.setPadding(dp(12), 0, dp(12), 0);
         if (effort.equals(settings.effectiveReasoningEffort())) {
             row.setBackgroundResource(R.drawable.bg_popup_selected);
-        }
-        if (Settings.AGENT_ULTRA.equals(settings.agentMode()) && !Settings.EFFORT_MAX.equals(effort)) {
-            row.setEnabled(false);
-            row.setAlpha(0.45f);
         }
         row.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -2575,7 +2227,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 modelChip.setText(R.string.status_no_model);
             } else {
                 String effort = effortLabel(settings.effectiveReasoningEffort());
-                if (Settings.AGENT_ULTRA.equals(settings.agentMode())) effort = "ultra " + effort;
                 String name = displayModelName(settings.model());
                 modelChip.setText(effort.length() == 0 ? name : name + "  " + effort);
             }
@@ -2601,6 +2252,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         if (Settings.EFFORT_MAX.equals(effort)) {
             return "max";
+        }
+        if (Settings.EFFORT_ULTRA.equals(effort)) {
+            return "ultra";
         }
         return "";
     }

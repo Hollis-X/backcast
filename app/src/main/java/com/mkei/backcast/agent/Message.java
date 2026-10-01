@@ -36,6 +36,8 @@ public class Message {
     public boolean goalFinalReply;
     public String delegatedRequest;
     public JSONArray coordinationIds;
+    public Boolean delegationAuthorized;
+    public boolean delegationForbidden;
 
     public Message(String role, String content) {
         this.role = role;
@@ -125,6 +127,8 @@ public class Message {
             if (goalFinalReply) item.put("goal_final_reply", true);
             if (delegatedRequest != null) item.put("delegated_request", delegatedRequest);
             if (coordinationIds != null) item.put("coordination_ids", coordinationIds);
+            if (delegationAuthorized != null) item.put("delegation_authorized", delegationAuthorized);
+            if (delegationForbidden) item.put("delegation_forbidden", true);
             return item;
         } catch (Exception invalid) {
             throw new IllegalStateException("Invalid context checkpoint message", invalid);
@@ -140,6 +144,8 @@ public class Message {
         message.goalFinalReply = item.optBoolean("goal_final_reply", false);
         if (item.has("delegated_request")) message.delegatedRequest = item.optString("delegated_request", "");
         message.coordinationIds = item.optJSONArray("coordination_ids");
+        if (item.has("delegation_authorized")) message.delegationAuthorized = Boolean.valueOf(item.optBoolean("delegation_authorized"));
+        message.delegationForbidden = item.optBoolean("delegation_forbidden", false);
         return message;
     }
 }

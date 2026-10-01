@@ -15,6 +15,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -40,8 +41,9 @@ public final class SubAgentCommunicationRegressionTest {
         final AgentLoop root;
         final AtomicInteger requests = new AtomicInteger(), probes = new AtomicInteger();
         final CountDownLatch toolStarted = new CountDownLatch(1), toolRelease = new CountDownLatch(1);
+        final CountDownLatch cleanupStarted = new CountDownLatch(1), cleanupRelease = new CountDownLatch(1);
         final CountDownLatch twoStarted = new CountDownLatch(2), twoRelease = new CountDownLatch(1);
-        volatile boolean holdTool;
+        volatile boolean holdTool, holdCleanup;
         Script script;
         Fixture() throws Exception { this(new Store()); }
         Fixture(Store store) throws Exception {
@@ -50,6 +52,7 @@ public final class SubAgentCommunicationRegressionTest {
                     new ToolRegistry(), new AgentLoop.Quiet());
             root.bindSession(1); root.reset("trusted parent policy");
             manager = new SubAgentManager(2, this, store); manager.attachRoot(root);
+            root.setAutomaticDelegation(true);
         }
         @Override public AgentLoop create(final SubAgentManager.Record task, AgentLoop.Listener listener,
                 final SubAgentManager shared) {
@@ -73,8 +76,12 @@ public final class SubAgentCommunicationRegressionTest {
                 @Override public JSONObject parameters() { return new JSONObject(); }
                 @Override public String run(JSONObject args) throws Exception {
                     probes.incrementAndGet(); toolStarted.countDown();
-                    if (holdTool) await(toolRelease);
-                    return "verified fixture evidence";
+                    try {
+                        if (holdTool) await(toolRelease);
+                        return "verified fixture evidence";
+                    } finally {
+                        if (holdCleanup) { cleanupStarted.countDown(); await(cleanupRelease); }
+                    }
                 }
                 @Override public void abort() { toolRelease.countDown(); }
             });
@@ -396,6 +403,98 @@ public final class SubAgentCommunicationRegressionTest {
                 "Next valid parent turn could not collect the completed evidence");
     }
 
+    private static void userReusedChildReportsLifecycleOutsideManagerLock() throws Exception {
+        final Fixture f = new Fixture(); f.script = new Script() {
+            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
+                    List<Message> messages) throws Exception {
+                return turn == 2 ? call("probe", new JSONObject()) : text("completed evidence");
+            }
+        };
+        final String id = f.spawn("reusable", "produce evidence", false); f.settle();
+        check(!f.root.busy() && !f.manager.hasLiveWork(), "Initial child did not become idle");
+        final AtomicInteger starts = new AtomicInteger();
+        final CountDownLatch ended = new CountDownLatch(1);
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        f.manager.setWorkObserver(new SubAgentManager.WorkObserver() {
+            @Override public void onWorkChanged() {
+                final CountDownLatch unlocked = new CountDownLatch(1);
+                Thread query = new Thread(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            if (f.manager.hasLiveWork()) starts.incrementAndGet(); else if (starts.get() > 0) ended.countDown();
+                            f.manager.find(id);
+                        } catch (Throwable error) { failure.set(error); }
+                        finally { unlocked.countDown(); }
+                    }
+                });
+                query.start();
+                try { if (!unlocked.await(2, TimeUnit.SECONDS)) failure.set(new AssertionError("Lifecycle observer ran under the manager lock")); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); failure.set(error); }
+            }
+        });
+        f.root.setAutomaticDelegation(false); f.holdTool = true;
+        try {
+            f.manager.sendFromUser(id, "read new evidence and report");
+            await(f.toolStarted);
+            check(f.manager.hasLiveWork() && !f.root.busy() && starts.get() > 0,
+                    "User's child-only work never reported a live lifecycle while the parent was idle");
+            f.toolRelease.countDown(); f.settle(); await(ended);
+            check(!f.manager.hasLiveWork() && !f.root.busy() && failure.get() == null,
+                    "Child completion failed to report idle or observer could not query the manager outside its lock: " + failure.get());
+        } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
+    }
+
+    private static void restoredQueuesRemainDormantUntilExplicitResume() throws Exception {
+        Store store = new Store(); SubAgentManager.Record record = new SubAgentManager.Record();
+        record.id = "recovered"; record.name = "recovered"; record.parentId = "main";
+        record.task = "old delegated work"; record.status = SubAgentManager.QUEUED; record.sessionId = 21;
+        record.pending.put(new JSONObject().put("id", "saved-mail").put("from", "main").put("text", record.task)); store.save(record);
+        final Fixture f = new Fixture(store); final AtomicInteger starts = new AtomicInteger();
+        final CountDownLatch ended = new CountDownLatch(1);
+        f.script = new Script() {
+            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
+                    List<Message> messages) { return text("explicitly resumed result"); }
+        };
+        f.manager.setWorkObserver(new SubAgentManager.WorkObserver() {
+            @Override public void onWorkChanged() {
+                if (f.manager.hasLiveWork()) starts.incrementAndGet(); else ended.countDown();
+            }
+        });
+        check(f.manager.hasPendingWork() && !f.manager.hasLiveWork(), "Loaded child queue keeps the background service alive before explicit resume");
+        f.manager.setMaxParallel(3);
+        check(!f.manager.hasLiveWork() && starts.get() == 0 && f.requests.get() == 0, "Binding configuration automatically resumed stored child work");
+        f.manager.resumePending(); f.settle(); await(ended);
+        check(f.requests.get() == 1 && !f.manager.hasLiveWork(), "Explicit resume failed or completed child remains live");
+        f.manager.cancelAll();
+        Fixture stopped = new Fixture(f.store);
+        check(!stopped.manager.hasLiveWork() && !stopped.manager.hasPendingWork(), "Stopped child lifecycle restarted after recovery");
+    }
+
+    private static void closingChildKeepsLiveWorkUntilItsToolCleanupFinishes() throws Exception {
+        final Fixture f = new Fixture(); f.holdTool = true; f.holdCleanup = true;
+        final CountDownLatch stopped = new CountDownLatch(1); final AtomicInteger starts = new AtomicInteger();
+        f.script = new Script() {
+            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
+                    List<Message> messages) throws Exception {
+                return turn == 1 ? call("probe", new JSONObject()) : text("finished");
+            }
+        };
+        f.manager.setWorkObserver(new SubAgentManager.WorkObserver() {
+            @Override public void onWorkChanged() {
+                if (f.manager.hasLiveWork()) starts.incrementAndGet(); else if (starts.get() > 0) stopped.countDown();
+            }
+        });
+        String id = f.spawn("cleanup", "read and clean temporary material", false);
+        try {
+            await(f.toolStarted); f.manager.close("main", id); await(f.cleanupStarted);
+            check(f.manager.hasLiveWork() && SubAgentManager.CLOSED.equals(f.manager.find(id).status)
+                    && stopped.getCount() == 1 && !f.root.busy(),
+                    "Closing a child ended its background lifecycle before its tool cleanup completed");
+            f.cleanupRelease.countDown(); f.settle(); await(stopped);
+            check(!f.manager.hasLiveWork(), "Completed cleanup kept the service live forever");
+        } finally { f.toolRelease.countDown(); f.cleanupRelease.countDown(); f.manager.cancelAll(); }
+    }
+
     public static void main(String[] args) throws Exception {
         String[] tests = {"complexForkedTaskReachesTheModelAndRunsTools", "actualDisclosureTaskRemainsRefusedAndFailed",
                 "delegatedMetadataSurvivesRecoveryWithoutLeakingToApi", "liveParentMessageArrivesBeforeTheNextToolRequest",
@@ -403,7 +502,9 @@ public final class SubAgentCommunicationRegressionTest {
                 "cursorWaitDoesNotSpinOnTheSameRunningState", "acknowledgedMailboxIsExactAndRestorable",
                 "childWaitDoesNotWakeItselfByYieldingItsSlot", "legacyRefusalResultIsMigratedToFailure",
                 "checkpointedLiveMessageIsNotInjectedTwiceAfterRestart", "objectiveChangeDropsOldLiveInstructionsBeforeChildReuse",
-                "cancelledNestedWaitKeepsItsFailedStateAcrossRecovery", "invalidSettlementWaitDoesNotConsumeUndeliveredResults"};
+                "cancelledNestedWaitKeepsItsFailedStateAcrossRecovery", "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
+                "userReusedChildReportsLifecycleOutsideManagerLock", "restoredQueuesRemainDormantUntilExplicitResume",
+                "closingChildKeepsLiveWorkUntilItsToolCleanupFinishes"};
         int failed = 0;
         for (String test : tests) {
             try { SubAgentCommunicationRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); }

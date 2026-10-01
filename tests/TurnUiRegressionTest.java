@@ -221,7 +221,8 @@ public final class TurnUiRegressionTest {
                 + "toolkit_needs_runtime=24,toolkit_unavailable=25,toolkit_failed=26,toolkit_cancelled=27,toolkit_unconfigured=28,"
                 + "toolkit_source=29,toolkit_requirements=30,toolkit_path=31,toolkit_runtime=32,toolkit_official_version=33,toolkit_probe_output=34,"
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
-                + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43; }"
+                + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
+                + "toolkit_bundled=44,toolkit_unsupported=45; }"
                 + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400;}"
@@ -231,7 +232,6 @@ public final class TurnUiRegressionTest {
                 + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return mainRoot;}"
                 + "static List<Runnable> posted=new ArrayList<Runnable>(); List<Runnable> uiTasks=Collections.synchronizedList(new ArrayList<Runnable>());"
                 + "Object approvalLock=new Object();List<ApprovalRequest> approvals=new LinkedList<ApprovalRequest>();volatile boolean activityDestroyed;"
-                + "Map<AlertDialog,ChildRefresh> childRefreshers=new HashMap<AlertDialog,ChildRefresh>();"
                 + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newCachedThreadPool();"
                 + "List<ToolkitOperation> toolkitOperations=new ArrayList<ToolkitOperation>();"
                 + "static class QueuedReader { List<Runnable> tasks=new ArrayList<Runnable>(); void execute(Runnable r){tasks.add(r);} }"
@@ -283,7 +283,6 @@ public final class TurnUiRegressionTest {
         source.append(METHODS.get("ApprovalRequest"));
         source.append(METHODS.get("ToolkitOperation"));
         source.append(METHODS.get("ToolkitResult"));
-        source.append(METHODS.get("ChildRefresh"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {
             check(METHODS.containsKey(name), "Missing UI constant " + name);
             source.append(METHODS.get(name));
@@ -293,11 +292,10 @@ public final class TurnUiRegressionTest {
                 "loadEarlierPage", "insertEarlierPage", "resetHistoryLoading", "stripCompactionAsks", "host", "autoScroll",
                 "stuckAtEnd", "latestScrollY", "updateLatestButton", "scrollToLatest", "jumpToLatest", "cancelLatestJumpAnimation",
                 "pinLastMessage",
-                "childDetails", "childStatus", "shortChildText", "childPhase", "childActive",
-                "watchChildDialog", "pauseChildRefresh", "resumeChildRefresh",
+                "shortChildText",
                 "approve", "approvalCurrent", "showApproval", "cancelApprovals", "prettyArgs",
                 "requestToolkit", "cancelToolkitOperation", "closeToolkitSession", "toolkitArguments",
-                "toolkitState", "toolkitDetails", "validToolkitPath",
+                "toolkitState", "toolkitDetails",
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive",
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
@@ -1011,131 +1009,22 @@ public final class TurnUiRegressionTest {
         check(METHODS.get("hideWorkSheet").contains("resetSheetDetails"), "Sheet retains detail views after dismissal");
         pass("uiTokenWiringIsComplete");
     }
-    private static void childDetailsArePagedBoundedAndHideSystemMessages() throws Exception {
-        Object view=fixture();
-        SubAgentManager.Record record=new SubAgentManager.Record();
-        record.name="child name";record.id="child_1";record.task="inspect module";record.status=SubAgentManager.RUNNING;
-        record.result="result evidence";record.error="error detail";
-        record.history.put(Message.system("HIDDEN_SYSTEM_SENTINEL").toCheckpointJson());
-        for(int i=0;i<100;i++) record.history.put(Message.assistant("PAGE_SENTINEL_"+i+"_END",null).toCheckpointJson());
-        Method details=viewType.getDeclaredMethod("childDetails",SubAgentManager.Record.class,int.class,int.class);
-        details.setAccessible(true);
-        String latest=(String)details.invoke(view,record,61,101), earlier=(String)details.invoke(view,record,21,61);
-        check(latest.contains("PAGE_SENTINEL_99_END") && latest.contains("PAGE_SENTINEL_60_END")
-                && !latest.contains("PAGE_SENTINEL_59_END") && !latest.contains("HIDDEN_SYSTEM_SENTINEL"),
-                "Child details rendered outside the selected page or displayed a system message");
-        check(earlier.contains("PAGE_SENTINEL_59_END") && !earlier.contains("PAGE_SENTINEL_99_END")
-                && earlier.contains("inspect module") && earlier.contains("result evidence") && earlier.contains("error detail"),
-                "An earlier child page lost task/evidence details or showed the wrong history");
-        StringBuilder longText=new StringBuilder();for(int i=0;i<100000;i++)longText.append('x');
-        record.history=new JSONArray();for(int i=0;i<40;i++)record.history.put(Message.assistant(longText.toString(),null).toCheckpointJson());
-        String bounded=(String)details.invoke(view,record,0,40);
-        check(bounded.length()<40000,"A child detail page can still expand to unbounded tool output");
-        pass("childDetailsPageHistoryAndBoundLongOutputWithoutDisclosingSystemMessages");
-    }
-    private static void childDetailsExposeRealPhaseToolProgressAndActivityTime() throws Exception {
-        Object view=fixture();
-        SubAgentManager.Record record=new SubAgentManager.Record();
-        record.name="inspector";record.id="child_phase";record.task="inspect module";
-        record.status=SubAgentManager.RUNNING;record.phase="tool";record.activeTool="shell";
-        record.progress="Verified the first two modules; inspecting the third.";
-        record.lastActivityAt=1696118400000L;
-        String time=new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date(record.lastActivityAt));
-        String details=(String)invoke(view,"childDetails",record,0,0);
-        check(details.contains("\n35 · shell") && details.contains(record.progress) && details.contains(time),
-                "Child details omitted actual tool phase, progress evidence, or last activity time");
-        record.phase="failed";record.status=SubAgentManager.FAILED;record.activeTool="";
-        record.error="The required binary was unavailable.";record.result="Partial evidence retained.";
-        details=(String)invoke(view,"childDetails",record,0,0);
-        check(details.startsWith("inspector · 16") && details.contains(record.error) && details.contains(record.result)
-                && !details.contains("· shell"),"Failure hid its evidence or retained a completed tool as active");
-        String[] phases={"queued","starting","model","thinking","responding","tool","reviewing","compacting",
-                "retrying","completed","failed","cancelled","waiting","idle","closed"};
-        String[] labels={"12","42","42","36","37","35","38","39","40","41","16","17","14","15","17"};
-        for(int i=0;i<phases.length;i++) check(labels[i].equals(invoke(view,"childPhase",phases[i])),
-                "Actual child phase has no correct display label: "+phases[i]);
-        pass("childDetailsShowActualPhaseToolProgressTimeAndRetainFailureEvidence");
-    }
-    private static void onlyActiveChildrenNeedAutomaticRefresh() throws Exception {
-        Object view=fixture();
-        for(String status:new String[]{SubAgentManager.QUEUED,SubAgentManager.RUNNING,SubAgentManager.WAITING})
-            check((Boolean)invoke(view,"childActive",status),"Active child does not request updates: "+status);
-        for(String status:new String[]{SubAgentManager.IDLE,SubAgentManager.FAILED,SubAgentManager.CLOSED,"completed",""})
-            check(!(Boolean)invoke(view,"childActive",status),"Inactive child keeps polling: "+status);
-        pass("childPollingRecognizesOnlyQueuedRunningAndWaitingTasks");
-    }
-    private static void childRefreshIsOnePerSecondAndPausesDuringLoading() throws Exception {
-        SystemClock.set(5000);
-        final Object view=fixture(),dialog=toolkitDialog(view),host=get(view,"scroll");
-        AgentLoop source=running(1000,1);field(view,"loop",source);
-        final int[] refreshes={0};final boolean[] active={true};
-        Runnable load=new Runnable(){@Override public void run(){
-            refreshes[0]++;
-            try {
-                invoke(view,"pauseChildRefresh",dialog);
-                if(active[0])invoke(view,"resumeChildRefresh",dialog);
-            } catch(Exception failure) {throw new RuntimeException(failure);}
-        }};
-        invoke(view,"watchChildDialog",dialog,host,source,7L,load);
-        for(int i=0;i<5;i++)invoke(view,"resumeChildRefresh",dialog);
-        check(((List<?>)get(host,"delayed")).size()==1,"Repeated refresh completion enqueued duplicate child polls");
-        SystemClock.advance(999);invoke(host,"runDue");
-        check(refreshes[0]==0,"Child poll ran sooner than one second");
-        SystemClock.advance(1);invoke(host,"runDue");
-        check(refreshes[0]==1 && ((List<?>)get(host,"delayed")).size()==1,"One poll did not schedule exactly one next poll");
-        SystemClock.advance(999);invoke(host,"runDue");
-        check(refreshes[0]==1,"Child completion started a rapid polling loop");
-        invoke(view,"pauseChildRefresh",dialog);
-        SystemClock.advance(1001);invoke(host,"runDue");
-        check(refreshes[0]==1 && ((List<?>)get(host,"delayed")).isEmpty(),"A pending poll survived manual/background loading pause");
-        invoke(view,"resumeChildRefresh",dialog);active[0]=false;
-        SystemClock.advance(1000);invoke(host,"runDue");
-        check(refreshes[0]==2 && ((List<?>)get(host,"delayed")).isEmpty(),"Completed child kept an automatic poll scheduled");
-        call(dialog,"dismiss");
-        pass("childRefreshKeepsOneOneSecondCallbackAndPausesForLoadOrCompletion");
-    }
-    private static void childRefreshStopsForDismissalSessionChangeAndActivityDestruction() throws Exception {
-        for(int scenario=0;scenario<4;scenario++) {
-            SystemClock.set(10000);
-            Object view=fixture(),dialog=toolkitDialog(view),host=get(view,"scroll");
-            AgentLoop source=running(1000,1);field(view,"loop",source);
-            final int[] refreshes={0};
-            invoke(view,"watchChildDialog",dialog,host,source,7L,(Runnable)()->refreshes[0]++);
-            invoke(view,"resumeChildRefresh",dialog);
-            Runnable stale=(Runnable)((List<?>)get(host,"delayed")).get(0);
-            if(scenario==0) {
-                call(dialog,"dismiss");
-                check(((List<?>)get(host,"delayed")).isEmpty() && ((Map<?,?>)get(view,"childRefreshers")).isEmpty(),
-                        "Dismissal retained the child poll or dialog owner");
-                stale.run();
-            } else {
-                if(scenario==1)field(view,"sessionId",8L);
-                if(scenario==2)field(view,"loop",running(2000,2));
-                if(scenario==3)field(view,"activityDestroyed",true);
-                SystemClock.advance(1000);invoke(host,"runDue");
-                if(scenario!=3)check(!(Boolean)get(dialog,"showing") && ((Map<?,?>)get(view,"childRefreshers")).isEmpty(),
-                        "Changing session or root loop kept the old child dialog polling");
-            }
-            check(refreshes[0]==0 && ((List<?>)get(host,"delayed")).isEmpty(),
-                    "A stale child refresh ran after its lifecycle ended: "+scenario);
-            call(dialog,"dismiss");
-        }
-        check(METHODS.get("onDestroy").contains("childRefreshers.keySet()")
-                && METHODS.get("onDestroy").contains("dialog.dismiss()"),"Activity destruction leaves registered child dialogs behind");
-        pass("childRefreshDropsDismissedChangedSessionAndDestroyedActivityCallbacks");
-    }
-    private static void childUiReadsAndStopsOffTheUiThread() {
-        String list=METHODS.get("loadSubAgents"), detail=METHODS.get("loadSubAgent");
-        check(METHODS.get("showModelPopup").contains("showSubAgents()"),"Current-session child UI has no actual entry");
-        check(list.indexOf("childReader.execute")<list.indexOf("manager.records()")
-                && detail.indexOf("childReader.execute")<detail.indexOf("manager.find(id)")
-                && detail.indexOf("childReader.execute")<detail.indexOf("manager.close("),
-                "Child reads or stopping a process can block the UI thread");
-        check(list.contains("source != loop") && list.contains("sid != sessionId")
-                && detail.contains("source != loop") && detail.contains("sid != sessionId"),
-                "Child dialog applies an old session's asynchronous result");
-        check(METHODS.get("onDestroy").contains("childReader.shutdownNow()"),"Child UI executor survives the activity");
-        pass("childUiHasARealEntryAndPerSessionAsynchronousReadAndStopOwnership");
+    private static void conversationMenusSeparateEffortPermissionsAndTaskPage() {
+        String model=METHODS.get("showModelPopup"),more=METHODS.get("showMoreSheet"),open=METHODS.get("showSubAgents");
+        check(model.contains("Settings.EFFORT_MAX") && model.contains("Settings.EFFORT_ULTRA"),
+                "max and ultra are not independent menu choices");
+        check(model.contains("showAccessSheet()") && !model.contains("showSubAgents()")
+                && !model.contains("showToolkit()"), "Effort popup still contains unrelated task or download controls");
+        check(more.contains("showSubAgents()") && more.contains("showToolkit()") && !more.contains("showAccessSheet()"),
+                "More menu does not provide task/tools entries or duplicates permissions");
+        check(open.contains("SubAgentsActivity.class") && open.contains("EXTRA_SESSION_ID") && open.contains("sessionId"),
+                "Task page does not open the actual current session");
+        check(!METHODS.get("addEffortOption").contains("setEnabled(false)"),
+                "Selecting ultra prevents returning to max or another effort");
+        String toolkit=METHODS.get("showToolkitEntry");
+        check(!toolkit.contains("new EditText") && !toolkit.contains("\"install\"") && !toolkit.contains("\"configure\"")
+                && toolkit.contains("\"status\""), "Bundled tool page still asks users to download or bind paths");
+        pass("conversationMenusSeparateIndependentEffortsPermissionsTasksAndBundledToolStatus");
     }
     private static Class<?> dialogType() {
         for(Class<?> type:viewType.getDeclaredClasses()) if(type.getSimpleName().equals("AlertDialog"))return type;
@@ -1252,20 +1141,15 @@ public final class TurnUiRegressionTest {
             entry.put("state","configured_not_probed").put("configuration",new JSONObject().put("path","/installed/"+entry.getString("id")));
             String text=(String)invoke(view,"toolkitDetails",entry);
             check(text.contains(entry.getString("source")) && text.contains(entry.getString("requirements"))
-                    && text.contains("/installed/"+entry.getString("id")) && text.startsWith("23"),
+                    && text.startsWith("23") && !text.contains("/installed/"),
                     "Tool details lost catalog provenance/dependencies or advertised an unprobed binding as ready");
-            if(entry.optBoolean("download_available"))check(text.contains("SHA-256:") && text.contains("releases/download"),
-                    "Installable tool details omitted pinned release provenance");
         }
-        JSONObject args=(JSONObject)invoke(view,"toolkitArguments","configure","apktool");
-        check("configure".equals(args.getString("action")) && "apktool".equals(args.getString("tool")),
+        JSONObject args=(JSONObject)invoke(view,"toolkitArguments","status","apktool");
+        check("status".equals(args.getString("action")) && "apktool".equals(args.getString("tool")),
                 "UI toolkit command arguments were flattened into shell text");
-        for(String path:new String[]{"relative","/path\nother","/path\0other"})
-            check(!(Boolean)invoke(view,"validToolkitPath",path),"UI accepted a malformed binding path");
-        check((Boolean)invoke(view,"validToolkitPath","/installed/java"),"UI rejected an absolute runtime");
-        check(METHODS.get("showModelPopup").contains("showToolkit()") && METHODS.get("showToolkitEntry").contains("download_available")
-                && METHODS.get("showToolkitEntry").contains("\"apktool\".equals(id) || \"radare2\".equals(id)"),
-                "Toolkit UI has no actual menu entry or exposes an unsupported official installer");
+        check(METHODS.get("showMoreSheet").contains("showToolkit()") && METHODS.get("showToolkitEntry").contains("\"status\"")
+                && !METHODS.get("showToolkitEntry").contains("new EditText"),
+                "Bundled tools UI lacks a status entry or requires manual path configuration");
         stopToolkitExecutor(view);
         pass("toolkitUiDisplaysRealCatalogProvenanceRequirementsAndUnprobedState");
     }
@@ -1389,12 +1273,7 @@ public final class TurnUiRegressionTest {
                 bufferedCallbacksYieldAndRejectOldSessions();
                 liveCallbacksRespectSnapshotBoundaryAndSource();
                 wiring();
-                childDetailsArePagedBoundedAndHideSystemMessages();
-                childDetailsExposeRealPhaseToolProgressAndActivityTime();
-                onlyActiveChildrenNeedAutomaticRefresh();
-                childRefreshIsOnePerSecondAndPausesDuringLoading();
-                childRefreshStopsForDismissalSessionChangeAndActivityDestruction();
-                childUiReadsAndStopsOffTheUiThread();
+                conversationMenusSeparateEffortPermissionsAndTaskPage();
                 approvalQueueSerializesChildrenAndNamesTheCaller();
                 stoppingDisplayedOrQueuedChildUnblocksApproval();
                 staleUiAndDestroyedActivityRejectPendingApprovals();
