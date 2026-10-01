@@ -22,6 +22,7 @@ import android.widget.HorizontalScrollView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.multidex.MultiDex;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -42,6 +43,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class GlobalApplication extends Application {
 
     private static Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+
+    @Override
+    protected void attachBaseContext(Context base) {
+        super.attachBaseContext(base);
+        MultiDex.install(this);
+    }
 
     @Override
     public void onCreate() {
