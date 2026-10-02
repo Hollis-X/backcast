@@ -26,6 +26,7 @@ public final class ToolchainStore {
 
     private final File root, registry;
     private final EmbeddedToolchain embedded;
+    private final ArtRuntimeLauncher.Probe artRuntime;
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> OPERATIONS =
             new ConcurrentHashMap<String, ReentrantReadWriteLock>();
     private final ReentrantReadWriteLock operations;
@@ -42,7 +43,13 @@ public final class ToolchainStore {
     }
 
     public ToolchainStore(File directory, EmbeddedToolchain.Assets assets, String abi, int sdk) {
+        this(directory, assets, abi, sdk, ArtRuntimeLauncher.DEVICE);
+    }
+
+    ToolchainStore(File directory, EmbeddedToolchain.Assets assets, String abi, int sdk, ArtRuntimeLauncher.Probe artRuntime) {
         if (directory == null) throw new IllegalArgumentException("工具安装需要 App 私有路径。");
+        if (artRuntime == null) throw new IllegalArgumentException("ART 入口探测不能为空。");
+        this.artRuntime = artRuntime;
         try { root = directory.getCanonicalFile(); }
         catch (IOException error) { throw new IllegalArgumentException("无法确认工具目录。", error); }
         registry = new File(root, "registry.json");
@@ -58,11 +65,15 @@ public final class ToolchainStore {
     public boolean hasBundledAssets() { return embedded != null; }
 
     public File prepareBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        return prepareBundled(cancellation, null);
+    }
+
+    public File prepareBundled(ToolchainInstaller.Cancellation cancellation, EmbeddedToolchain.ProgressListener listener) throws Exception {
         Use use = beginUse(cancellation);
         try {
             if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
             if (bundledRemoved()) throw new IllegalStateException("内置工具包已删除，请在工具配置中重新安装。");
-            return embedded.prepare(cancellation);
+            return embedded.prepare(cancellation, listener);
         } finally { use.close(); }
     }
 
@@ -84,6 +95,10 @@ public final class ToolchainStore {
     }
 
     public JSONObject installBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        return installBundled(cancellation, null);
+    }
+
+    public JSONObject installBundled(final ToolchainInstaller.Cancellation cancellation, final EmbeddedToolchain.ProgressListener listener) throws Exception {
         cancellation.check();
         if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
         try {
@@ -96,7 +111,19 @@ public final class ToolchainStore {
                 for (File file : releasedBundles()) { cancellation.check(); removeManaged(file, cancellation); }
             }
             synchronized (this) { JSONObject data = load(); data.put("bundled_removed", false); save(data); }
-            try { prepareBundled(cancellation); return packageStatus(); }
+            try {
+                final EmbeddedToolchain.Progress[] complete = new EmbeddedToolchain.Progress[1];
+                prepareBundled(cancellation, listener == null ? null : new EmbeddedToolchain.ProgressListener() {
+                    public void onProgress(EmbeddedToolchain.Progress progress) {
+                        if ("complete".equals(progress.stage)) complete[0] = progress;
+                        else listener.onProgress(progress);
+                    }
+                });
+                JSONObject status = packageStatus();
+                cancellation.check();
+                if (listener != null && complete[0] != null) listener.onProgress(complete[0]);
+                return status;
+            }
             catch (Exception failure) {
                 synchronized (this) { JSONObject data = load(); data.put("bundled_removed", wasRemoved); save(data); }
                 throw failure;
@@ -247,6 +274,9 @@ public final class ToolchainStore {
         if (bundled(id) && (!"bundled".equals(config.optString("origin", "")) || !embedded.isPrepared())) {
             prepareBundled(cancellation); config = configuration(id);
         }
+        if ("apktool".equals(id) && "bundled".equals(config.optString("origin", ""))) {
+            config = refreshBundledArt(config);
+        }
         String path = config.optString("path", "");
         if (path.length() == 0) return null;
         if (path.startsWith(root.getPath() + File.separator)) managed(path);
@@ -282,6 +312,32 @@ public final class ToolchainStore {
         return result;
     }
 
+    private JSONObject refreshBundledArt(JSONObject config) throws Exception {
+        ArtRuntimeLauncher.Selection runtime = ArtRuntimeLauncher.select(config.optString("abi"), artRuntime);
+        String classpath = "";
+        JSONArray oldPrefix = config.optJSONArray("prefix");
+        if (oldPrefix != null) for (int i = 0; i + 1 < oldPrefix.length(); i++) {
+            if ("-cp".equals(oldPrefix.optString(i))) { classpath = oldPrefix.getString(i + 1); break; }
+        }
+        JSONObject environment = config.optJSONObject("environment");
+        if (environment == null) environment = new JSONObject();
+        if (classpath.length() == 0) classpath = environment.optString("CLASSPATH");
+        if (classpath.length() == 0) throw new IOException("内置 Apktool 的 DEX 文件登记缺失，请在工具配置中重新安装。");
+        File jar = managed(classpath);
+        if (!jar.isFile() || !"apktool-dex.jar".equals(jar.getName())) {
+            throw new IOException("内置 Apktool 的 DEX 文件缺失，请在工具配置中重新安装。");
+        }
+        environment.remove("CLASSPATH");
+        JSONArray prefix = new JSONArray().put("-Dsun.arch.data.model=" + runtime.bits)
+                .put("-cp").put(jar.getPath()).put("brut.apktool.Main");
+        JSONObject refreshed = new JSONObject(config.toString()).put("path", runtime.path)
+                .put("runtime_family", "android-art").put("prefix", prefix).put("environment", environment);
+        // A running App can outlive an OS/module update; recheck each invocation,
+        // and replace previously persisted dalvikvm/app_process launchers too.
+        if (!refreshed.toString().equals(config.toString())) put("apktool", refreshed);
+        return refreshed;
+    }
+
     synchronized void bundledInstalled(File common, File nativeTools, JSONObject manifest, String abi) throws Exception {
         JSONObject data = load(), tools = data.optJSONObject("tools");
         if (tools == null) { tools = new JSONObject(); data.put("tools", tools); }
@@ -295,7 +351,10 @@ public final class ToolchainStore {
             JSONArray prefix = new JSONArray();
             String path;
             if ("apktool".equals(id)) {
-                path = "/system/bin/dalvikvm";
+                // Register the payload independently of the device runtime.
+                // launcher() resolves an executable ART path at invocation time.
+                path = "";
+                config.put("runtime_family", "android-art");
                 prefix.put("-Dsun.arch.data.model=" + ("arm64-v8a".equals(abi) ? "64" : "32"))
                         .put("-cp").put(new File(common, "apktool/apktool-dex.jar").getPath())
                         .put("brut.apktool.Main");

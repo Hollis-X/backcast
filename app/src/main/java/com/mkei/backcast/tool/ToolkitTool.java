@@ -152,8 +152,11 @@ public final class ToolkitTool implements Tool {
 
     public JSONObject packageStatus() throws Exception { return store.packageStatus(); }
     public JSONObject installBundled() throws Exception {
+        return installBundled(null);
+    }
+    public JSONObject installBundled(EmbeddedToolchain.ProgressListener listener) throws Exception {
         final int mine = epoch;
-        return store.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } });
+        return store.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } }, listener);
     }
     public JSONObject removeBundled() throws Exception {
         final int mine = epoch;

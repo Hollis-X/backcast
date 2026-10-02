@@ -18,6 +18,9 @@ import org.json.JSONObject;
 public final class ToolPackageManagementRegressionTest {
     private static File root;
     private static final ToolchainInstaller.Cancellation LIVE = new ToolchainInstaller.Cancellation() { public void check() { } };
+    private static final ArtRuntimeLauncher.Probe ANDROID_RUNTIME = new ArtRuntimeLauncher.Probe() {
+        public int executableBits(String path) { return "/system/bin/dalvikvm64".equals(path) ? 64 : 0; }
+    };
     private static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }
 
     private static final class Payload implements EmbeddedToolchain.Assets {
@@ -48,7 +51,7 @@ public final class ToolPackageManagementRegressionTest {
             opens++;
             return new ByteArrayInputStream(name.endsWith("manifest.json") ? manifest.toString().getBytes("UTF-8") : gzip);
         }
-        ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30); }
+        ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30, ANDROID_RUNTIME); }
     }
     private static String hash(byte[] data) throws Exception { return ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(data)); }
     private static void put(byte[] target, int offset, String value) throws Exception {

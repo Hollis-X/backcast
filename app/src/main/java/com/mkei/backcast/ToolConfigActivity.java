@@ -8,10 +8,12 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.RadioGroup;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
+import com.mkei.backcast.tool.EmbeddedToolchain;
 import com.mkei.backcast.tool.ToolCatalog;
 import com.mkei.backcast.ui.Icons;
 import java.util.ArrayList;
@@ -34,7 +36,10 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private String toolId;
     private CheckBox useRoot;
     private RadioGroup permission;
-    private TextView permissionNote, packageStatus, detailName, detailInfo, detailOutput, operationStatus;
+    private TextView permissionNote, packageStatus, detailName, detailInfo, detailOutput, operationStatus, installProgressText;
+    private View installProgressContainer;
+    private ProgressBar installProgress;
+    private boolean progressTerminal;
     private LinearLayout toolList;
     private Button install, remove, probe, cancel;
     private JSONObject selected = new JSONObject();
@@ -45,6 +50,8 @@ public final class ToolConfigActivity extends AppCompatActivity {
         volatile boolean cancelled;
         volatile java.util.concurrent.Future<?> future;
         RunHub.ToolkitSession session;
+        boolean installing, progressQueued;
+        EmbeddedToolchain.Progress pendingProgress;
     }
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -68,6 +75,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
         detailInfo = (TextView) findViewById(R.id.tool_detail_info);
         detailOutput = (TextView) findViewById(R.id.tool_detail_output);
         operationStatus = (TextView) findViewById(R.id.tool_operation_status);
+        installProgressContainer = findViewById(R.id.tool_install_progress_container);
+        installProgress = (ProgressBar) findViewById(R.id.tool_install_progress);
+        installProgressText = (TextView) findViewById(R.id.tool_install_progress_text);
         toolList = (LinearLayout) findViewById(R.id.tool_config_list);
         install = (Button) findViewById(R.id.tool_package_install);
         remove = (Button) findViewById(R.id.tool_package_remove);
@@ -110,11 +120,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
             }
         });
         cancel.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                if (active != null) cancelToolkitOperation(active);
-                active = null; setBusy(false);
-                operationStatus.setText(R.string.toolkit_cancelled);
-            }
+            @Override public void onClick(View view) { cancelActiveToolkit(); }
         });
         if (toolId.length() > 0) {
             findViewById(R.id.tool_config_controls).setVisibility(View.GONE);
@@ -124,7 +130,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
         }
     }
 
-    @Override protected void onResume() { super.onResume(); if (active == null) loadTools(); }
+    @Override protected void onResume() { super.onResume(); if (active == null) loadTools(progressTerminal); }
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("draft_root", useRoot.isChecked());
@@ -133,8 +139,10 @@ public final class ToolConfigActivity extends AppCompatActivity {
     }
 
     @Override protected void onStop() {
+        boolean installing = active != null && active.installing;
         for (ToolkitOperation operation : pendingOperations()) cancelToolkitOperation(operation);
         active = null;
+        if (installing) finishInstallProgress(null);
         super.onStop();
     }
 
@@ -149,33 +157,123 @@ public final class ToolConfigActivity extends AppCompatActivity {
         synchronized (toolkitOperations) { return new ArrayList<ToolkitOperation>(toolkitOperations); }
     }
 
-    private void loadTools() {
-        begin(getString(R.string.toolkit_loading));
+    private void loadTools(final boolean preserveStatus) {
+        if (!preserveStatus) begin(getString(R.string.toolkit_loading));
+        else setBusy(true);
         active = requestToolkit(toolkitArguments("list", ""), new ToolkitResult() {
-            @Override public void apply(JSONObject result) { finishOperation(result); renderTools(result); }
+            @Override public void apply(JSONObject result) {
+                if (!preserveStatus) finishOperation(result);
+                else {
+                    active = null; setBusy(false);
+                    String error = result.optString("error");
+                    if (error.length() > 0) operationStatus.setText(getString(R.string.toolkit_progress_refresh_failed, error));
+                }
+                renderTools(result);
+            }
         });
     }
 
     private void manage(String action, int status) {
         begin(getString(status));
+        if ("package_install".equals(action)) beginInstallProgress();
         active = requestToolkit(toolkitArguments(action, ""), new ToolkitResult() {
             @Override public void apply(JSONObject result) {
                 finishOperation(result);
-                if (!"error".equals(result.optString("state")) && !"cancelled".equals(result.optString("state"))) loadTools();
+                if (!"error".equals(result.optString("state")) && !"cancelled".equals(result.optString("state"))) loadTools(progressTerminal);
             }
         });
     }
 
     private void begin(String text) {
         if (active != null) cancelToolkitOperation(active);
+        progressTerminal = false;
+        installProgressContainer.setVisibility(View.GONE);
         operationStatus.setText(text); operationStatus.setVisibility(View.VISIBLE); setBusy(true);
     }
 
     private void finishOperation(JSONObject result) {
+        boolean installing = active != null && active.installing;
         active = null; setBusy(false);
+        if (installing) { finishInstallProgress(result); return; }
         String error = result.optString("error");
         operationStatus.setText(error.length() > 0 ? error : toolkitState(result.optString("state")));
         operationStatus.setVisibility(error.length() > 0 || "cancelled".equals(result.optString("state")) ? View.VISIBLE : View.GONE);
+    }
+
+    private void beginInstallProgress() {
+        installProgress.setMax(100); installProgress.setProgress(0); installProgress.setIndeterminate(true);
+        installProgressText.setText(R.string.toolkit_progress_preparing);
+        installProgressContainer.setVisibility(View.VISIBLE);
+    }
+
+    private void queueInstallProgress(final ToolkitOperation operation, EmbeddedToolchain.Progress progress) {
+        synchronized (operation) {
+            if (operation.cancelled) return;
+            operation.pendingProgress = progress;
+            if (operation.progressQueued) return;
+            operation.progressQueued = true;
+        }
+        main.postDelayed(new Runnable() {
+            @Override public void run() {
+                EmbeddedToolchain.Progress latest;
+                synchronized (operation) {
+                    latest = operation.pendingProgress;
+                    operation.pendingProgress = null; operation.progressQueued = false;
+                }
+                if (latest != null && !operation.cancelled && !activityDestroyed && !isFinishing() && active == operation)
+                    applyInstallProgress(latest);
+            }
+        }, 100);
+    }
+
+    private void applyInstallProgress(EmbeddedToolchain.Progress progress) {
+        if (progress.total <= 0) {
+            installProgress.setIndeterminate(true);
+            installProgressText.setText(R.string.toolkit_progress_preparing);
+            return;
+        }
+        // Final publication still has to return successfully and close its UI session.
+        int percent = Math.max(installProgress.getProgress(), Math.min(99, Math.max(0, progress.percent())));
+        installProgress.setIndeterminate(false); installProgress.setProgress(percent);
+        String phase = installProgressPhase(progress.stage);
+        if (progress.artifact.length() > 0) {
+            String artifact = "any".equals(progress.artifact) ? getString(R.string.toolkit_progress_common)
+                    : getString(R.string.toolkit_progress_device);
+            phase = getString(R.string.toolkit_progress_phase_artifact, phase, artifact);
+        }
+        installProgressText.setText(getString(R.string.toolkit_progress_value, percent, phase));
+    }
+
+    private String installProgressPhase(String stage) {
+        int resource = "verifying".equals(stage) ? R.string.toolkit_progress_verifying
+                : "unpacking".equals(stage) ? R.string.toolkit_progress_unpacking
+                : "publishing".equals(stage) ? R.string.toolkit_progress_publishing
+                : "registering".equals(stage) || "complete".equals(stage) ? R.string.toolkit_progress_registering
+                : R.string.toolkit_progress_checking;
+        return getString(resource);
+    }
+
+    private void finishInstallProgress(JSONObject result) {
+        boolean success = result != null && "installed".equals(result.optString("state")) && result.optBoolean("installed")
+                && result.optString("error").length() == 0;
+        progressTerminal = true;
+        installProgress.setIndeterminate(false);
+        installProgress.setProgress(success ? 100 : Math.min(99, installProgress.getProgress()));
+        int resource = success ? R.string.toolkit_progress_complete
+                : result == null || "cancelled".equals(result.optString("state")) ? R.string.toolkit_cancelled : R.string.toolkit_failed;
+        installProgressText.setText(getString(R.string.toolkit_progress_value, installProgress.getProgress(), getString(resource)));
+        String error = result == null ? "" : result.optString("error");
+        operationStatus.setText(error.length() > 0 ? error : getString(resource));
+        operationStatus.setVisibility(View.VISIBLE);
+    }
+
+    private void cancelActiveToolkit() {
+        boolean installing = active != null && active.installing;
+        if (active != null) cancelToolkitOperation(active);
+        active = null; setBusy(false);
+        operationStatus.setText(R.string.toolkit_cancelled);
+        operationStatus.setVisibility(View.VISIBLE);
+        if (installing) finishInstallProgress(null);
     }
 
     private void setBusy(boolean busy) {
@@ -296,6 +394,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
 
     private ToolkitOperation requestToolkit(final JSONObject args, final ToolkitResult callback) {
         final ToolkitOperation operation = new ToolkitOperation();
+        operation.installing = "package_install".equals(args.optString("action"));
         synchronized (toolkitOperations) { toolkitOperations.add(operation); }
         operation.future = toolkitReader.submit(new Runnable() {
             @Override public void run() {
@@ -306,7 +405,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
                     synchronized (operation) { operation.session = session; }
                     if (operation.cancelled) return;
                     String action = args.optString("action");
-                    if ("package_install".equals(action)) result = session.toolkit.installBundled();
+                    if ("package_install".equals(action)) result = session.toolkit.installBundled(new EmbeddedToolchain.ProgressListener() {
+                        @Override public void onProgress(EmbeddedToolchain.Progress progress) { queueInstallProgress(operation, progress); }
+                    });
                     else if ("package_remove".equals(action)) result = session.toolkit.removeBundled();
                     else result = new JSONObject(session.toolkit.run(args));
                 } catch (InterruptedException cancellation) {

@@ -186,8 +186,8 @@ public class ShellTool implements Tool {
             command.append(' ').append(RootShell.quote("-Duser.home=" + temporary.directory().getPath()));
             command.append(' ').append(RootShell.quote("-Djava.io.tmpdir=" + temporary.directory().getPath()));
         }
-        for (String prefix : launcher.prefix) command.append(' ').append(RootShell.quote(prefix));
-        for (String value : arguments) command.append(' ').append(RootShell.quote(value));
+        for (String prefix : launcher.prefix) command.append(' ').append(RootShell.quoteArgument(prefix));
+        for (String value : arguments) command.append(' ').append(RootShell.quoteArgument(value));
         if (launcher.aapt2.length() > 0 && !arguments.isEmpty()
                 && ("b".equals(arguments.get(0)) || "build".equals(arguments.get(0)))) {
             command.append(" --use-aapt2 -a ").append(RootShell.quote(launcher.aapt2));

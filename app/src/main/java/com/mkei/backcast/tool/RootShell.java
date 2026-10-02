@@ -56,7 +56,14 @@ final class RootShell {
         if (path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0) {
             throw new IllegalArgumentException("路径不合法");
         }
-        return "'" + path.replace("'", "'\\''") + "'";
+        return quoteArgument(path);
+    }
+
+    /** One literal argv value; unlike a file path, a program can contain newlines. */
+    static String quoteArgument(String value) {
+        if (value == null) return "''";
+        if (value.indexOf('\0') >= 0) throw new IllegalArgumentException("程序参数不能包含 NUL 字符。");
+        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     static Process start(String command) throws Exception {

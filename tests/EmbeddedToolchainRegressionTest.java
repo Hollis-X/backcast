@@ -27,6 +27,11 @@ public final class EmbeddedToolchainRegressionTest {
     private static final ToolchainInstaller.Cancellation LIVE = new ToolchainInstaller.Cancellation() {
         public void check() { }
     };
+    private static final ArtRuntimeLauncher.Probe ANDROID_RUNTIME = new ArtRuntimeLauncher.Probe() {
+        public int executableBits(String path) {
+            return "/system/bin/dalvikvm64".equals(path) ? 64 : "/system/bin/dalvikvm32".equals(path) ? 32 : 0;
+        }
+    };
     private static void check(boolean okay, String message) { if (!okay) throw new AssertionError(message); }
     private static byte[] bytes(File file) throws Exception { return Files.readAllBytes(file.toPath()); }
     private static EmbeddedToolchain.Assets packaged() {
@@ -102,7 +107,7 @@ public final class EmbeddedToolchainRegressionTest {
 
     private static void apktoolUsesDalvikAndBundledPureJavaPngInsteadOfDesktopOrNativeImageApis() throws Exception {
         ToolchainStore.Launcher launcher = arm64.launcher("apktool");
-        check("/system/bin/dalvikvm".equals(launcher.executable) && launcher.prefix.contains("brut.apktool.Main")
+        check("/system/bin/dalvikvm64".equals(launcher.executable) && launcher.prefix.contains("brut.apktool.Main")
                 && !launcher.environment.has("CLASSPATH"), "Apktool was not launched with the independent Android runtime");
         File jar = apktoolJar(launcher);
         ZipFile zip = new ZipFile(jar);
@@ -184,7 +189,7 @@ public final class EmbeddedToolchainRegressionTest {
     private static void clearRestoresTheBundledLauncherAndCancelledPreparationLeavesNoStage() throws Exception {
         arm64.clear("radare2"); check(arm64.launcher("radare2") != null, "Clear permanently disabled the built-in launcher");
         arm64.configure("apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
-        check("/system/bin/dalvikvm".equals(arm64.launcher("apktool").executable)
+        check("/system/bin/dalvikvm64".equals(arm64.launcher("apktool").executable)
                 && "bundled".equals(arm64.configuration("apktool").getString("origin")), "Upgrade retained the old external JVM launcher");
         File registry = new File(arm64.root(), "registry.json");
         JSONObject old = new JSONObject(new String(bytes(registry), "UTF-8"));
@@ -192,8 +197,8 @@ public final class EmbeddedToolchainRegressionTest {
                 .put("prefix", new JSONArray().put("/").put("brut.apktool.Main"))
                 .put("environment", new JSONObject().put("CLASSPATH", apktoolJar(arm64.launcher("apktool")).getPath()));
         Files.write(registry.toPath(), old.toString().getBytes("UTF-8"));
-        ToolchainStore migrated = new ToolchainStore(arm64.root(), packaged(), "arm64-v8a", 30);
-        check("/system/bin/dalvikvm".equals(migrated.launcher("apktool").executable)
+        ToolchainStore migrated = new ToolchainStore(arm64.root(), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME);
+        check("/system/bin/dalvikvm64".equals(migrated.launcher("apktool").executable)
                 && !migrated.launcher("apktool").environment.has("CLASSPATH") && apktoolJar(migrated.launcher("apktool")).isFile(),
                 "Upgrade retained a previously registered app_process launcher");
         final ToolchainStore cancelled = new ToolchainStore(new File(root, "cancelled"), packaged(), "arm64-v8a", 30);
@@ -224,7 +229,7 @@ public final class EmbeddedToolchainRegressionTest {
                 if ("toolchain/common.tar.gz".equals(name)) return new SequenceInputStream(new FileInputStream(new File(assets, name)), new ByteArrayInputStream(new byte[]{0}));
                 return new FileInputStream(new File(assets, name));
             }
-        }, "arm64-v8a", 30);
+        }, "arm64-v8a", 30, ANDROID_RUNTIME);
         File newJar = apktoolJar(upgraded.launcher("apktool"));
         check(!oldJar.equals(newJar) && oldJar.isFile() && newJar.isFile(), "Payload update overwrote/deleted a potentially running tool or failed on reused release date");
     }
@@ -283,6 +288,10 @@ public final class EmbeddedToolchainRegressionTest {
         String[] children = store.root().list();
         if (children != null) for (String name : children) check(!name.startsWith(".embedded-"), "Rejected resource left temporary extraction data");
     }
+    private static boolean noPublishedFiles(ToolchainStore store) {
+        String[] children = store.root().list();
+        return !store.root().exists() || children != null && children.length == 0;
+    }
 
     private static void renamedTarAssetsAndGzipStreamsUseTheirActualFormatAndChecksums() throws Exception {
         ArchiveFixture fixture = new ArchiveFixture(); int index = 0;
@@ -298,12 +307,12 @@ public final class EmbeddedToolchainRegressionTest {
         ArchiveFixture fixture = new ArchiveFixture(); byte[] corrupted = fixture.tar.clone(); corrupted[512] ^= 1;
         ToolchainStore tampered = fixture.store("tampered-tar", true, corrupted, fixture.manifest);
         boolean refused = false; try { tampered.prepareBundled(LIVE); } catch (Exception expected) { refused = true; }
-        check(refused && tampered.root().list().length == 0, "Renamed TAR skipped its SHA-256 verification"); checkNoStages(tampered);
+        check(refused && noPublishedFiles(tampered), "Renamed TAR skipped its SHA-256 verification"); checkNoStages(tampered);
         JSONObject undeclared = new JSONObject(fixture.manifest.toString());
         for (int i = 0; i < undeclared.getJSONArray("artifacts").length(); i++) undeclared.getJSONArray("artifacts").getJSONObject(i).remove("tar_sha256");
         ToolchainStore noDigest = fixture.store("unverified-alternate", true, fixture.tar, undeclared);
         refused = false; try { noDigest.prepareBundled(LIVE); } catch (Exception expected) { refused = true; }
-        check(refused && noDigest.root().list().length == 0, "Undeclared fallback archive was accepted"); checkNoStages(noDigest);
+        check(refused && noPublishedFiles(noDigest), "Undeclared fallback archive was accepted"); checkNoStages(noDigest);
     }
 
     private static void gzipTransportVerificationAlsoChecksTheFullUncompressedTar() throws Exception {
@@ -311,7 +320,7 @@ public final class EmbeddedToolchainRegressionTest {
         metadata.getJSONArray("artifacts").getJSONObject(0).put("tar_sha256", "0000000000000000000000000000000000000000000000000000000000000000");
         ToolchainStore store = fixture.store("wrong-inner-sha", false, fixture.gzip, metadata);
         boolean refused = false; try { store.prepareBundled(LIVE); } catch (Exception expected) { refused = true; }
-        check(refused && store.root().list().length == 0, "Compressed SHA success bypassed the declared TAR content checksum"); checkNoStages(store);
+        check(refused && noPublishedFiles(store), "Compressed SHA success bypassed the declared TAR content checksum"); checkNoStages(store);
     }
 
     private static void collect(File root, List<File> files) { File[] children = root.listFiles(); if (children != null) for (File file : children) { if (file.isDirectory()) collect(file, files); else files.add(file); } }
@@ -320,8 +329,8 @@ public final class EmbeddedToolchainRegressionTest {
         repo = new File(args[0]); assets = new File(repo, "app/src/main/assets"); root = Files.createTempDirectory("backcast-embedded-tests-").toFile();
         project = new File(root, "project"); project.mkdir(); privateFiles = new File(root, "private"); privateFiles.mkdir();
         temporary = new TemporaryWorkspace(project.getPath(), false, new File(privateFiles, "temporary"), 1); temporary.beginTurn();
-        arm64 = new ToolchainStore(new File(privateFiles, "toolchain-arm64"), packaged(), "arm64-v8a", 30);
-        arm = new ToolchainStore(new File(privateFiles, "toolchain-arm"), packaged(), "armeabi-v7a", 30);
+        arm64 = new ToolchainStore(new File(privateFiles, "toolchain-arm64"), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME);
+        arm = new ToolchainStore(new File(privateFiles, "toolchain-arm"), packaged(), "armeabi-v7a", 30, ANDROID_RUNTIME);
         int passed = 0;
         try {
             for (String test : new String[]{"packagedArtifactsMatchManifestAndGitHubSizeLimit", "firstUseOfflinePreparesBothAbisAndAllLaunchers", "apktoolUsesDalvikAndBundledPureJavaPngInsteadOfDesktopOrNativeImageApis", "androidElfAbiAndDynamicDependenciesAreComplete", "pythonAndObjectionArePrivateAndDoNotRequireTermux", "unsupportedDevicesDoNotAttemptAssetReads", "clearRestoresTheBundledLauncherAndCancelledPreparationLeavesNoStage", "onlyDirectBuiltInActionsAreAdvertisedToTheModel", "objectionProbeNeverStartsAServerAndSingleRunsCleanItUp", "sameVersionNewPayloadPreparesSeparatelyAndRetainsTheRunningVersion", "renamedTarAssetsAndGzipStreamsUseTheirActualFormatAndChecksums", "corruptedOrUndeclaredRenamedTarAssetsNeverPublish", "gzipTransportVerificationAlsoChecksTheFullUncompressedTar"}) {

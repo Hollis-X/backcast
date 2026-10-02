@@ -30,6 +30,9 @@ javac -proc:none -encoding UTF-8 -source 7 -target 7 -Xlint:-options -cp "$json"
     "$root"/tests/ToolkitRegressionTest.java \
     "$root"/tests/ToolPackageManagementRegressionTest.java \
     "$root"/tests/EmbeddedToolchainRegressionTest.java \
+    "$root"/tests/EmbeddedInstallProgressRegressionTest.java \
+    "$root"/tests/ArtRuntimeLauncherRegressionTest.java \
+    "$root"/tests/ProgramArgumentRegressionTest.java \
     "$root"/tests/UiSnapshotRegressionTest.java
 compiled=$?
 if [ "$compiled" -ne 0 ]; then exit "$compiled"; fi
@@ -73,6 +76,19 @@ if [ "${3:-}" = "resource-budget" ]; then
     java "$root/tests/AideResourceBudgetRegressionTest.java" "$root"
     exit "$?"
 fi
+if [ "${3:-}" = "install-progress" ]; then
+    java -cp "$build:$json" com.mkei.backcast.tool.EmbeddedInstallProgressRegressionTest || exit "$?"
+    java "$root/tests/ToolInstallProgressUiRegressionTest.java" "$root"
+    exit "$?"
+fi
+if [ "${3:-}" = "program-arguments" ]; then
+    java -cp "$build:$json" com.mkei.backcast.tool.ProgramArgumentRegressionTest
+    exit "$?"
+fi
+if [ "${3:-}" = "art-runtime" ]; then
+    java -cp "$build:$json" com.mkei.backcast.tool.ArtRuntimeLauncherRegressionTest
+    exit "$?"
+fi
 if [ "${3:-}" = "shell" ]; then
     java -cp "$build:$json" com.mkei.backcast.tool.ShellGuardRegressionTest
     exit "$?"
@@ -114,6 +130,14 @@ java -cp "$build:$json" com.mkei.backcast.tool.ToolPackageManagementRegressionTe
 package_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.EmbeddedToolchainRegressionTest "$root"
 embedded_status=$?
+java -cp "$build:$json" com.mkei.backcast.tool.EmbeddedInstallProgressRegressionTest
+install_progress_status=$?
+java -cp "$build:$json" com.mkei.backcast.tool.ProgramArgumentRegressionTest
+program_arguments_status=$?
+java -cp "$build:$json" com.mkei.backcast.tool.ArtRuntimeLauncherRegressionTest
+art_runtime_status=$?
+java "$root/tests/ToolInstallProgressUiRegressionTest.java" "$root"
+install_ui_status=$?
 java -cp "$build:$json" UiSnapshotRegressionTest
 snapshot_status=$?
 java -cp "$build:$json" "$root/tests/TurnUiRegressionTest.java" "$root"
@@ -138,5 +162,5 @@ java "$root/tests/AideResourceBudgetRegressionTest.java" "$root"
 resource_budget_status=$?
 java "$root/tests/TranscriptScrollRegressionTest.java" "$root"
 scroll_status=$?
-if [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ]; then exit 1; fi
+if [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ] || [ "$install_progress_status" -ne 0 ] || [ "$program_arguments_status" -ne 0 ] || [ "$art_runtime_status" -ne 0 ] || [ "$install_ui_status" -ne 0 ]; then exit 1; fi
 if [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi

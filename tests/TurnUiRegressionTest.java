@@ -148,7 +148,7 @@ public final class TurnUiRegressionTest {
     private static void compileView(Path root, Path build) throws Exception {
         StringBuilder source = new StringBuilder(
                 "import android.os.SystemClock; import com.mkei.backcast.agent.*;"
-                + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.tool.ToolCatalog; import java.util.*; import org.json.*;"
+                + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.tool.ToolCatalog;import com.mkei.backcast.tool.EmbeddedToolchain; import java.util.*; import org.json.*;"
                 + "class UiActivity {protected void onStop(){}protected void onDestroy(){}}"
                 + "public class TurnUiFixture extends UiActivity implements ApprovalGate {"
                 + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt; int turnUiToken=-1;"
@@ -193,6 +193,7 @@ public final class TurnUiRegressionTest {
                 + "static class FixtureToolkit{volatile boolean cancelled;JSONObject arguments;String run(JSONObject args)throws Exception{arguments=args;"
                 + "if(block)while(!cancelled){Thread.sleep(20);}return new JSONObject().put(\"state\",cancelled?\"cancelled\":\"ready\").toString();}"
                 + "JSONObject installBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_install\")));}"
+                + "JSONObject installBundled(EmbeddedToolchain.ProgressListener listener)throws Exception{return installBundled();}"
                 + "JSONObject removeBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_remove\")));}}}"
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
                 + "static class MarginLayoutParams { int bottomMargin; }"
@@ -288,6 +289,7 @@ public final class TurnUiRegressionTest {
         source.append(METHODS.get("Flow"));
         source.append(METHODS.get("ReplayCursor"));
         source.append(METHODS.get("ApprovalRequest"));
+        source.append("void queueInstallProgress(ToolkitOperation op,EmbeddedToolchain.Progress progress){}void finishInstallProgress(JSONObject result){}");
         source.append(TOOL_METHODS.get("ToolkitOperation"));
         source.append(TOOL_METHODS.get("ToolkitResult"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {
