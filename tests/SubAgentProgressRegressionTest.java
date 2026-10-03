@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Genuine child stream, permission and request-retry boundaries remain independently observable. */
+/** Genuine child stream, permission and request-failure boundaries remain independently observable. */
 public final class SubAgentProgressRegressionTest {
     private static final String SCRIPT = "PRIVATE_TOOL_SCRIPT_SENTINEL";
     private static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }
@@ -46,6 +46,7 @@ public final class SubAgentProgressRegressionTest {
                 releaseApproval = new CountDownLatch(1), tool = new CountDownLatch(1), releaseTool = new CountDownLatch(1),
                 nextRequest = new CountDownLatch(1), releaseRequest = new CountDownLatch(1), review = new CountDownLatch(1), releaseReview = new CountDownLatch(1);
         final AtomicInteger toolsExecuted = new AtomicInteger();
+        final AtomicInteger requestsIssued = new AtomicInteger();
         volatile AgentLoop.Listener childListener;
         boolean retry, guarded, reviewMode, waitMode;
         String nestedId = "";
@@ -61,6 +62,7 @@ public final class SubAgentProgressRegressionTest {
                     try {
                         if (reviewMode && schema == null) { review.countDown(); await(releaseReview); return text("SAFE"); }
                         int request = ++requests;
+                        requestsIssued.incrementAndGet();
                         if ("nested".equals(task.name)) { nextRequest.countDown(); await(releaseRequest); return text("nested complete"); }
                         if (retry) {
                             if (request == 1) { Reply failure = new Reply(); failure.error = "HTTP 503 provider echoed " + SCRIPT; return failure; }
@@ -131,18 +133,23 @@ public final class SubAgentProgressRegressionTest {
         } finally { f.release(); f.finish(); }
     }
 
-    private static void genuineProviderRetryPersistsCountReasonWithoutAffectingParent() throws Exception {
+    private static void providerFailureStopsTheChildWithoutInventingRetries() throws Exception {
         Fixture f = new Fixture(); f.retry = true; String id = f.spawn("retry");
         try {
-            await(f.nextRequest); SubAgentManager.Record record = f.manager.find(id);
-            check(record.retryAttempt == 1 && "接口返回 HTTP 503".equals(record.retryReason), "Actual provider retry has no accurate count or cause");
-            check(!record.retryReason.contains(SCRIPT) && f.manager.find("main").retryAttempt == 0, "Provider echo leaked or child retry was attributed to parent");
+            f.finish(); SubAgentManager.Record record = f.manager.find(id);
+            check(f.requestsIssued.get() == 1 && f.toolsExecuted.get() == 0 && SubAgentManager.FAILED.equals(record.status)
+                            && "failed".equals(record.phase) && record.result.isEmpty() && record.error.equals("接口返回 HTTP 503"),
+                    "Provider outage retried, executed work, lost the safe failure or returned a successful child result");
+            check(record.retryAttempt == 0 && record.retryReason.isEmpty() && !record.error.contains(SCRIPT)
+                            && f.manager.find("main").retryAttempt == 0 && f.manager.find("main").error.isEmpty(),
+                    "Child failure invented retries, leaked provider echoes or changed the parent state");
             SubAgentManager.Record saved = f.store.find(id);
-            check(saved.retryAttempt == 1 && saved.retryReason.equals(record.retryReason), "Retry evidence was not persisted during request");
+            check(saved.retryAttempt == 0 && saved.error.equals(record.error) && SubAgentManager.FAILED.equals(saved.status),
+                    "First failure was not persisted with the stopped child state");
             JSONObject view = f.manager.list("main").getJSONArray("agents").getJSONObject(0);
-            check(view.getInt("retryAttempt") == 1 && view.getString("retryReason").equals(record.retryReason), "Parent cannot inspect the child's request retry");
+            check(view.getInt("retryAttempt") == 0 && view.getString("error").equals(record.error)
+                            && view.getString("status").equals(SubAgentManager.FAILED), "Parent cannot inspect the stopped child's actual failure");
         } finally { f.release(); f.finish(); }
-        check(f.manager.find(id).retryAttempt == 1, "Completion erased useful retry evidence");
     }
 
     private static void childWaitHasADistinctWaitingStage() throws Exception {
@@ -169,7 +176,7 @@ public final class SubAgentProgressRegressionTest {
     public static void main(String[] args) throws Exception {
         int passed = 0;
         for (String test : new String[]{"previewApprovalAndExecutionRemainSeparateAndDoNotExposeScripts", "guardedReviewIsNotReportedAsToolExecution",
-                "genuineProviderRetryPersistsCountReasonWithoutAffectingParent", "childWaitHasADistinctWaitingStage", "legacySavedRecordsLoadWithZeroRetriesAndNewFieldsRoundTrip"}) {
+                "providerFailureStopsTheChildWithoutInventingRetries", "childWaitHasADistinctWaitingStage", "legacySavedRecordsLoadWithZeroRetriesAndNewFieldsRoundTrip"}) {
             SubAgentProgressRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); passed++;
         }
         System.out.println(passed + " child progress tests passed");

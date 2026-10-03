@@ -126,6 +126,8 @@ public class LlmClient {
         public String error;
         /** Private failure evidence for the request recorder, never a model/UI message. */
         public JSONObject diagnostic;
+        /** Short notification text; raw provider errors remain private diagnostic evidence. */
+        public String userMessage;
         /** 这一次请求服务端报的用量。0 表示对方没给。 */
         public long promptTokens;
         public long completionTokens;
@@ -231,6 +233,8 @@ public class LlmClient {
         String requestMethod = "POST";
         long idleDeadlineNanos, totalDeadlineNanos;
         int maxChars;
+        NetworkRouting.Route route;
+        JSONObject networkDiagnostic;
     }
 
     private volatile Attempt attempt;
@@ -239,9 +243,19 @@ public class LlmClient {
     private final class SdkSession implements AutoCloseable {
         final ClientOptions options;
         final OpenAIClient client;
+        final Attempt mine;
         SdkSession(final Attempt mine) throws Exception {
+            this.mine = mine;
             long headerBudget = headerTimeout(mine);
-            OkHttpClient http = new OkHttpClient.Builder()
+            final RequestValidity validity = requestValidity.get();
+            mine.stage = "network";
+            mine.route = NetworkRouting.open(config.baseUrl, new RequestValidity() {
+                @Override public boolean isCurrent() { return !mine.dead
+                        && (validity == null || validity.isCurrent())
+                        && (mine.totalDeadlineNanos == 0L || System.nanoTime() < mine.totalDeadlineNanos); }
+            });
+            try {
+            OkHttpClient.Builder builder = new OkHttpClient.Builder()
                     .connectTimeout(20, TimeUnit.SECONDS).writeTimeout(20, TimeUnit.SECONDS)
                     .readTimeout(headerBudget, TimeUnit.MILLISECONDS)
                     .retryOnConnectionFailure(false).followRedirects(false)
@@ -279,7 +293,9 @@ public class LlmClient {
                             }
                             return response;
                         }
-                    }).build();
+                    });
+            if (mine.route != null) mine.route.configure(builder);
+            OkHttpClient http = builder.build();
             Timeout timeout = Timeout.builder().connect(Duration.ofSeconds(20)).write(Duration.ofSeconds(20))
                     .read(Duration.ofMillis(headerBudget))
                     .request(mine.totalDeadlineNanos == 0L ? Duration.ZERO : Duration.ofMillis(remainingTotal(mine)))
@@ -289,8 +305,16 @@ public class LlmClient {
                     .baseUrl(Config.root(config.baseUrl)).apiKey(config.apiKey)
                     .maxRetries(0).logLevel(LogLevel.OFF).responseValidation(false).timeout(timeout).build();
             client = new OpenAIClientImpl(options);
+            mine.stage = "GET".equals(mine.requestMethod) ? "models_headers" : "headers";
+            } catch (Exception failure) {
+                if (mine.route != null) mine.route.close();
+                throw failure;
+            }
         }
-        @Override public void close() { client.close(); }
+        @Override public void close() {
+            try { client.close(); }
+            finally { if (mine.route != null) try { mine.route.close(); } catch (java.io.IOException ignored) { } }
+        }
     }
 
     public LlmClient(Config config) {
@@ -317,6 +341,7 @@ public class LlmClient {
         current.dead = true;
         Call call = current.call;
         if (call != null) call.cancel();
+        if (current.route != null) try { current.route.close(); } catch (java.io.IOException ignored) { }
     }
 
     /** Register cancellation validity while preserving existing send overrides. */
@@ -345,25 +370,18 @@ public class LlmClient {
         boolean includeUsage = !usageOptionUnsupported;
         String detail = ResponsePreferences.normalizeVerbosity(config.verbosity);
         boolean includeVerbosity = !verbosityUnsupported && !"default".equals(detail);
-        Reply reply;
         try {
-            while (true) {
-                reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
-                if (mine.dead) {
-                    discardCancelledReply(reply);
-                    return reply;
-                }
-                if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) {
-                    usageOptionUnsupported = true;
-                    includeUsage = false;
-                } else if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) {
-                    verbosityUnsupported = true;
-                    includeVerbosity = false;
-                } else {
-                    if (reply.error != null) sealDiagnostic(reply, mine, messages);
-                    return reply;
-                }
+            Reply reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
+            if (mine.dead) {
+                discardCancelledReply(reply);
+                return reply;
             }
+            // Learn optional capability failures for the next explicit user request only.
+            // A rejected request is still a failed request, never permission to send another POST.
+            if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) usageOptionUnsupported = true;
+            if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) verbosityUnsupported = true;
+            if (reply.error != null) sealDiagnostic(reply, mine, messages);
+            return reply;
         } finally { mine.finished = true; }
     }
 
@@ -500,11 +518,16 @@ public class LlmClient {
                     reply.error = "HTTP " + mine.status + ": " + trim(detail, 500);
                 } else reply.error = (waitingHeaders && failure instanceof java.io.InterruptedIOException
                         ? "响应头等待超时：" : "") + failure.getClass().getSimpleName() + ": " + failure.getMessage();
+                if (e instanceof NetworkRouting.Failure) {
+                    reply.userMessage = ((NetworkRouting.Failure) e).getMessage();
+                    mine.networkDiagnostic = ((NetworkRouting.Failure) e).diagnostic;
+                } else reply.userMessage = notification(mine);
                 reply.diagnostic = diagnostic(mine, e);
             }
         } finally {
             reply.finishText();
             if (reply.error != null && reply.diagnostic == null) reply.diagnostic = diagnostic(mine, null);
+            if (reply.error != null && reply.userMessage == null) reply.userMessage = notification(mine);
             if (stream != null) try { stream.close(); } catch (RuntimeException closeFailure) { }
             if (response != null) try { response.close(); } catch (RuntimeException closeFailure) { }
             if (sdk != null) try { sdk.close(); } catch (RuntimeException closeFailure) { }
@@ -523,6 +546,27 @@ public class LlmClient {
         reply.reasoning = null;
         reply.displayParts = null;
         reply.diagnostic = null;
+        reply.userMessage = null;
+    }
+
+    private String notification(Attempt mine) {
+        if (mine.status == 401) return "AI 密钥无效，请检查供应商配置。";
+        if (mine.status == 403) return "AI 服务拒绝访问，请检查账户权限。";
+        if (mine.status == 404) return "AI 接口或模型不存在，请检查配置。";
+        if (mine.status == 429) return "AI 服务限流，请稍后手动继续。";
+        if (mine.status >= 500) return "AI 服务器暂时无法处理请求。";
+        if (mine.status >= 400) return "AI 请求参数不受支持，请检查模型配置。";
+        if ("validation".equals(mine.stage)) return "模型返回的工具参数无效，未执行。";
+        if (mine.status == 0 && mine.call != null && mine.route != null && !mine.dead) {
+            try {
+                String message = mine.route.failureMessage(new RequestValidity() {
+                    @Override public boolean isCurrent() { return !mine.dead; }
+                });
+                mine.networkDiagnostic = mine.route.diagnostic();
+                return message;
+            } catch (RuntimeException unavailableProbe) { return "AI 服务器连接失败，请检查网络或服务地址。"; }
+        }
+        return mine.responseStarted ? "模型响应中断，请稍后手动继续。" : "模型请求失败，详细原因已记录。";
     }
 
     private JSONObject diagnostic(Attempt mine, Throwable failure) {
@@ -545,6 +589,8 @@ public class LlmClient {
             result.put("elapsed_ms", Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - mine.startedNanos)));
             result.put("quiet_ms", Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now
                     - (mine.lastProgressNanos == 0L ? mine.startedNanos : mine.lastProgressNanos))));
+            if (mine.networkDiagnostic != null) result.put("network", mine.networkDiagnostic);
+            else if (mine.route != null) result.put("network", mine.route.diagnostic());
             if (mine.requestId != null) result.put("request_id", trim(mine.requestId, 256));
             if (mine.contentType != null) result.put("content_type", trim(mine.contentType, 256));
             if (mine.errorDetail != null) result.put("provider_error", trim(mine.errorDetail, 4096));
@@ -941,6 +987,7 @@ public class LlmClient {
         public List<String> models = new ArrayList<String>();
         public String error;
         public JSONObject diagnostic;
+        public String userMessage;
     }
 
     /** 请求 /v1/models，返回可用模型 id 列表。 */
@@ -976,7 +1023,11 @@ public class LlmClient {
                     ? "HTTP " + ((com.openai.errors.OpenAIServiceException) e).statusCode() + ": " + trim(e.getMessage(), 300)
                     : rootCause(e).getClass().getSimpleName() + ": " + rootCause(e).getMessage();
             if (owner != null) {
-                Reply failure = new Reply(); failure.diagnostic = owner.diagnostic(mine, e);
+                if (e instanceof NetworkRouting.Failure) {
+                    result.userMessage = e.getMessage();
+                    mine.networkDiagnostic = ((NetworkRouting.Failure) e).diagnostic;
+                } else result.userMessage = owner.notification(mine);
+                Reply failure = new Reply(); failure.error = result.error; failure.diagnostic = owner.diagnostic(mine, e);
                 owner.sealDiagnostic(failure, mine, java.util.Collections.<Message>emptyList());
                 result.diagnostic = failure.diagnostic;
             }

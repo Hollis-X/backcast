@@ -207,7 +207,6 @@ public class AgentLoop {
     /** 界面这一轮的记号，只在跑循环的那条线程上读。 */
     private final ThreadLocal<Integer> callToken = new ThreadLocal<Integer>();
     private final ThreadLocal<ToolRegistry> turnTools = new ThreadLocal<ToolRegistry>();
-    private final ThreadLocal<Integer> requestRetries = new ThreadLocal<Integer>();
     /** UI cancellation and usage reads must refer to the same registry as the owning worker. */
     private ToolRegistry activeTurnTools;
     private int activeTurnToolsToken;
@@ -519,9 +518,8 @@ public class AgentLoop {
         @Override public void onSteer(int gen) { emit(event(UiEventBuffer.STEER, gen, "")); }
         @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
             UiEventBuffer.Event event = event(UiEventBuffer.PROGRESS, gen, detail);
-            Integer retries = requestRetries.get();
             event.name = phase; event.arguments = name;
-            event.first = attempt > 0 ? attempt : retries == null ? 0 : retries.intValue();
+            event.first = Math.max(0, attempt);
             emit(event);
         }
     }
@@ -910,7 +908,6 @@ public class AgentLoop {
             ToolRegistry tools = turnTools.get();
             String cleanup = tools == null ? null : tools.cleanupTemporary(true);
             turnTools.remove();
-            requestRetries.remove();
             synchronized (lock) {
                 if (activeTurnToolsToken == token) {
                     activeTurnTools = null;
@@ -1260,19 +1257,17 @@ public class AgentLoop {
             });
             if (requestRecorder instanceof RequestRecorder && requestSession >= 0 && reply != null) {
                 boolean cancelledRequest = stale(token, gen);
-                Integer retries = requestRetries.get();
                 try {
                     long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - started);
                     String outcome = cancelledRequest ? "cancelled" : reply.error == null ? "success"
                             : isTransient(reply.error) ? "retryable_error" : "error";
-                    String reason = cancelledRequest || reply.error == null ? "" : retryReason(reply.error);
-                    int retryCount = retries == null ? 0 : retries.intValue();
+                    String reason = cancelledRequest || reply.error == null ? "" : failureReason(reply.error);
                     if (requestRecorder instanceof DetailedRequestRecorder) {
                         ((DetailedRequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
-                                elapsed, outcome, reason, retryCount,
+                                elapsed, outcome, reason, 0,
                                 reply.diagnostic == null ? "" : Diagnostics.boundedJson(reply.diagnostic));
                     } else ((RequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
-                            elapsed, outcome, reason, retryCount);
+                            elapsed, outcome, reason, 0);
                 } catch (RuntimeException diagnosticFailure) {
                     // A full or unavailable diagnostic store must not discard a valid model response.
                 }
@@ -1464,7 +1459,6 @@ public class AgentLoop {
     }
 
     private void beginTemporaryTurn() {
-        requestRetries.set(Integer.valueOf(0));
         ToolRegistry tools = turnTools.get();
         if (tools != null) tools.beginTurn();
     }
@@ -1579,8 +1573,7 @@ public class AgentLoop {
     /**
      * 把当前上下文压成一份交接摘要，用摘要开新窗口。
      *
-     * 对齐 Codex：摘要请求本身也可能超窗，那种情况从最旧的一条开始丢掉再试；
-     * 保留了系统提示词所以不会把工作方式丢掉。
+     * 摘要请求失败时保留原窗口并停止，由用户决定下一次操作。
      *
      * @return false 表示这一轮不该继续（已停止或已换代）。
      */
@@ -1595,7 +1588,6 @@ public class AgentLoop {
             request.add(Message.user(Compactor.PROMPT));
         }
 
-        int requestStrikes = 0;
         while (!stale(token, gen)) {
 
             LlmClient.Reply reply = sendRequest(request, null, null, token, gen, "compact");
@@ -1603,28 +1595,7 @@ public class AgentLoop {
                 return false;
             }
             if (reply.error != null) {
-                if (isContextOverflow(reply.error)) {
-                    List<Message> trimmed = trimCompactionRequest(request);
-                    if (trimmed.size() < request.size()) {
-                        request = trimmed;
-                        continue;
-                    }
-                }
-                if (isTransient(reply.error) && requestStrikes < MAX_REQUEST_RETRIES && !stale(token, gen)) {
-                    requestStrikes++;
-                    reportRequestRetry(gen, reply.error);
-                    try {
-                        Thread.sleep(retryWait(requestStrikes));
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        return false;
-                    }
-                    if (stale(token, gen)) {
-                        return false;
-                    }
-                    continue;
-                }
-                listener.onError(gen, requestFailure(reply.error, requestStrikes));
+                stopAfterRequestFailure(token, gen, reply.error, reply.userMessage);
                 return false;
             }
             accountGoalUsage(reply.promptTokens, reply.completionTokens);
@@ -1776,7 +1747,7 @@ public class AgentLoop {
         return request;
     }
 
-    /** Only temporary network/server failures qualify for bounded retries. */
+    /** Classify temporary failures for local diagnostics; they never trigger another request. */
     private static boolean isTransient(String error) {
         if (error == null) {
             return false;
@@ -1832,37 +1803,32 @@ public class AgentLoop {
         saveRun(false);
     }
 
-    private static final int MAX_REQUEST_RETRIES = 2;
-
-    private static String requestFailure(String error, int retries) {
-        String prefix = retries > 0 ? "模型请求连续失败，已停止本轮（重试 " + retries + " 次）："
-                : "模型请求失败，已停止本轮：";
-        return prefix + retryReason(error) + "。请检查接口或网络后再继续。";
-    }
-
-    private static long retryWait(int strike) {
-        long wait = 1000L * strike;
-        return wait > 8000L ? 8000L : wait;
+    private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
+        synchronized (lock) {
+            if (stale(token, gen)) return;
+            // A settings/goal handoff queued during the failed request must not restart it.
+            resumeAfter = false;
+        }
+        synchronized (uiLock) {
+            // Failed partial text/arguments are not committed history. A later
+            // explicit resume must not replay them or need a fake retry event.
+            uiEvents.clearOutputPreservingRetry();
+        }
+        listener.onError(gen, userMessage == null || userMessage.trim().length() == 0
+                ? failureReason(error) : userMessage);
     }
 
     /** Show the reason without exposing a provider's echoed prompt or credentials. */
-    private static String retryReason(String error) {
+    private static String failureReason(String error) {
         String value = error == null ? "" : error.toLowerCase(java.util.Locale.US);
         java.util.regex.Matcher status = java.util.regex.Pattern.compile("http (\\d{3})").matcher(value);
         if (status.find()) return "接口返回 HTTP " + status.group(1);
         if (value.contains("响应头等待超时")) return "等待接口首响应超时";
         if (value.contains("timeout") || value.contains("timed out") || value.contains("长时间没有输出")) return "等待模型响应超时";
-        if (isContextOverflow(error)) return "模型上下文超限，正在压缩后重试";
+        if (isContextOverflow(error)) return "模型上下文超限";
         if (value.contains("工具调用参数") || value.contains("jsonexception")) return "模型返回的工具参数不完整或无效";
         if (isTransient(error)) return "网络连接中断";
         return "模型请求失败";
-    }
-
-    private void reportRequestRetry(int gen, String error) {
-        Integer previous = requestRetries.get();
-        int attempt = previous == null ? 1 : previous.intValue() + 1;
-        requestRetries.set(Integer.valueOf(attempt));
-        listener.onProgress(gen, "retry", "", retryReason(error), attempt);
     }
 
     /** 判断错误是不是超窗。 */
@@ -1987,8 +1953,6 @@ public class AgentLoop {
             return;
         }
         JSONArray schema = requestSchema();
-        int strikes = 0;
-        boolean compactedAfterOverflow = false;
         boolean finishingGoal = lastToolsClosedGoal();
         final LoopProgress progress = new LoopProgress();
         boolean pardon;
@@ -2092,37 +2056,9 @@ public class AgentLoop {
                 return;
             }
             if (reply.error != null) {
-                if (isContextOverflow(reply.error)) {
-                    listener.onRetry(gen);
-                    reportRequestRetry(gen, reply.error);
-                    if (compactedAfterOverflow || !compact(token, gen, sessionId, true)) {
-                        if (compactedAfterOverflow) listener.onError(gen, "压缩后仍超出模型上下文窗口，请检查窗口设置或缩短输入。");
-                        return;
-                    }
-                    compactedAfterOverflow = true;
-                    continue;
-                }
-                boolean again = isTransient(reply.error) && strikes < MAX_REQUEST_RETRIES;
-                if (again) {
-                    strikes++;
-                    listener.onRetry(gen);
-                    reportRequestRetry(gen, reply.error);
-                    try {
-                        Thread.sleep(retryWait(strikes));
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                    if (stale(token, gen)) {
-                        return;
-                    }
-                    continue;
-                }
-                listener.onError(gen, requestFailure(reply.error, strikes));
+                stopAfterRequestFailure(token, gen, reply.error, reply.userMessage);
                 return;
             }
-            strikes = 0;
-            compactedAfterOverflow = false;
             // 用量记到目标账上；记满会转入 budget_limited，让这一轮收尾。
             accountGoalUsage(reply.promptTokens, reply.completionTokens);
 
@@ -2208,7 +2144,14 @@ public class AgentLoop {
             }
             boolean wasGoal = goalAccounting && (goalActive() || Goal.BUDGET_LIMITED.equals(goalStatus));
             progress.ranTools();
-            executeToolCalls(reply.toolCalls, sessionId, gen, token, progress);
+            try {
+                executeToolCalls(reply.toolCalls, sessionId, gen, token, progress);
+            } catch (ReviewRequestFailure failure) {
+                if (stale(token, gen)) return;
+                fillMissingTools(sessionId, "权限审查请求失败，本轮未执行。");
+                stopAfterRequestFailure(token, gen, failure.getMessage(), failure.userMessage);
+                return;
+            }
             if (stale(token, gen)) return;
             finishingGoal = wasGoal && (Goal.isClosed(goalStatus)
                     || lastToolsClosedGoal());
@@ -2424,10 +2367,16 @@ public class AgentLoop {
         return null;
     }
 
+    private static final class ReviewRequestFailure extends RuntimeException {
+        final String userMessage;
+        ReviewRequestFailure(String error, String userMessage) { super(error); this.userMessage = userMessage; }
+    }
+
     /**
      * 受限访问：让模型判定这次调用是否危险。
      *
-     * @return 模型的单行结论；被中断或换会话时返回 null；自查失败返回 REVIEW_UNAVAILABLE。
+     * @return 模型的单行结论；被中断或换会话时返回 null；成功但结论为空返回 REVIEW_UNAVAILABLE。
+     * @throws ReviewRequestFailure 请求失败时立即终止本轮。
      */
     private String reviewCall(String name, JSONObject args, int token, int gen) {
         List<Message> review = new ArrayList<Message>();
@@ -2437,7 +2386,8 @@ public class AgentLoop {
         if (stale(token, gen)) {
             return null;
         }
-        if (reply.error != null || reply.content == null) {
+        if (reply.error != null) throw new ReviewRequestFailure(reply.error, reply.userMessage);
+        if (reply.content == null) {
             return REVIEW_UNAVAILABLE;
         }
         accountGoalUsage(reply.promptTokens, reply.completionTokens);

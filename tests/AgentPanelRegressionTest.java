@@ -94,7 +94,9 @@ public final class AgentPanelRegressionTest {
         invoke(panel, "renderDetail", false);
         check(visible(panel).contains("ONLY_ACTIVITY_TAB") && !visible(panel).contains(row.task) && !visible(panel).contains("ONLY_RESULT_TAB"), "Activity tab is not separate");
         state.tab = AgentPanelState.RESULT; invoke(panel, "renderDetail", false);
-        check(visible(panel).contains("ONLY_RESULT_TAB") && visible(panel).contains("ONLY_ERROR_TAB") && !visible(panel).contains("ONLY_ACTIVITY_TAB"), "Result view loses evidence or mixes activity");
+        check(visible(panel).contains("ONLY_RESULT_TAB") && !visible(panel).contains("ONLY_ERROR_TAB")
+                        && visible(panel).contains("执行错误") && !visible(panel).contains("ONLY_ACTIVITY_TAB"),
+                "Result view loses evidence, exposes raw errors, or mixes activity");
         pass("taskActivityResultAndErrorHaveDistinctViewsWithActualProgressAndTime");
     }
     private static void preciseStagesDoNotClaimToolsAlreadyExecuted() throws Exception {
@@ -113,13 +115,19 @@ public final class AgentPanelRegressionTest {
         Object panel = panel(); SubAgentManager.Record row = record("retries", SubAgentManager.RUNNING, "retrying");
         row.retryAttempt = 2; row.retryReason = "接口返回 HTTP 503";
         set(panel, "selected", row); invoke(panel, "renderDetail", false);
-        check(visible(panel).contains("本次重试 2 次") && visible(panel).contains("最近失败原因：接口返回 HTTP 503"), "Retry detail hides count or reason");
+        check(!visible(panel).contains("重试") && !visible(panel).contains("HTTP 503")
+                        && visible(panel).contains(row.task), "Retry diagnostics leaked or assignment disappeared");
         invoke(panel, "renderList", Arrays.asList(row));
-        check(visible(panel).contains("本次重试 2 次") && !visible(panel).contains("HTTP 503"), "Compact list lost retry count or exposed full detail");
+        check(!visible(panel).contains("重试") && !visible(panel).contains("HTTP 503"), "Compact list leaked retry metadata");
         row.retryAttempt = 3; row.retryReason = "等待模型响应超时";
         invoke(panel, "renderList", Arrays.asList(row));
-        check(visible(panel).contains("本次重试 3 次"), "Retry change did not refresh while phase stayed the same");
-        pass("retryDetailShowsActualCountAndReasonAndCompactRowsRefreshTheirCount");
+        check(!visible(panel).contains("重试") && !visible(panel).contains("超时"), "Retry change exposed private failure text");
+        row.status=SubAgentManager.FAILED;row.phase="failed";row.progress="RAW_FAILURE_PROGRESS";row.error="RAW_API_STACK";row.revision++;
+        set(panel,"selected",row);invoke(panel,"renderDetail",false);
+        check(visible(panel).contains("失败")&&visible(panel).contains(row.task)
+                        &&!visible(panel).contains("RAW_FAILURE")&&!visible(panel).contains("RAW_API_STACK"),
+                "Failed task became hidden or exposed API failure details");
+        pass("retryAndFailureMetadataStayPrivateWhileTheActualFailedAssignmentRemainsVisible");
     }
     private static void activityPagesAreStableWhileNewHistoryArrives() throws Exception {
         Object panel = panel(); SubAgentManager.Record row = record("a", SubAgentManager.RUNNING, "reviewing");
@@ -189,7 +197,7 @@ public final class AgentPanelRegressionTest {
         check(AgentPanelState.active(SubAgentManager.WAITING) && !AgentPanelState.active(SubAgentManager.IDLE) && !AgentPanelState.active(SubAgentManager.FAILED), "Status active state is fabricated");
         pass("historyPayloadIsBoundedAndActiveRecordsSortAheadOfCompletedWork");
     }
-    private static void pollingStopsAndStaleLoadsCannotMutateNextVisit() {
+    private static void pollingStopsAndStaleLoadsCannotMutateNextVisit() throws Exception {
         AgentPanelState state = new AgentPanelState();
         check(state.beginLoad() < 0, "Hidden panel began a load");
         state.start(); long first = state.beginLoad();
@@ -198,6 +206,10 @@ public final class AgentPanelRegressionTest {
         check(!state.finishLoad(first) && !state.mayPoll(true), "Old callback unlocked or changed the new visit");
         check(state.finishLoad(second) && state.mayPoll(true) && !state.mayPoll(false), "Live refresh did not resume after its own load");
         state.stop(); check(!state.mayPoll(true) && !state.finishLoad(second), "Hidden panel continues polling");
+        Object panel=panel();invoke(panel,"showReadFailure");invoke(panel,"showReadFailure");
+        check(((List<?>)get(panel,"toasts")).size()==1,"A repeated child-panel read failure spammed Toasts");
+        set(panel,"readFailureAnnounced",false);invoke(panel,"showReadFailure");
+        check(((List<?>)get(panel,"toasts")).size()==2,"A new read failure after recovery could not notify the user");
         pass("pollingAllowsOneLoadAndRejectsCallbacksFromPausedOrDestroyedVisits");
     }
     private static final class Source extends SimpleJavaFileObject {
@@ -236,9 +248,11 @@ public final class AgentPanelRegressionTest {
         source.append("static class ImageButton extends View {} static class EditText extends TextView {EditText(Object owner){super(owner);}} static class LinearLayout extends View { static final int VERTICAL=1; List<View> children=new ArrayList<View>(); LinearLayout(Object owner){} void setOrientation(int value){} void addView(View child){children.add(child);} void addView(View child,Object params){children.add(child);} void removeAllViews(){children.clear();} static class LayoutParams extends ViewGroup.LayoutParams {int topMargin,bottomMargin; LayoutParams(int w,int h){super(w,h);}}}\n");
         source.append("static class ScrollView extends View {int y; int getScrollY(){return y;} void scrollTo(int x,int y){this.y=y;} void post(Runnable action){action.run();}} static class TextUtils {static class TruncateAt {static final Object END=new Object();}} static class Icons {static final int CHEVRON_RIGHT=1; static void right(TextView view,int icon,int color,int size){}} static class Typeface {static final Object MONOSPACE=new Object();} static class DateFormat { static String format(String pattern,long at){java.text.SimpleDateFormat format=new java.text.SimpleDateFormat(pattern); format.setTimeZone(java.util.TimeZone.getTimeZone(\"UTC\")); return format.format(new java.util.Date(at));}}\n");
         source.append("static class Settings {String systemPrompt(){return \"\";} String environmentContext(){return \"\";}} AgentPanelState state=new AgentPanelState(); Settings settings=new Settings(); SubAgentManager.Record selected; TextView title=new TextView(this),summary=new TextView(this),pageLabel=new TextView(this); TextView[] tabs={new TextView(this),new TextView(this),new TextView(this)}; LinearLayout body=new LinearLayout(this); ScrollView scroll=new ScrollView(); View tabBar=new View(),pages=new View(),composer=new View(); ImageButton stop=new ImageButton(),send=new ImageButton(),older=new ImageButton(),newer=new ImageButton(),latest=new ImageButton(); EditText message=new EditText(this); String rendered=\"\"; int renderVersion; boolean resumed=true,destroyed,sending,closing,dirty,loadCalled; void load(){loadCalled=true;} int dp(int value){return value;} String redact(String text){return PromptGuard.redact(text,settings.systemPrompt(),settings.environmentContext(),\"\");}\n");
-        for (String name : Arrays.asList("renderList", "renderDetail", "page", "status", "phase", "statusColor", "role", "section", "text", "divider", "restoreScroll")) {
+        source.append("void recordUiFailure(Throwable e){}boolean readFailureAnnounced;List<String>toasts=new ArrayList<String>();static class Toast{static final int LENGTH_SHORT=0;PanelHarness owner;String message;static Toast makeText(PanelHarness o,String t,int d){Toast v=new Toast();v.owner=o;v.message=t;return v;}void show(){owner.toasts.add(message);}}\n");
+        for (String name : Arrays.asList("renderList", "renderDetail", "page", "status", "phase", "statusColor", "role", "section", "text", "divider", "restoreScroll", "showReadFailure")) {
             String body = methods.get(name); if (body == null) throw new AssertionError("Production method missing: " + name);
-            source.append(body.replace("android.text.format.DateFormat", "DateFormat").replace("android.graphics.Typeface", "Typeface").replace("android.R.color.transparent", "R.color.transparent"));
+            source.append(body.replace("android.text.format.DateFormat", "DateFormat").replace("android.graphics.Typeface", "Typeface")
+                    .replace("android.R.color.transparent", "R.color.transparent").replace("SubAgentsActivity.this", "PanelHarness.this"));
         }
         source.append("String collect(View view){String out=view instanceof TextView?((TextView)view).value+\"\\n\":\"\"; if(view instanceof LinearLayout)for(View child:((LinearLayout)view).children)out+=collect(child); return out;} String visible(){return title.value+\"\\n\"+summary.value+\"\\n\"+pageLabel.value+\"\\n\"+collect(body);} }");
         return source.toString();

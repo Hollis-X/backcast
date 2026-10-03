@@ -98,13 +98,27 @@ public final class ToolkitOperationRegressionTest {
         };
         ToolkitTool target = new ToolkitTool(failing, store, project.getPath(), temporary, "arm64-v8a");
         store.configure("objection", new File(root, "objection").getPath(), null);
+        for (String override : new String[]{"--host=192.0.2.1", "-h192.0.2.1", "--port=1234", "-P1234", "--network",
+                "-N", "--local", "-L", "--serial=remote", "-Sremote", "-dN"}) {
+            JSONObject response = new JSONObject(target.run(request("objection", override, "-n", "sample.running.app", "run", "memory list modules")));
+            check("error".equals(response.optString("state")) && response.getString("error").contains("私有 Frida server"),
+                    "A later Click option could redirect the managed connection: " + response);
+        }
         String[][] failures = {{"exit=1\nUnable to find target application.\n", "target_not_running"},
                 {"exit=1\nfrida.TimedOutError: unexpectedly timed out while waiting for signal from process with PID 4543\n", "attach_timeout"},
+                {"exit=1\n[backcast-frida] {\"phase\":\"rpc\",\"state\":\"failed\"}\nfrida.TimedOutError: RPC timed out\n", "frida_operation_timeout"},
+                {"exit=1\n[backcast-frida] {\"phase\":\"server_connect\",\"state\":\"failed\"}\nRuntimeError: server did not become ready\n", "frida_server_unavailable"},
+                {"exit=1\n[backcast-frida] {\"phase\":\"attach\",\"state\":\"completed\"}\n[backcast-frida] {\"phase\":\"script_create\",\"state\":\"failed\"}\nScript(line 4): SyntaxError: unexpected character\n", "frida_script_invalid"},
+                {"exit=1\n[backcast-frida] {\"phase\":\"rpc\",\"state\":\"failed\"}\nSyntaxError: RPC supplied bad expression\n", "program_failed"},
+                {"exit=1\nSyntaxError: invalid Python bootstrap syntax\n", "program_failed"},
                 {"exit=1\nfrida.core.RPCException: Error: access violation accessing 0x0\n at tryGetEnvJvmti (/src/index.js:3435)\n", "frida_java_bridge_incompatible"}};
         for (String[] failure : failures) {
             output[0] = failure[0]; JSONObject response = new JSONObject(target.run(request("objection", "-n", "sample.running.app", "run", "android hooking list activities")));
             check(!response.getBoolean("success") && failure[1].equals(response.getString("failure_kind"))
                     && failure[0].equals(response.getString("output")) && response.getString("hint").length() > 20, "Failure was hidden or rewritten into success: " + response);
+            if (failure[0].contains("[backcast-frida]")) check(response.getJSONArray("frida_evidence").length() > 0, "Actual phase diagnostics were dropped");
+            if ("attach_timeout".equals(failure[1])) check(response.getString("hint").contains("不能证明反调试")
+                    && response.getString("hint").contains("尚未加载"), "Native attach timeout was blamed on script/anti-debug");
         }
         output[0] = "exit=0\nobjection: 1.12.5\n"; JSONObject probe = target.status("objection");
         check(probe.getBoolean("ready") && "version".equals(probe.getString("probe_type")) && probe.getString("probe_scope").contains("实际 run"),

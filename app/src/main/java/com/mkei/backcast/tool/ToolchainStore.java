@@ -370,18 +370,7 @@ public final class ToolchainStore {
                         .put("art_patch_source", manifest.optString("objection_art_patch_source", ""));
                 env.put("PYTHONHOME", usr.getPath()).put("PYTHONPATH", new File(common, "python-site").getPath())
                         .put("SSL_CERT_FILE", new File(usr, "etc/tls/cert.pem").getPath());
-                prefix.put("-c").put("import os,sys,time,json,frida\nfrom datetime import datetime\n"
-                        + "cache=os.path.join(os.path.expanduser('~'),'.objection')\nos.makedirs(cache,exist_ok=True)\n"
-                        + "with open(os.path.join(cache,'version_info'),'w') as cached:\n"
-                        + " json.dump({'remote_version':'1.12.5','last_check':datetime.now().strftime('%d%m%y %H:%M:%S')},cached)\n"
-                        + "from objection.console.cli import cli\n"
-                        + "port=os.environ.get('BACKCAST_FRIDA_PORT','27043')\n"
-                        + "if not any(x in sys.argv[1:] for x in ('--help','--version','version')):\n"
-                        + " for attempt in range(30):\n"
-                        + "  os.kill(int(os.environ['BACKCAST_FRIDA_PID']),0)\n"
-                        + "  try:\n   frida.get_device_manager().add_remote_device('127.0.0.1:'+port).enumerate_processes(); break\n"
-                        + "  except (frida.TransportError,frida.ServerNotRunningError):\n   time.sleep(0.1)\n"
-                        + "cli(args=['--network','--host','127.0.0.1','--port',port]+sys.argv[1:],prog_name='objection')");
+                prefix.put("-c").put(ObjectionBootstrap.program());
                 config.put("companion", new File(usr, "bin/frida-server").getPath());
             } else {
                 path = new File(usr, "bin/g" + id).getPath();

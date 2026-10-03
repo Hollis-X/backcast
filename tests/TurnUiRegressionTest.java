@@ -152,10 +152,15 @@ public final class TurnUiRegressionTest {
     private static void compileView(Path root, Path build) throws Exception {
         StringBuilder source = new StringBuilder(
                 "import android.os.SystemClock; import com.mkei.backcast.agent.*;"
-                + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.tool.ToolCatalog;import com.mkei.backcast.tool.EmbeddedToolchain;import com.mkei.backcast.tool.ToolchainInstaller; import java.util.*; import org.json.*;"
+                + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.ui.MarkdownRenderQueue;import java.lang.ref.WeakReference;import com.mkei.backcast.tool.ToolCatalog;import com.mkei.backcast.tool.EmbeddedToolchain;import com.mkei.backcast.tool.ToolchainInstaller; import java.util.*; import org.json.*;"
                 + "class UiActivity {protected void onStop(){}protected void onDestroy(){}}"
                 + "public class TurnUiFixture extends UiActivity implements ApprovalGate {"
                 + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt; int turnUiToken=-1;"
+                + "AgentLoop errorToastSource;int errorToastToken=-1,errorToastGeneration=-1;boolean compactLive;int settled,goalRefreshes;List<String>toasts=new ArrayList<String>();"
+                + "static class Toast{static final int LENGTH_SHORT=0;TurnUiFixture owner;String text;static Toast makeText(TurnUiFixture o,String t,int d){Toast v=new Toast();v.owner=o;v.text=t;return v;}"
+                + "static Toast makeText(TurnUiFixture o,int id,int d){return makeText(o,String.valueOf(id),d);}void show(){owner.toasts.add(text);}}"
+                + "void hidePending(){}void settleWork(){settled++;}void dropCompactRow(){}void settleCompact(){}void refreshGoal(){goalRefreshes++;}"
+                + "void recordUiFailure(long sid,String source,Throwable failure){}"
                 + "interface ViewParent {}"
                 + "static class View implements ViewParent { static final int VISIBLE=0,GONE=8;"
                 + "ViewGroup parent; Object tag; CharSequence description; int visibility,top,height=10; boolean enabled=true,focused; float alpha=1f,translationY; Animator animator;"
@@ -213,7 +218,7 @@ public final class TurnUiRegressionTest {
                 + "void layout(){int y=0;for(View child:children){if(child instanceof ViewGroup)((ViewGroup)child).layout();child.top=y;y+=child.getHeight();}}"
                 + "int getHeight(){int y=0;for(View child:children)y+=child.getHeight();return children.isEmpty()?height:y;} }"
                 + "static class LinearLayout extends ViewGroup { static final int HORIZONTAL=0,VERTICAL=1;"
-                + "LinearLayout(Object... c){} void setOrientation(int o){} void setGravity(int g){} }"
+                + "int orientation=VERTICAL;LinearLayout(Object... c){} void setOrientation(int o){orientation=o;}int getOrientation(){return orientation;} void setGravity(int g){} }"
                 + "static class TextView extends View { String text=\"\"; TextView(Object... c){} void setText(CharSequence t){text=t.toString();}"
                 + "void setText(int r){text=String.valueOf(r);} CharSequence getText(){return text;}"
                 + "void setTextSize(int v){} void setTextColor(int v){} void setLineSpacing(int v,float s){} void setBackgroundResource(int v){} void setMaxWidth(int v){} }"
@@ -228,7 +233,7 @@ public final class TurnUiRegressionTest {
                 + "void setPadding(int a,int b,int c,int d){paddingBottom=d;}"
                 + "void stopScroll(){flinging=false;stops++;} void nativeFrame(){if(flinging)y-=40;}"
                 + "void scrollTo(int x,int to){if(y!=to){y=to;calls++;}} ViewTreeObserver getViewTreeObserver(){return observer;} }"
-                + "static class R { static class string { static final int history_loading=1,history_retry=2,earlier_messages=3,"
+                + "static class R { static class string { static final int history_loading=1,history_retry=2,earlier_messages=3,history_load_failed=99,"
                 + "sub_agents_task=7,sub_agents_result=8,sub_agents_failure=9,sub_agents_history_page=10,sub_agents_text_truncated=11,"
                 + "sub_agents_queued=12,sub_agents_running=13,sub_agents_waiting=14,sub_agents_idle=15,sub_agents_failed=16,sub_agents_closed=17,"
                 + "approve_title=18,approve_body=19,approve_run=20,approve_deny=21,toolkit_ready=22,toolkit_configured=23,"
@@ -237,7 +242,7 @@ public final class TurnUiRegressionTest {
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
                 + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51; }"
-                + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50,sheet_panel=51,sheet_scroll=52;} }"
+                + "static class color{static final int text_primary=4,code_bg=5;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50,sheet_panel=51,sheet_scroll=52;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400,heightPixels=1000;}"
                 + "Resources getResources(){return new Resources();} void enableCopy(TextView t){}"
@@ -251,7 +256,7 @@ public final class TurnUiRegressionTest {
                 + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newSingleThreadExecutor();"
                 + "java.util.concurrent.ExecutorService toolkitCancellation=java.util.concurrent.Executors.newSingleThreadExecutor();"
                 + "List<ToolkitOperation> toolkitOperations=new ArrayList<ToolkitOperation>();ToolkitOperation active;"
-                + "static class QueuedReader { List<Runnable> tasks=new ArrayList<Runnable>(); void execute(Runnable r){tasks.add(r);} }"
+                + "static class QueuedReader implements java.util.concurrent.Executor { List<Runnable> tasks=new ArrayList<Runnable>(); public void execute(Runnable r){tasks.add(r);} }"
                 + "static class ChatStore { static class MessagePage { List<Message> messages,trailingResults=new ArrayList<Message>(); String requestBefore=\"\"; Message leadingAssistant; long firstId,earlierCount;"
                 + "MessagePage(List<Message> m){messages=m;} } MessagePage nextPage; int reads; long sid,before; int limit;"
                 + "MessagePage messagePage(long s,long b,int l){reads++;sid=s;before=b;limit=l;return nextPage;}"
@@ -279,6 +284,9 @@ public final class TurnUiRegressionTest {
                 + "Settings settings=new Settings(); TurnTrace replayTailTrace,currentTrace; LinearLayout replayTailRows,turnRows,turnBody,turnMarkBody;"
                 + "Flow turnFlow; int turnMarkBox=-1,turnMarkRows=-1,turnMarkRendered=-1,turnMarkBodyChildren,turnRendered;"
                 + "TextView liveAnswer,openThinkLabel,openCommandLabel; StringBuilder liveAnswerRaw; TurnTrace.Step openCommandStep;"
+                + "int liveToken,liveAnswerRendered;boolean secretBlocked,liveFlushQueued;QueuedReader markdownWorker=new QueuedReader();"
+                + "Map<TextView,Object> markdownKeys=new WeakHashMap<TextView,Object>();"
+                + "MarkdownRenderQueue markdownQueue=new MarkdownRenderQueue(markdownWorker,r->posted.add(r),(s,b)->s.replace(\"**\",\"\"));"
                 + "TurnTrace sheetTrace; TurnTrace.Range sheetRange;WorkTimeline sheetTimeline;WorkTimeline.CommandView sheetCommand;void syncSheetTools(){} void hideWorkSheet(){resetSheetDetails();}"
                 + "int renderCost; List<String> bodies=new ArrayList<String>(); List<TurnTrace> traces=new ArrayList<TurnTrace>();"
                 + "List<LinearLayout> boxes=new ArrayList<LinearLayout>();"
@@ -286,7 +294,7 @@ public final class TurnUiRegressionTest {
                 + "Object fullWidth(){return null;}"
                 + "void refreshTurnChrome(){} void showPending(){}"
                 + "void beginWorkRow(){if(currentTrace==null)currentTrace=new TurnTrace();}"
-                + "void sealOpenThink(){}void sealLiveAnswer(){}void syncTurnFold(){}"
+                + "void sealOpenThink(){}void syncTurnFold(){}"
                 + "void spinChevron(View c,boolean open,boolean animate){}"
                 + "void animateActivity(WorkTimeline t,boolean open){t.setVisibility(open?View.VISIBLE:View.GONE);}"
                 + "LinearLayout activityRow(TurnTrace.Range r){LinearLayout row=new LinearLayout(),head=new LinearLayout();"
@@ -321,10 +329,12 @@ public final class TurnUiRegressionTest {
                 "pinLastMessage",
                 "shortChildText",
                 "approve", "approvalCurrent", "showApproval", "cancelApprovals", "prettyArgs",
-                "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive",
+                "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive", "handleTurnError", "failureToast",
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
                 "refreshFoldResults", "summaryChevron", "syncWorkChevron", "applyTurnProgress",
+                "appendAgentDelta", "scheduleLiveFlush", "flushLiveAnswer", "sealLiveAnswer", "renderMarkdown", "applyMarkdown",
+                "markdownAnchor", "markdownTop",
                 "bindSummary", "displayElapsed", "seconds", "requestDiagnosticsText", "showRequestDiagnostics", "fitRequestDiagnosticsSheet",
                 "refreshRequestDiagnostics", "liveRequestDiagnosticsText", "resetSheetDetails")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
@@ -349,6 +359,7 @@ public final class TurnUiRegressionTest {
                     + "return new java.text.SimpleDateFormat(pattern.toString()).format(new java.util.Date(millis));}}"));
             for (JavaFileObject file : fm.getJavaFileObjects(
                     root.resolve("app/src/main/java/com/mkei/backcast/ui/TurnTrace.java").toFile(),
+                    root.resolve("app/src/main/java/com/mkei/backcast/ui/MarkdownRenderQueue.java").toFile(),
                     root.resolve("app/src/main/java/com/mkei/backcast/tool/ToolCatalog.java").toFile())) files.add(file);
             check(COMPILER.getTask(null, fm, null, Arrays.asList("-proc:none", "-encoding", "UTF-8",
                     "-source", "8", "-target", "8", "-Xlint:-options", "-classpath",
@@ -593,17 +604,17 @@ public final class TurnUiRegressionTest {
         check((Long) get(view, "turnStartedAt") == 100000L, "Retry restarted the whole-turn clock");
         Object header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
         invoke(view, "bindSummary", header, trace);
-        check(get(header, "text").equals("总耗时 400s · 正在重试 · 已重试 2 次 · 连接中断，准备重新请求"),
-                "Live header does not distinguish total latency from actual tool execution: " + get(header, "text"));
+        check(get(header, "text").equals("总耗时 400s · 等待模型"),
+                "Live header leaked request retries or private failure detail: " + get(header, "text"));
         invoke(view, "applyTurnProgress", "model", "", "", 2);
         invoke(view, "bindSummary", header, trace);
-        check(get(header, "text").equals("总耗时 400s · 等待模型 · 已重试 2 次 · 上次失败：连接中断，准备重新请求"),
-                "Next model request faked a new retry or retained the retry phase");
+        check(get(header, "text").equals("总耗时 400s · 等待模型"),
+                "Next model request leaked private retry metadata");
         invoke(view, "applyTurnProgress", "model", "", "", 3);
         check((Integer) get(trace, "retryCount") == 3, "Snapshot's cumulative count was lost outside retry phase");
         field(trace, "elapsedMs", 400000L);
         invoke(view, "bindSummary", header, trace);
-        check(get(header, "text").equals("工作了 400s · 已重试 3 次"), "Sealed header still claims active execution");
+        check(get(header, "text").equals("工作了 400s"), "Sealed header leaked retries or claims active execution");
         pass("retryRollbackPreservesWholeTurnClockAndCumulativeRetryMetadata");
     }
 
@@ -625,8 +636,8 @@ public final class TurnUiRegressionTest {
                 "Diagnostics query was unbounded or read another conversation");
         drain(view, "uiTasks");
         String text = (String) get(output, "text");
-        check(text.contains("请求耗时 12567ms") && text.contains("接口返回 HTTP 503")
-                        && text.contains("可重试失败") && text.contains("本轮累计重试 2 次")
+        check(text.contains("请求耗时 12567ms") && !text.contains("接口返回 HTTP 503")
+                        && text.contains("失败") && !text.contains("重试")
                         && text.contains("不是工具执行耗时"), "Diagnostic detail lost timing or attributed it to tool execution");
         call(view, "showRequestDiagnostics"); Object old = get(view, "sheetRequestOutput");
         drain(get(view, "historyReader"), "tasks");
@@ -691,8 +702,8 @@ public final class TurnUiRegressionTest {
         invoke(view, "bindSummary", header, trace);
         String silent = (String) get(header, "text");
         check(silent.contains("总耗时 400s") && silent.contains("等待模型响应 · 已静默 10s")
-                        && silent.contains("已重试 2 次") && silent.contains("上次失败：接口返回 HTTP 503"),
-                "Quiet request kept a thinking label, reset total time, or lost retries");
+                        && !silent.contains("重试") && !silent.contains("HTTP 503"),
+                "Quiet request kept a thinking label, reset total time, or leaked retry diagnostics");
         client.timing = requestTiming(16500L, 100L, true, true);
         invoke(view, "bindSummary", header, trace);
         check(((String) get(header, "text")).contains("正在思考") && !((String) get(header, "text")).contains("已静默"),
@@ -703,7 +714,7 @@ public final class TurnUiRegressionTest {
                 "Completed request timing leaked into tool execution");
         client.timing = requestTiming(90000L, 80000L, true, true); field(trace, "elapsedMs", 400000L);
         invoke(view, "bindSummary", header, trace);
-        check(((String) get(header, "text")).equals("工作了 400s · 已重试 2 次"), "Historical rows acquired active timing");
+        check(((String) get(header, "text")).equals("工作了 400s"), "Historical rows acquired active timing or private retries");
         pass("liveHeadersUseActualRequestSilenceAndRecoverOnRealOutput");
     }
 
@@ -854,6 +865,76 @@ public final class TurnUiRegressionTest {
         Object view = viewType.getConstructor().newInstance();
         ((List<?>) get(view, "posted")).clear();
         return view;
+    }
+
+    private static void liveMarkdownUsesTheWorkerAndFinalAndSessionOwnership() throws Exception {
+        Object view = fixture(), stream = get(view, "stream"), worker = get(view, "markdownWorker");
+        invoke(view, "appendAgentDelta", "**第一段**");
+        Object answer = get(view, "liveAnswer");
+        check(((String) get(answer, "text")).isEmpty() && ((List<?>) get(worker, "tasks")).isEmpty(),
+                "A token triggered immediate whole-document UI parsing");
+        SystemClock.advance(100L); invoke(stream, "runDue");
+        check(((List<?>) get(worker, "tasks")).size() == 1 && ((String) get(answer, "text")).isEmpty(),
+                "The normal live flush did not submit Markdown to the worker");
+        drain(worker, "tasks"); drain(view, "posted");
+        check(((String) get(answer, "text")).equals("第一段") && get(view, "liveAnswer") == answer,
+                "Formatted Markdown waited until seal rather than appearing during streaming");
+        invoke(view, "appendAgentDelta", "**追加**"); call(view, "sealLiveAnswer");
+        check(get(view, "liveAnswer") == null && ((String) get(answer, "text")).equals("第一段"),
+                "Seal parsed on the UI or removed its existing visible paragraph");
+        drain(worker, "tasks"); drain(view, "posted");
+        check(((String) get(answer, "text")).equals("第一段追加"), "The final render was lost after clearing live state");
+        invoke(view, "appendAgentDelta", "旧会话"); call(view, "flushLiveAnswer");
+        Object stale = get(view, "liveAnswer"); drain(worker, "tasks"); field(view, "historyToken", 1);
+        drain(view, "posted"); check(((String) get(stale, "text")).isEmpty(), "A late Markdown result changed another session");
+        field(view, "historyToken", 0); invoke(view, "appendAgentDelta", "销毁后"); call(view, "flushLiveAnswer");
+        drain(worker, "tasks"); field(view, "activityDestroyed", true); drain(view, "posted");
+        check(((String) get(stale, "text")).isEmpty(), "Destroyed activity applied an old Markdown result");
+        String source = METHODS.get("renderMarkdown");
+        check(source.contains("WeakReference<TextView>") && METHODS.get("releaseLiveViews").contains("markdownQueue.cancelAll()")
+                        && METHODS.get("onDestroy").contains("markdownQueue.close()")
+                        && METHODS.get("addAgentText").contains("renderMarkdown(tv, raw, false)")
+                        && METHODS.get("addBodyInto").contains("renderMarkdown(tv, raw, false)")
+                        && !METHODS.get("sealLiveAnswer").contains("Markdown.render"),
+                "Completed/history Markdown or lifecycle bypassed the worker/ownership contract");
+        pass("liveMarkdownRendersBeforeSealOnTheWorkerAndRejectsOldSessionAndDestroyedResults");
+    }
+
+    private static Object markdownAnchorFixture() throws Exception {
+        Object view = fixture(), stream = get(view, "stream");
+        for (int height : new int[]{180, 400, 200}) {
+            Object child = nested(view, "TextView", new Class<?>[]{Object[].class}, new Object[]{new Object[0]});
+            field(child, "height", height); invoke(stream, "addView", child, null);
+        }
+        call(view, "layout"); field(get(view, "scroll"), "y", 200); field(view, "followLatest", false);
+        return view;
+    }
+
+    private static void markdownRelayoutPreservesReadingAndDoesNotFightUserScrolling() throws Exception {
+        for (int mode = 0; mode < 3; mode++) {
+            Object view = markdownAnchorFixture(), stream = get(view, "stream"), scroll = get(view, "scroll");
+            Object first = invoke(stream, "getChildAt", 0);
+            invoke(view, "applyMarkdown", first, "formatted longer reply");
+            field(first, "height", 280); call(view, "layout");
+            if (mode == 1) field(view, "scrollActionToken", 1);
+            if (mode == 2) { field(scroll, "flinging", true); invoke(scroll, "nativeFrame"); }
+            call(view, "preDraw");
+            check((Integer) get(scroll, "y") == (mode == 0 ? 300 : mode == 1 ? 200 : 160),
+                    "Markdown relayout lost reading position or fought a touch/fling (mode " + mode + ")");
+        }
+        Object page = markdownAnchorFixture(), stream = get(page, "stream"), scroll = get(page, "scroll");
+        Object block = nested(page, "LinearLayout", new Class<?>[]{Object[].class}, new Object[]{new Object[0]});
+        while ((Integer) invoke(stream, "getChildCount") > 0) {
+            Object child = invoke(stream, "getChildAt", 0);
+            invoke(stream, "removeView", child); invoke(block, "addView", child, null);
+        }
+        invoke(stream, "addView", block, null); call(page, "layout");
+        Object first = invoke(block, "getChildAt", 0);
+        invoke(page, "applyMarkdown", first, "formatted earlier page reply");
+        field(first, "height", 280); call(page, "layout"); call(page, "preDraw");
+        check((Integer) get(scroll, "y") == 300,
+                "A wrapped history page anchored its whole page instead of the visible message");
+        pass("markdownHeightChangesPreserveReadingAndRespectTouchAndFlingOwnership");
     }
     private static Object nested(Object view, String name, Class<?>[] parameters, Object... args) throws Exception {
         List<Class<?>> types = new ArrayList<>(Arrays.asList(view.getClass().getDeclaredClasses()));
@@ -1335,6 +1416,66 @@ public final class TurnUiRegressionTest {
         pass("liveCallbacksReplayOnceAtTheSnapshotBoundaryAndRejectOtherLoopSources");
     }
 
+    private static AgentLoop.Listener errorListener(final Object view) {
+        return new AgentLoop.Quiet() {
+            @Override public void onError(int generation, String message) {
+                try { invoke(view, "handleTurnError", generation, message); }
+                catch (Exception failure) { throw new RuntimeException(failure); }
+            }
+        };
+    }
+    private static void failuresToastOnceWithoutTranscriptRowsOrReplayNotifications() throws Exception {
+        Object view = fixture(); AgentLoop source = running(100000, -1); field(view, "loop", source);
+        AgentLoop.Listener receiver = errorListener(view); source.setListener(receiver);
+        AgentLoop.Listener forward = (AgentLoop.Listener) get(source, "listener");
+        int rows = (Integer) invoke(get(view, "stream"), "getChildCount");
+        forward.onError(source.generation(), "无法联网，请检查网络连接。");
+        forward.onError(source.generation(), "不能重复通知"); drain(view, "uiTasks");
+        check(((List<?>)get(view,"toasts")).equals(Arrays.asList("无法联网，请检查网络连接。"))
+                        && (Integer)invoke(get(view,"stream"),"getChildCount")==rows && (Integer)get(view,"settled")==2,
+                "Failure created a chat row, lost settling, or toasted more than once per turn");
+        AgentLoop.UiSnapshot<String> snapshot=source.snapshotUi(()->"history",receiver);
+        Object restored=fixture();field(restored,"loop",source);field(restored,"immediateUi",true);
+        source.replayUiSnapshot(snapshot,errorListener(restored));
+        check(((List<?>)get(restored,"toasts")).isEmpty()&&(Integer)get(restored,"settled")>0
+                        &&(Integer)invoke(get(restored,"stream"),"getChildCount")==0,
+                "History replay recreated a failure row or replayed a Toast");
+        for(String hidden:new String[]{"HTTP 401: {\"error\":\"raw-secret\"}","java.net.SocketException: private-stack", "first\nsecond", "Bearer private-token"})
+            check("请求失败，详细原因已记录。".equals(invoke(view,"failureToast",hidden)),"Raw provider/exception details reached Toast");
+        check(METHODS.get("onError").contains("handleTurnError")&&!METHODS.containsKey("addErrorText")
+                        &&!METHODS.get("handleTurnError").contains("showRequestDiagnostics"),
+                "Failure listener retained an automatic detail panel or error transcript renderer");
+        pass("failuresToastOnceAndNeverCreateChatRowsOrReplayNotifications");
+    }
+    private static void finalFailureDropsOnlyTheUncommittedRequestTail() throws Exception {
+        Object view=progressFixture(),trace=get(view,"currentTrace");
+        invoke(trace,"addStep","committed","shell","{}");invoke(trace,"startStep","shell","{}");
+        invoke(trace,"fillResult","committed","shell","ACTUAL_RESULT");
+        invoke(trace,"beginRound");call(view,"markTurn");
+        invoke(trace,"previewStep",0,"partial","read","{\"path\":\"");
+        invoke(trace,"appendThink","uncommitted-thought");
+        AgentLoop source=running(100000,-1);field(view,"loop",source);source.setListener(errorListener(view));
+        ((AgentLoop.Listener)get(source,"listener")).onError(source.generation(),"无法联网，请检查网络连接。");drain(view,"uiTasks");
+        List<?>steps=(List<?>)get(trace,"steps");
+        check(steps.size()==1&&(Boolean)get(steps.get(0),"done")&&get(steps.get(0),"result").equals("ACTUAL_RESULT")
+                        &&get(trace,"reasoning").toString().isEmpty(),"Failure sealed partial tool calls or removed completed tool evidence");
+        pass("terminalRequestFailureDropsUncommittedPreviewAndRetainsCompletedToolEvidence");
+    }
+    private static void queuedFailuresRejectOldSourcesStoppedTurnsAndDestroyedActivities() throws Exception {
+        for(int mode=0;mode<3;mode++){
+            Object view=fixture();AgentLoop source=running(100000,-1);field(view,"loop",source);
+            source.setListener(errorListener(view));AgentLoop.Listener forward=(AgentLoop.Listener)get(source,"listener");
+            forward.onError(source.generation(),"连接失败");
+            if(mode==0)field(view,"loop",running(200000,-1));
+            else if(mode==1)source.cancel();
+            else field(view,"activityDestroyed",true);
+            drain(view,"uiTasks");
+            check(((List<?>)get(view,"toasts")).isEmpty()&&(Integer)get(view,"settled")==0,
+                    "A queued stale/stopped/destroyed failure changed the current UI");
+        }
+        pass("queuedFailuresRejectOldSourcesStoppedTurnsAndDestroyedActivities");
+    }
+
     private static void wiring() {
         String send = METHODS.get("startText");
         check(send.indexOf("turnUiToken = token") > send.indexOf("sealCurrentTurn()"), "Token reset after assignment");
@@ -1640,6 +1781,11 @@ public final class TurnUiRegressionTest {
                 keyboardHideClearsStaleInputFocus();
                 bufferedCallbacksYieldAndRejectOldSessions();
                 liveCallbacksRespectSnapshotBoundaryAndSource();
+                failuresToastOnceWithoutTranscriptRowsOrReplayNotifications();
+                finalFailureDropsOnlyTheUncommittedRequestTail();
+                queuedFailuresRejectOldSourcesStoppedTurnsAndDestroyedActivities();
+                liveMarkdownUsesTheWorkerAndFinalAndSessionOwnership();
+                markdownRelayoutPreservesReadingAndDoesNotFightUserScrolling();
                 wiring();
                 conversationMenusSeparateEffortPermissionsAndTaskPage();
                 approvalQueueSerializesChildrenAndNamesTheCaller();

@@ -14,6 +14,7 @@ import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.agent.AgentLoop;
+import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.SubAgentManager;
@@ -43,6 +44,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
     private EditText message;
     private SubAgentManager.Record selected;
     private boolean resumed, destroyed, sending, closing, dirty = true;
+    private boolean readFailureAnnounced;
     private AlertDialog stopDialog;
     private int renderVersion;
     private String rendered = "";
@@ -177,7 +179,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
                             }
                         }
                     }
-                } catch (Exception error) { failure = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage(); }
+                } catch (Exception error) { recordUiFailure(error); failure = error.getClass().getSimpleName(); }
                 final SubAgentManager.Record result = detail;
                 final String error = failure;
                 runOnUiThread(new Runnable() {
@@ -186,10 +188,12 @@ public final class SubAgentsActivity extends AppCompatActivity {
                         refresh.setEnabled(true);
                         if (!target.equals(state.selectedId)) { dirty = true; load(); return; }
                         if (error.length() > 0) {
-                            summary.setText(getString(R.string.agent_panel_read_error, error));
+                            showReadFailure();
                         } else if (target.length() > 0 && result != null) {
+                            readFailureAnnounced = false;
                             selected = result; renderDetail(true);
                         } else {
+                            readFailureAnnounced = false;
                             state.selectedId = ""; selected = null; renderList(records);
                         }
                         boolean active = false;
@@ -227,7 +231,6 @@ public final class SubAgentsActivity extends AppCompatActivity {
             Icons.right(name, Icons.CHEVRON_RIGHT, 0xFF8E8E93, dp(16)); item.addView(name);
             item.addView(text(status(row.status, row.phase) + " · " + phase(row.phase)
                     + (row.activeTool.length() == 0 ? "" : " · " + row.activeTool), 12, statusColor(row.status), false));
-            if (row.retryAttempt > 0) item.addView(text(getString(R.string.agent_panel_retry_count, row.retryAttempt), 12, 0xFF8E8E93, false));
             TextView task = text(AgentPanelState.shortText(row.task, 220), 13, 0xFF66666C, false);
             task.setMaxLines(3); task.setEllipsize(TextUtils.TruncateAt.END); item.addView(task);
             item.setContentDescription(row.name + ", " + status(row.status, row.phase));
@@ -264,10 +267,9 @@ public final class SubAgentsActivity extends AppCompatActivity {
         try {
             if (state.tab == AgentPanelState.TASK) {
                 pages.setVisibility(View.GONE);
-                if (row.retryAttempt > 0) section(R.string.agent_panel_retries, getString(R.string.agent_panel_retry_count, row.retryAttempt)
-                        + (row.retryReason.length() == 0 ? "" : "\n" + getString(R.string.agent_panel_retry_reason,
-                                AgentPanelState.shortText(redact(row.retryReason), 600))));
-                if (row.progress.length() > 0) section(R.string.agent_panel_progress, AgentPanelState.shortText(redact(row.progress), 600));
+                if (row.progress.length() > 0 && !"retry".equals(row.phase) && !"retrying".equals(row.phase)
+                        && !SubAgentManager.FAILED.equals(row.status))
+                    section(R.string.agent_panel_progress, AgentPanelState.shortText(redact(row.progress), 600));
                 section(R.string.agent_panel_assigned, redact(row.task));
                 section(R.string.agent_panel_parent, SubAgentManager.ROOT.equals(row.parentId) ? getString(R.string.agent_panel_main) : row.parentId);
                 section(R.string.agent_panel_identity, row.id);
@@ -295,13 +297,16 @@ public final class SubAgentsActivity extends AppCompatActivity {
                 pageLabel.setText(getString(R.string.agent_panel_result_page, result[1] > result[0] ? result[0] + 1 : 0, result[1], resultText.length()));
                 older.setEnabled(result[0] > 0); newer.setEnabled(result[1] < resultText.length());
                 if (row.error.length() > 0) {
-                    TextView error = text(getString(R.string.agent_panel_failure) + "\n" + redact(row.error), 14, 0xFFC0392B, true);
+                    TextView error = text(getString(R.string.agent_panel_failure), 14, 0xFFC0392B, false);
                     body.addView(error); divider();
                 }
                 body.addView(text(resultText.length() == 0 ? getString(R.string.agent_panel_no_result)
                         : resultText.substring(result[0], result[1]), 14, 0xFF0D0D0D, true));
             }
-        } catch (Exception failure) { body.addView(text(getString(R.string.agent_panel_read_error, failure.getMessage()), 14, 0xFFC0392B, true)); }
+        } catch (Exception failure) {
+            recordUiFailure(failure);
+            showReadFailure();
+        }
         restoreScroll(scrollY);
     }
 
@@ -320,7 +325,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
             @Override public void run() {
                 String failure = "";
                 try { SubAgentManager source = manager(); if (source == null) throw new IllegalStateException("子任务不存在"); source.sendFromUser(id, content); }
-                catch (Exception error) { failure = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage(); }
+                catch (Exception error) { recordUiFailure(error); failure = error.getClass().getSimpleName(); }
                 final String error = failure;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
@@ -328,7 +333,8 @@ public final class SubAgentsActivity extends AppCompatActivity {
                         if (destroyed || isFinishing()) return;
                         if (id.equals(state.selectedId) && error.length() == 0 && content.equals(message.getText().toString().trim())) message.setText("");
                         send.setEnabled(!closing && selected != null && !SubAgentManager.CLOSED.equals(selected.status));
-                        Toast.makeText(SubAgentsActivity.this, error.length() == 0 ? getString(R.string.agent_panel_message_sent) : error, Toast.LENGTH_SHORT).show();
+                        Toast.makeText(SubAgentsActivity.this, error.length() == 0 ? getString(R.string.agent_panel_message_sent)
+                                : "发送失败，详细原因已记录。", Toast.LENGTH_SHORT).show();
                         dirty = true; load();
                     }
                 });
@@ -342,13 +348,13 @@ public final class SubAgentsActivity extends AppCompatActivity {
             @Override public void run() {
                 String failure = "";
                 try { SubAgentManager source = manager(); if (source == null) throw new IllegalStateException("子任务不存在"); source.close(SubAgentManager.ROOT, id); }
-                catch (Exception error) { failure = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage(); }
+                catch (Exception error) { recordUiFailure(error); failure = error.getClass().getSimpleName(); }
                 final String error = failure;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         closing = false;
                         if (destroyed || isFinishing()) return;
-                        if (error.length() > 0) Toast.makeText(SubAgentsActivity.this, error, Toast.LENGTH_SHORT).show();
+                        if (error.length() > 0) Toast.makeText(SubAgentsActivity.this, "停止子任务失败，详细原因已记录。", Toast.LENGTH_SHORT).show();
                         dirty = true; load();
                     }
                 });
@@ -356,6 +362,27 @@ public final class SubAgentsActivity extends AppCompatActivity {
         });
     }
     private String redact(String value) { return PromptGuard.redact(value, settings.systemPrompt(), settings.environmentContext(), ""); }
+    private void showReadFailure() {
+        if (readFailureAnnounced) return;
+        readFailureAnnounced = true;
+        Toast.makeText(SubAgentsActivity.this, "读取子任务失败，详细原因已记录。", Toast.LENGTH_SHORT).show();
+    }
+    private void recordUiFailure(final Throwable failure) {
+        final android.content.Context app = getApplicationContext(); final long sid = sessionId;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                ChatStore store = null;
+                try {
+                    Settings stored = new Settings(app); List<String> secrets = new ArrayList<String>();
+                    for (Settings.AiProfile profile : stored.aiProfiles()) secrets.add(profile.apiKey);
+                    JSONObject evidence = Diagnostics.failure(failure).put("error", failure.getMessage());
+                    store = new ChatStore(app);
+                    store.recordDiagnostic(sid, "ui:agents", "子任务界面操作失败", Diagnostics.boundedJson(evidence, secrets.toArray(new String[secrets.size()])));
+                } catch (Exception loggingFailure) { }
+                finally { if (store != null) try { store.close(); } catch (RuntimeException closeFailure) { } }
+            }
+        }, "backcast-agent-ui-diagnostic").start();
+    }
     private String status(String status, String phase) {
         if (SubAgentManager.IDLE.equals(status) && "completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
         if (SubAgentManager.QUEUED.equals(status)) return getString(R.string.sub_agents_queued);
@@ -377,7 +404,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
         if ("responding".equals(phase)) return getString(R.string.sub_agents_phase_responding);
         if ("reviewing".equals(phase)) return getString(R.string.sub_agents_phase_reviewing);
         if ("compacting".equals(phase)) return getString(R.string.sub_agents_phase_compacting);
-        if ("retrying".equals(phase) || "retry".equals(phase)) return getString(R.string.sub_agents_phase_retrying);
+        if ("retrying".equals(phase) || "retry".equals(phase)) return getString(R.string.sub_agents_phase_model);
         if ("completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
         if ("starting".equals(phase)) return getString(R.string.agent_panel_phase_starting);
         if ("model".equals(phase)) return getString(R.string.sub_agents_phase_model);

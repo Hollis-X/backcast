@@ -201,19 +201,23 @@ public final class LlmUsageRegressionTest {
         }
     }
 
-    private static void fallbackPreservesRequestAndCachesUnsupportedOption(String rejection)
+    private static void manualRequestPreservesHistoryAndCachesUnsupportedOption(String rejection)
             throws Exception {
-        Server server = new Server(error(rejection), jsonSuccess("fallback"), jsonSuccess("cached"));
+        Server server = new Server(error(rejection), jsonSuccess("manual"), jsonSuccess("cached"));
         try {
             LlmClient client = server.client("high");
             List<Message> messages = messages();
             JSONArray tools = tools();
             LlmClient.Reply first = client.send(messages, tools, null);
-            check(first.error == null && "fallback".equals(first.content),
-                    "Unsupported usage option did not recover: " + first.error);
-            check(first.promptTokens == 23 && first.completionTokens == 7,
-                    "Fallback JSON usage was ignored");
+            check(first.error != null && first.error.startsWith("HTTP 400:") && first.diagnostic != null
+                            && first.diagnostic.getInt("http_status") == 400 && first.userMessage != null
+                            && server.requests.size() == 1,
+                    "Unsupported usage option resubmitted or lost the first failure evidence");
             JSONObject original = server.request(0);
+            LlmClient.Reply manual = client.send(messages, tools, null);
+            check(manual.error == null && "manual".equals(manual.content) && manual.promptTokens == 23
+                            && manual.completionTokens == 7 && server.requests.size() == 2,
+                    "Explicit follow-up did not issue one request or lost JSON usage");
             JSONObject fallback = server.request(1);
             check(original.optJSONObject("stream_options").optBoolean("include_usage"),
                     "Initial request did not include usage");
@@ -236,22 +240,22 @@ public final class LlmUsageRegressionTest {
         }
     }
 
-    private static void unsupportedStreamOptionsFallsBackAndCaches() throws Exception {
-        fallbackPreservesRequestAndCachesUnsupportedOption("stream_options is unsupported");
+    private static void unsupportedStreamOptionsWaitsForManualRequestAndCaches() throws Exception {
+        manualRequestPreservesHistoryAndCachesUnsupportedOption("stream_options is unsupported");
     }
 
-    private static void unknownIncludeUsageFallsBackAndCaches() throws Exception {
-        fallbackPreservesRequestAndCachesUnsupportedOption("Unknown parameter: include_usage");
+    private static void unknownIncludeUsageWaitsForManualRequestAndCaches() throws Exception {
+        manualRequestPreservesHistoryAndCachesUnsupportedOption("Unknown parameter: include_usage");
     }
 
-    private static void fallbackRetriesAtMostOnce() throws Exception {
-        Server server = new Server(error("stream_options is unsupported"),
-                error("stream_options is unsupported"));
+    private static void unsupportedUsageNeverResubmitsTheFailedRequest() throws Exception {
+        Server server = new Server(error("stream_options is unsupported"));
         try {
             LlmClient.Reply reply = server.client(null).send(messages(), null, null);
             check(reply.error != null && reply.error.startsWith("HTTP 400:"),
                     "Failed fallback error was lost");
-            check(!server.request(1).has("stream_options"), "Retry retained rejected option");
+            check(server.requests.size() == 1 && server.request(0).has("stream_options"),
+                    "Unsupported usage silently made a second POST");
             server.exhausted();
         } finally {
             server.stop();
@@ -356,17 +360,21 @@ public final class LlmUsageRegressionTest {
         } finally { server.stop(); }
     }
 
-    private static void unsupportedVerbosityFallsBackAndCachesWithoutLosingPolicy() throws Exception {
-        Server server = new Server(error("Unknown parameter: verbosity"), jsonSuccess("fallback"), jsonSuccess("cached"));
+    private static void unsupportedVerbosityWaitsForManualRequestAndPreservesPolicy() throws Exception {
+        Server server = new Server(error("Unknown parameter: verbosity"), jsonSuccess("manual"), jsonSuccess("cached"));
         try {
             String rules = ResponsePreferences.instructions("low", "zh-CN");
             LlmClient client = server.client("high", "low", rules);
             List<Message> history = toolHistory();
             JSONArray before = serialized(history);
             LlmClient.Reply first = client.send(history, tools(), null);
-            check(first.error == null && first.promptTokens == 23 && first.completionTokens == 7,
-                    "Verbosity fallback lost response or usage");
+            check(first.error != null && first.diagnostic != null && first.diagnostic.getInt("http_status") == 400
+                            && first.userMessage != null && server.requests.size() == 1,
+                    "Unsupported verbosity silently repeated POST or lost diagnostics");
             check("low".equals(server.request(0).optString("verbosity")), "Initial request omitted chosen detail");
+            LlmClient.Reply manual = client.send(history, tools(), null);
+            check(manual.error == null && manual.promptTokens == 23 && manual.completionTokens == 7
+                            && server.requests.size() == 2, "Manual verbosity follow-up lost usage or sent extra requests");
             check(!server.request(1).has("verbosity"), "Fallback retained rejected verbosity");
             check(server.request(1).optJSONObject("stream_options").optBoolean("include_usage"),
                     "Verbosity fallback disabled supported usage option");
@@ -387,15 +395,20 @@ public final class LlmUsageRegressionTest {
         } finally { server.stop(); }
     }
 
-    private static void sequentialFallbacks(boolean usageFirst) throws Exception {
+    private static void sequentialManualRequests(boolean usageFirst) throws Exception {
         Server server = new Server(error(usageFirst ? "stream_options is unsupported" : "verbosity is unsupported"),
                 error(usageFirst ? "verbosity is unsupported" : "Unknown parameter: include_usage"),
-                jsonSuccess("fallback"), jsonSuccess("cached"));
+                jsonSuccess("manual"), jsonSuccess("cached"));
         try {
             String rules = ResponsePreferences.instructions("high", "ja");
             LlmClient client = server.client("medium", "high", rules);
             LlmClient.Reply reply = client.send(toolHistory(), tools(), null);
-            check(reply.error == null && reply.promptTokens == 23, "Sequential optional fallback failed");
+            check(reply.error != null && server.requests.size() == 1, "First optional rejection automatically sent another POST");
+            reply = client.send(toolHistory(), tools(), null);
+            check(reply.error != null && server.requests.size() == 2, "Second manual rejection automatically sent another POST");
+            reply = client.send(toolHistory(), tools(), null);
+            check(reply.error == null && reply.promptTokens == 23 && server.requests.size() == 3,
+                    "Third explicit request did not use both learned capabilities");
             check(server.request(0).has("verbosity") && server.request(0).has("stream_options"),
                     "Original request did not carry both optional features");
             check(server.request(1).has("verbosity") == usageFirst
@@ -415,21 +428,22 @@ public final class LlmUsageRegressionTest {
         } finally { server.stop(); }
     }
 
-    private static void usageThenVerbosityFallsBackWithinThreeRequests() throws Exception {
-        sequentialFallbacks(true);
+    private static void usageThenVerbosityRequireThreeManualRequests() throws Exception {
+        sequentialManualRequests(true);
     }
 
-    private static void verbosityThenUsageFallsBackWithinThreeRequests() throws Exception {
-        sequentialFallbacks(false);
+    private static void verbosityThenUsageRequireThreeManualRequests() throws Exception {
+        sequentialManualRequests(false);
     }
 
-    private static void rejectedVerbosityRetriesAtMostOnce() throws Exception {
-        Server server = new Server(error("verbosity is unsupported"), error("verbosity is unsupported"));
+    private static void rejectedVerbosityNeverAutomaticallyRetries() throws Exception {
+        Server server = new Server(error("verbosity is unsupported"));
         try {
             LlmClient.Reply reply = server.client(null, "high", ResponsePreferences.instructions("high", "en"))
                     .send(messages(), null, null);
             check(reply.error != null && reply.error.startsWith("HTTP 400:"), "Repeated rejection error disappeared");
-            check(!server.request(1).has("verbosity"), "Verbosity retry retained unsupported field");
+            check(server.requests.size() == 1 && server.request(0).has("verbosity"),
+                    "Verbosity rejection silently sent a second POST");
             server.exhausted();
         } finally { server.stop(); }
     }
@@ -529,13 +543,13 @@ public final class LlmUsageRegressionTest {
 
     public static void main(String[] args) {
         String[] tests = { "requestsUsageAndParsesFinalSseUsageChunk",
-                "unsupportedStreamOptionsFallsBackAndCaches", "unknownIncludeUsageFallsBackAndCaches",
-                "fallbackRetriesAtMostOnce", "ordinaryBadRequestDoesNotRetry",
+                "unsupportedStreamOptionsWaitsForManualRequestAndCaches", "unknownIncludeUsageWaitsForManualRequestAndCaches",
+                "unsupportedUsageNeverResubmitsTheFailedRequest", "ordinaryBadRequestDoesNotRetry",
                 "splitUsageKeepsIndependentMaximums", "defaultAndInvalidVerbosityAreOmitted",
                 "chosenVerbosityAndMandatoryLanguageReachWire", "languageRulesAreAddedWhenHistoryHasNoSystemMessage",
-                "existingPolicyIsNotDuplicated", "unsupportedVerbosityFallsBackAndCachesWithoutLosingPolicy",
-                "usageThenVerbosityFallsBackWithinThreeRequests", "verbosityThenUsageFallsBackWithinThreeRequests",
-                "rejectedVerbosityRetriesAtMostOnce", "unrelatedVerbosityErrorDoesNotRetry",
+                "existingPolicyIsNotDuplicated", "unsupportedVerbosityWaitsForManualRequestAndPreservesPolicy",
+                "usageThenVerbosityRequireThreeManualRequests", "verbosityThenUsageRequireThreeManualRequests",
+                "rejectedVerbosityNeverAutomaticallyRetries", "unrelatedVerbosityErrorDoesNotRetry",
                 "cancellationBeforeAttemptDoesNotStartHttp", "maxAndUltraReachTheWireUnchanged",
                 "officialSdkFetchesCompatibleModelListsWithoutRetry" };
         for (String name : tests) run(name);

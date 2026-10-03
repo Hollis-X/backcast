@@ -113,7 +113,7 @@ public final class AgentLoopRegressionTest {
         loop.submit("next", 1, loop.generation(), 2);
         check(recorder.answer().elapsedMs == 100, "New answer inherited old elapsed time");
     }
-    private static void resumeAndRetryKeepOriginalClock() throws Exception {
+    private static void failedRequestAndExplicitResumeKeepOriginalClock() throws Exception {
         SystemClock.set(100000);
         Client client = new Client();
         client.retry = true;
@@ -123,9 +123,12 @@ public final class AgentLoopRegressionTest {
         loop.restoreTurnClock(100000, System.currentTimeMillis(), 0);
         SystemClock.advance(20000);
         loop.resume(1, 9);
-        check(client.calls == 2, "Transient failure was not retried");
+        check(client.calls == 1 && recorder.saved.isEmpty() && !loop.busy(),
+                "Failed background request was automatically retried or persisted an answer");
+        loop.resume(1, 10);
+        check(client.calls == 2, "Explicit resume did not make the next request");
         check(client.origins.equals(Arrays.asList(Long.valueOf(100000), Long.valueOf(100000))),
-                "Resume or retry reset the original clock");
+                "Failed request or explicit resume reset the original clock");
         check(recorder.answer().elapsedMs == 20200, "Background waiting time was discarded");
     }
     private static void stoppedClockIsNotPublished() throws Exception {
@@ -1061,7 +1064,7 @@ public final class AgentLoopRegressionTest {
         }
     }
     public static void main(String[] args) {
-        for (String name : new String[]{"newClockPublishedBeforePersistence", "resumeAndRetryKeepOriginalClock",
+        for (String name : new String[]{"newClockPublishedBeforePersistence", "failedRequestAndExplicitResumeKeepOriginalClock",
                 "stoppedClockIsNotPublished", "retargetKeepsRunningRequestCancellable",
                 "retargetPinsToolsSchemaCleanupAndUsageUntilNextTurn",
                 "manualCompactionPinsRegistryAndCleansItsLease", "cancelledManualCompactionCleansOnlyItsOriginalLease",

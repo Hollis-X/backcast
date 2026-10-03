@@ -125,7 +125,7 @@ public final class ToolkitDiagnosticsRegressionTest {
                     if (cancelAfterServer) toolkit.abort();
                     return serverOutput;
                 }
-                return launcher.prefix.size() > 1 && launcher.prefix.get(1).contains("frida.__version__")
+                return launcher.prefix.size() == 2 && launcher.prefix.get(1).equals("import frida; print(frida.__version__)")
                         ? clientOutput : "exit=0\nobjection: 1.12.5\n";
             }
         };

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Execute the ART fallback code extracted from the actual APK payload.
 
-No Android target is attached. Node executes the packaged JS decision and GCC
-executes the packaged native visitor counting blocks; neither result promises
-that an untested device's other ART layouts or method hooks are compatible.
+No Android target is attached. A supplied official host Frida package compiles
+the actual bundled agent and loads a UTF-8 multi-module fixture. Node executes
+the packaged JS decision and GCC executes the native visitor counting blocks;
+these results do not promise a device's ART layouts or native attach support.
 """
 import argparse
 import importlib.util
@@ -19,6 +20,7 @@ import unittest
 sys.dont_write_bytecode = True
 REPO = pathlib.Path(__file__).resolve().parents[1]
 NODE = None
+FRIDA_PATH = None
 
 
 class ObjectionArtCompatibilityRegressionTest(unittest.TestCase):
@@ -30,6 +32,9 @@ class ObjectionArtCompatibilityRegressionTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("objection_android", REPO / "tools/objection_android.py")
         cls.patch = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.patch)
+        cls.groups = cls.patch.parse_bundle(cls.agent)
+        cls.module = next(item for group in cls.groups for item in group
+                          if "function tryGetEnvJvmti(" in item["source"])
 
     def javascript(self, source):
         completed = subprocess.run([NODE, "-"], input=source, text=True, capture_output=True, timeout=10)
@@ -42,7 +47,7 @@ class ObjectionArtCompatibilityRegressionTest(unittest.TestCase):
 
     def test_packaged_default_never_enters_vm_or_native_plugin_loader(self):
         # These traps would fail the test if the old dangerous branch ran at all.
-        self.javascript(self.agent[:self.agent.index("\n", self.agent.index("globalThis.")) + 1]
+        self.javascript(self.module["source"][:len(self.patch.PREFIX)]
                         + self.jvmti_function() + "\n"
                         + "globalThis.NativeFunction = function () { throw new Error('native loader entered'); };\n"
                         + "const vm = { perform() { throw new Error('VM transition entered'); } };\n"
@@ -112,18 +117,71 @@ int main(void) {
 
     def test_rebuilder_is_idempotent_and_refuses_changed_or_partial_agents(self):
         self.assertEqual(self.agent, self.patch.patch_agent(self.agent))
-        original = self.agent[len(self.patch.PREFIX):]
+        groups = self.patch.parse_bundle(self.agent)
+        module = next(item for group in groups for item in group if "function tryGetEnvJvmti(" in item["source"])
+        original_body = module["source"][len(self.patch.PREFIX):]
         for before, after in self.patch.REPLACEMENTS:
-            original = original.replace(after, before, 1)
+            original_body = original_body.replace(after, before, 1)
+        module["source"] = original_body
+        original = self.patch.format_bundle(groups)
         self.assertEqual(self.agent, self.patch.patch_agent(original))
         for changed in (original.replace("function tryGetEnvJvmti(vm3, runtime4)", "function tryGetEnvJvmti(vm3, different)"),
                         self.agent.replace(self.patch.REPLACEMENTS[2][1], self.patch.REPLACEMENTS[2][0], 1)):
             with self.assertRaises(ValueError):
                 self.patch.patch_agent(changed)
 
+    def test_bundle_framing_preserves_utf8_aliases_and_repairs_only_the_shipped_legacy_shape(self):
+        self.assertTrue(self.agent.startswith("📦\n"))
+        self.assertTrue(self.module["source"].startswith(self.patch.PREFIX))
+        # Reproduce the exact previous implementation: outer prefix + stale
+        # original byte count after its four body replacements.
+        patched_body = self.module["source"][len(self.patch.PREFIX):]
+        delta = sum(len(after.encode()) - len(before.encode()) for before, after in self.patch.REPLACEMENTS)
+        legacy = (self.patch.PREFIX + "📦\n" + str(len(patched_body.encode()) - delta)
+                  + " /src/index.js\n✄\n" + patched_body)
+        self.assertEqual(self.agent, self.patch.patch_agent(legacy))
+        with self.assertRaises(ValueError):
+            self.patch.patch_agent(legacy + "\n")
+        groups = [[{"name": "/主.js", "aliases": ["/入口.js"], "source": "// 中文📦\nexport const x = '✄';\n"},
+                   {"name": "/other.js", "aliases": [], "source": "//\n✄\nexport const y = 'é';\n"}],
+                  [{"name": "/second.js", "aliases": [], "source": "export const z = 3;\n"}]]
+        framed = self.patch.format_bundle(groups)
+        self.assertEqual(groups, self.patch.parse_bundle(framed))
+        self.assertIn(str(len(groups[0][0]["source"].encode())) + " /主.js", framed)
+        for malformed in (framed[:-1], framed.replace("↻ /入口.js", "↻ /主.js"), framed + "garbage", framed + "\0"):
+            with self.assertRaises(ValueError):
+                self.patch.parse_bundle(malformed)
+
+    def test_actual_frida_compiles_the_payload_and_loads_utf8_modules(self):
+        if not FRIDA_PATH:
+            self.skipTest("Supply --frida-path for the official host Frida compile check")
+        sys.path.insert(0, FRIDA_PATH)
+        import frida
+        self.assertEqual("17.2.14", frida.__version__)
+        child = subprocess.Popen(["sleep", "30"])
+        session = None
+        try:
+            session = frida.get_local_device().attach(child.pid)
+            session.create_script(self.agent)
+            groups = [[{"name": "/main.js", "aliases": [], "source":
+                        "import { value } from '/alias.js'; rpc.exports = { value() { return value; } };\n"},
+                       {"name": "/other.js", "aliases": ["/alias.js"], "source": "export const value = '中文é📦';\n"}]]
+            script = session.create_script(self.patch.format_bundle(groups))
+            script.load()
+            self.assertEqual("中文é📦", script.exports_sync.value())
+            script.unload()
+            bad = self.patch.PREFIX + self.agent
+            with self.assertRaises(frida.InvalidArgumentError):
+                session.create_script(bad)
+        finally:
+            if session is not None:
+                session.detach()
+            child.terminate()
+            child.wait(timeout=5)
+
     def test_manifest_describes_a_local_backport_and_null_fallback_is_present(self):
         self.assertEqual("jni-no-jvmti", self.manifest["objection_art_mode"])
-        self.assertEqual("7.0.13-backcast.1", self.manifest["java_bridge"])
+        self.assertEqual("7.0.13-backcast.2", self.manifest["java_bridge"])
         self.assertEqual("https://github.com/frida/frida-java-bridge/pull/407", self.manifest["objection_art_patch_source"])
         self.assertIn(self.patch.PATCH_DESCRIPTION, self.manifest["patches"])
         # The compiled bridge must keep its supported ART visitor / JNI paths.
@@ -135,8 +193,10 @@ int main(void) {
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--node", default=shutil.which("node"), help="Path to the host Node.js test runtime")
+    parser.add_argument("--frida-path", help="Directory containing the verified official Frida 17.2.14 host package")
     options = parser.parse_args()
     if not options.node:
         parser.error("--node is required when Node.js is not on PATH")
     NODE = options.node
+    FRIDA_PATH = options.frida_path
     unittest.main(argv=[sys.argv[0]], verbosity=2)

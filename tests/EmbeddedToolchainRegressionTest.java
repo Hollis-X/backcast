@@ -173,11 +173,16 @@ public final class EmbeddedToolchainRegressionTest {
         String bootstrap = objection.prefix.get(1);
         check(bootstrap.contains("version_info") && bootstrap.contains("BACKCAST_FRIDA_PORT") && bootstrap.contains("BACKCAST_FRIDA_PID"), "Objection startup is not offline or isolated per invocation");
         String agent = new String(bytes(new File(site, "objection/agent.js")), "UTF-8");
-        check(agent.startsWith("// Backcast:") && agent.contains("globalThis.FRIDA_JAVA_BRIDGE_DISABLE_JVMTI = true;")
+        int separator = agent.indexOf("\n✄\n");
+        String declaration = agent.substring(agent.indexOf('\n') + 1, separator);
+        int declaredBytes = Integer.parseInt(declaration.substring(0, declaration.indexOf(' ')));
+        check(declaration.endsWith(" /src/index.js") && declaredBytes == agent.substring(separator + 3).getBytes("UTF-8").length,
+                "Installed Frida bundle has stale module byte lengths");
+        check(agent.startsWith("📦\n") && agent.contains("\n✄\n// Backcast:") && agent.contains("globalThis.FRIDA_JAVA_BRIDGE_DISABLE_JVMTI = true;")
                 && agent.contains("function tryGetEnvJvmti(vm3, runtime4) {\n  let env3 = null;\n  if (globalThis.FRIDA_JAVA_BRIDGE_DISABLE_JVMTI === true)")
                 && agent.contains("if (art_api.class_offset_copied_methods_offset != 0)"), "The actual extracted agent lacks the guarded ART/JNI fallback");
         check("jni-no-jvmti".equals(arm64.configuration("objection").getString("art_mode"))
-                && "7.0.13-backcast.1".equals(arm64.configuration("objection").getString("java_bridge")), "The compatibility mode was not registered with the installed payload");
+                && "7.0.13-backcast.2".equals(arm64.configuration("objection").getString("java_bridge")), "The compatibility mode was not registered with the installed payload");
         check(new File(home, "share/LICENSES/GPL-3.0.txt").length() > 30000, "GNU license texts were omitted");
     }
 
@@ -247,7 +252,7 @@ public final class EmbeddedToolchainRegressionTest {
     private static void objectionProbeNeverStartsAServerAndSingleRunsCleanItUp() throws Exception {
         File marker = new File(temporary.directory(), "server-started");
         File companion = new File(temporary.directory(), "fixture-frida-server");
-        Files.write(companion.toPath(), ("#!/bin/sh\nprintf '%s' \"$$\" > " + RootShell.quote(marker.getPath()) + "\nexec sleep 30\n").getBytes("UTF-8"));
+        Files.write(companion.toPath(), ("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '17.2.14\\n'; exit 0; fi\nprintf '%s' \"$$\" > " + RootShell.quote(marker.getPath()) + "\nexec sleep 30\n").getBytes("UTF-8"));
         companion.setExecutable(true, true);
         ToolchainStore.Launcher fixture = new ToolchainStore.Launcher("objection", "/usr/bin/python3");
         fixture.prefix.add("-c"); fixture.prefix.add("import time; time.sleep(0.2); print('fixture completed')"); fixture.companion = companion.getPath();

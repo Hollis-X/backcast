@@ -265,9 +265,8 @@ public final class ContextCompactionRegressionTest {
         compactClient.exhausted(); resumedClient.exhausted();
     }
 
-    private static void overflowDropsAWholeOldTurn() {
-        ScriptedClient client = new ScriptedClient().then(true, overflow())
-                .then(true, text("trimmed checkpoint"));
+    private static void compactionOverflowPreservesWholeTurnsWithoutAnotherRequest() {
+        ScriptedClient client = new ScriptedClient().then(true, overflow());
         AgentLoop loop = loop(client);
         loop.loadHistory("system fixture", Arrays.asList(
                 Message.user("old-user"), Message.assistant("old-assistant", calls("old-tool", "read")),
@@ -275,20 +274,18 @@ public final class ContextCompactionRegressionTest {
                 Message.user("recent-user"), Message.assistant("recent-assistant", calls("recent-tool", "read")),
                 Message.toolResult("recent-tool", "recent-result"), Message.assistant("recent-answer", null)));
         loop.compactNow(1L, loop.generation(), 1);
-        List<Message> retry = client.requests.get(1).messages;
-        check(!contains(retry, "old-user") && !contains(retry, "old-assistant")
-                && !contains(retry, "old-result") && !contains(retry, "old-answer"),
-                "Overflow removed a user message without removing its complete turn");
-        check(contains(retry, "recent-user") && contains(retry, "recent-result"),
-                "Overflow discarded the latest complete turn");
-        validPairs(retry);
-        check(Message.SYSTEM.equals(retry.get(0).role), "Overflow discarded base instructions");
+        List<Message> retained = loop.history();
+        check(client.requests.size() == 1 && contains(retained, "old-user") && contains(retained, "old-assistant")
+                && contains(retained, "old-result") && contains(retained, "old-answer")
+                && contains(retained, "recent-user") && contains(retained, "recent-result") && summaries(retained) == 0,
+                "Compaction overflow resubmitted or replaced completed turns");
+        validPairs(retained);
+        check(Message.SYSTEM.equals(retained.get(0).role) && !loop.busy(), "Overflow discarded instructions or kept running");
         client.exhausted();
     }
 
-    private static void overflowCanTrimAUserlessToolGroup() {
-        ScriptedClient client = new ScriptedClient().then(true, overflow())
-                .then(true, text("paired checkpoint"));
+    private static void compactionOverflowPreservesUserlessToolPairsWithoutRetry() {
+        ScriptedClient client = new ScriptedClient().then(true, overflow());
         AgentLoop loop = loop(client);
         loop.loadHistory("system", Arrays.asList(
                 Message.assistant("old checkpoint tool", calls("a", "read")),
@@ -296,24 +293,25 @@ public final class ContextCompactionRegressionTest {
                 Message.assistant("latest work", calls("b", "read")),
                 Message.toolResult("b", "latest result")));
         loop.compactNow(1L, loop.generation(), 1);
-        List<Message> trimmed = client.requests.get(1).messages;
-        validPairs(trimmed);
-        check(!contains(trimmed, "old checkpoint tool") && !contains(trimmed, "old result"),
-                "Oldest call/output group was never trimmed");
-        check(contains(trimmed, Compactor.PROMPT), "Overflow discarded the summary request");
-        check(contains(trimmed, "recent request") && contains(trimmed, "latest result"),
-                "Single-turn trim discarded the latest request or work");
+        List<Message> retained = loop.history();
+        validPairs(retained);
+        check(client.requests.size() == 1 && contains(retained, "old checkpoint tool") && contains(retained, "old result")
+                        && contains(retained, "recent request") && contains(retained, "latest result") && !contains(retained, Compactor.PROMPT),
+                "Compaction failure retried or changed existing tool pairs/latest work");
         client.exhausted();
     }
 
-    private static void normalOverflowCompactsBeforeRetrying() {
-        ScriptedClient client = new ScriptedClient().then(false, overflow())
-                .then(true, text("recovered checkpoint")).then(false, text("finished"));
+    private static void normalOverflowStopsUntilExplicitManualResume() {
+        ScriptedClient client = new ScriptedClient().then(false, overflow()).then(false, text("finished manually"));
         AgentLoop loop = loop(client);
         loop.submit("complete this request", 1L, loop.generation(), 1);
-        check(contains(client.requests.get(2).messages, "recovered checkpoint"),
-                "Ordinary overflow retried the original oversized history");
-        check(!loop.busy() && !loop.needsResume(), "Recovered request stayed unfinished");
+        check(client.requests.size() == 1 && !loop.busy() && loop.needsResume()
+                        && summaries(loop.history()) == 0 && contains(loop.history(), "complete this request"),
+                "Model overflow automatically compressed/retried or lost the unfinished user task");
+        loop.resume(1L, 2);
+        check(client.requests.size() == 2 && !client.requests.get(1).compact
+                        && contains(client.requests.get(1).messages, "complete this request") && !loop.needsResume(),
+                "Explicit manual resume did not retain the original task or repeated a request");
         client.exhausted();
     }
 
@@ -565,8 +563,8 @@ public final class ContextCompactionRegressionTest {
         String[] tests = { "compactionReplacesOldSummariesAndToolHistory",
                 "retainedUserMessagesRespectDefaultBudget", "retainedUserBudgetScalesWithSmallWindows",
                 "truncatedDelegationKeepsActualRequestAfterRecovery",
-                "overflowDropsAWholeOldTurn", "overflowCanTrimAUserlessToolGroup",
-                "normalOverflowCompactsBeforeRetrying", "manualCompactionDoesNotResumeFinishedConversation",
+                "compactionOverflowPreservesWholeTurnsWithoutAnotherRequest", "compactionOverflowPreservesUserlessToolPairsWithoutRetry",
+                "normalOverflowStopsUntilExplicitManualResume", "manualCompactionDoesNotResumeFinishedConversation",
                 "compactionUsageCanExhaustGoalBudget", "autoCompactionReinjectsSpentBudgetWrapUp",
                 "autoCompactionRetainsGoalRulesAndCanFinish",
                 "actualUsageAnchorsOnlyNewMessages", "compactionResetsActualUsageAnchor",

@@ -162,26 +162,34 @@ public final class UiSnapshotRegressionTest {
         fixture.run(); pass("previewReplacementKeepsItsOriginalPosition");
     }
 
-    private static void retryDropsUncommittedBodyAndPreviews() throws Exception {
+    private static void failureDropsUncommittedOutputBeforeExplicitResume() throws Exception {
         final Fixture fixture = new Fixture();
         final Capture capture = new Capture(fixture.loop);
         fixture.script = new Script() {
             @Override public LlmClient.Reply next(Fixture f, LlmClient.Sink sink) throws Exception {
                 if (f.calls == 1) {
                     sink.onContent("discarded"); sink.onToolCall(0, "id", "probe", "old");
-                    LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "connection refused fixture retry"; return reply;
+                    LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "connection refused fixture failure"; return reply;
                 }
                 AgentLoop.UiSnapshot<List<Message>> snapshot = f.snapshot(capture);
                 f.loop.replayUiSnapshot(snapshot, capture);
-                check(capture.values.isEmpty(), "Retry retained old uncommitted content");
+                check(capture.values.isEmpty(), "Explicit resume retained the failed request's uncommitted content");
                 sink.onContent("fresh"); return answer("fresh");
             }
         };
-        fixture.run(); check(capture.values.equals(java.util.Arrays.asList("text:fresh")), "Retry lost fresh stream");
-        pass("retryDropsUncommittedBodyAndPreviews");
+        fixture.run();
+        check(fixture.calls == 1 && fixture.stored.size() == 1 && !fixture.loop.busy(), "Network failure retried or committed partial output");
+        AgentLoop.UiSnapshot<List<Message>> failed = fixture.snapshot(capture);
+        fixture.loop.replayUiSnapshot(failed, capture);
+        check(capture.values.isEmpty() && failed.data.size() == 1,
+                "Failure snapshot resurrected uncommitted body or parameter previews");
+        fixture.loop.resume(1, 9);
+        check(fixture.calls == 2 && fixture.stored.size() == 2
+                        && capture.values.equals(java.util.Arrays.asList("text:fresh")), "Explicit resume lost the fresh stream or duplicated persisted history");
+        pass("failureDropsUncommittedOutputBeforeExplicitResume");
     }
 
-    private static void partialToolRetriesOnlyTheModelAndPublishesItsStage() throws Exception {
+    private static void explicitResumeAfterPartialToolKeepsZeroRetriesAndAtomicStages() throws Exception {
         final Fixture fixture = new Fixture();
         final int[] executions = {0};
         final ArrayList<String> stages = new ArrayList<String>();
@@ -191,7 +199,7 @@ public final class UiSnapshotRegressionTest {
                 check(AgentLoop.callingUiSource() == fixture.loop && fixture.loop.callingUiSequence() > 0,
                         "Progress bypassed the source/token/snapshot boundary");
                 stages.add(phase); attempts.add(Integer.valueOf(attempt));
-                check(!detail.contains("secret-token"), "Retry exposed provider credentials or echoed content");
+                check(!detail.contains("secret-token"), "Stage exposed provider credentials or echoed content");
             }
         };
         fixture.loop.setListener(listener);
@@ -205,7 +213,7 @@ public final class UiSnapshotRegressionTest {
                     failed.error = "HTTP 503: secret-token and echoed prompt"; return failed;
                 }
                 if (f.calls == 2) {
-                    check(stages.contains("retry") && attempts.contains(Integer.valueOf(1)), "Retry was hidden");
+                    check(!stages.contains("retry") && !attempts.contains(Integer.valueOf(1)), "Explicit user resume was reported as an automatic retry");
                     final ArrayList<String> snapshotStages = new ArrayList<String>();
                     AgentLoop.Quiet replay = new AgentLoop.Quiet() {
                         @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
@@ -213,24 +221,28 @@ public final class UiSnapshotRegressionTest {
                         }
                     };
                     f.loop.replayUiSnapshot(f.snapshot(replay), replay);
-                    check(snapshotStages.contains("model:1"), "Reentry lost the current stage or retry count");
-                    assertRetryReasonAndStageSurviveReentry(f, 1);
+                    check(snapshotStages.equals(java.util.Arrays.asList("model:0")), "Reentry lost the current phase or replayed a failed-request retry");
+                    assertCurrentStageSurvivesReentryWithoutInventedRetries(f);
                     f.loop.setListener(listener);
                     sink.onToolCall(0, "tool-id", "probe", "{}"); return toolReply();
                 }
-                check(executions[0] == 1, "Model retry duplicated a real tool execution");
-                check(attempts.get(attempts.size() - 1).intValue() == 1, "Normal followup erased the retry count");
-                assertRetryReasonAndStageSurviveReentry(f, 1);
+                check(executions[0] == 1, "Explicit continuation duplicated a real tool execution");
+                check(attempts.get(attempts.size() - 1).intValue() == 0, "Normal followup invented a retry count");
+                assertCurrentStageSurvivesReentryWithoutInventedRetries(f);
                 f.loop.setListener(listener);
                 return answer("done");
             }
         };
         fixture.run();
-        check(executions[0] == 1 && stages.contains("tool_ready"), "Completed tool did not enter the actual execution path");
-        pass("partialToolRetriesOnlyTheModelAndPublishesItsStage");
+        check(fixture.calls == 1 && executions[0] == 0 && fixture.stored.size() == 1 && !stages.contains("retry"),
+                "Failed parameter generation retried, executed an incomplete tool or polluted history");
+        fixture.loop.resume(1, 9);
+        check(fixture.calls == 3 && executions[0] == 1 && stages.contains("tool_ready"),
+                "Explicit continuation did not execute one actual complete tool and its ordinary followup");
+        pass("explicitResumeAfterPartialToolKeepsZeroRetriesAndAtomicStages");
     }
 
-    private static void assertRetryReasonAndStageSurviveReentry(final Fixture fixture, final int expectedAttempt) throws Exception {
+    private static void assertCurrentStageSurvivesReentryWithoutInventedRetries(final Fixture fixture) throws Exception {
         final ArrayList<String> phases = new ArrayList<String>();
         final ArrayList<Long> sequences = new ArrayList<Long>();
         AgentLoop.Quiet replay = new AgentLoop.Quiet() {
@@ -238,9 +250,7 @@ public final class UiSnapshotRegressionTest {
                 check(AgentLoop.callingUiSource() == fixture.loop && fixture.loop.callingToken() == 9
                                 && fixture.loop.isReplayingUiSnapshot() && gen == fixture.loop.generation(),
                         "Recovered progress lost its source, token, generation or replay boundary");
-                check(attempt == expectedAttempt, "Recovered current phase lost its cumulative retry count");
-                if ("retry".equals(phase)) check("接口返回 HTTP 503".equals(detail),
-                        "Reentry lost the actual safe error reason or exposed the echoed provider payload");
+                check(attempt == 0 && !"retry".equals(phase), "Recovered current phase invented an automatic retry");
                 phases.add(phase); sequences.add(fixture.loop.callingUiSequence());
             }
             @Override public void onToolPreview(int gen, int index, String id, String name, String args) {
@@ -251,8 +261,8 @@ public final class UiSnapshotRegressionTest {
             }
         };
         fixture.loop.replayUiSnapshot(fixture.snapshot(replay), replay);
-        check(phases.equals(java.util.Arrays.asList("retry", "model")) && sequences.get(0) < sequences.get(1),
-                "Reentry did not retain only the last retry and current phase in order: " + phases);
+        check(phases.equals(java.util.Arrays.asList("model")) && sequences.get(0).longValue() > 0,
+                "Reentry did not retain the current model phase at the immutable sequence boundary: " + phases);
     }
 
     private static void approvalAndReviewPrecedeActualToolStart() throws Exception {
@@ -425,8 +435,8 @@ public final class UiSnapshotRegressionTest {
         unpersistedPartialIsReplayedAndFutureHasLargerSequence();
         persistedPayloadIsNotReplayed();
         previewReplacementKeepsItsOriginalPosition();
-        retryDropsUncommittedBodyAndPreviews();
-        partialToolRetriesOnlyTheModelAndPublishesItsStage();
+        failureDropsUncommittedOutputBeforeExplicitResume();
+        explicitResumeAfterPartialToolKeepsZeroRetriesAndAtomicStages();
         approvalAndReviewPrecedeActualToolStart();
         activeToolStartSurvivesButStoredPreviewDoesNot();
         toolCommitAndCompletionEventAreAtomic();

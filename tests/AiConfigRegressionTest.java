@@ -76,16 +76,18 @@ public final class AiConfigRegressionTest {
                 + "List<AiProfile>aiProfiles(){return new ArrayList<AiProfile>(profiles.values());}String activeProviderId(){return active;}"
                 + "void saveAiProfiles(List<AiProfile>edited,String id){writes++;for(AiProfile p:edited)profiles.put(p.id,p);active=id;AiProfile p=profiles.get(id);"
                 + "url=p.baseUrl;key=p.apiKey;model=p.model;saved=new ArrayList<String>(p.modelList);}}"
-                + "static class LlmClient{static String nextError;static class ModelsResult{String error;Object diagnostic;List<String> models=Arrays.asList(\"remote-a\",\"remote-b\");}"
+                + "static class LlmClient{static String nextError;static class ModelsResult{String error,userMessage;Object diagnostic;List<String> models=Arrays.asList(\"remote-a\",\"remote-b\");}"
                 + "static ModelsResult fetchModels(String u,String k,String provider){ModelsResult r=new ModelsResult();r.error=nextError;r.diagnostic=\"bounded-private-diagnostic\";return r;}}"
                 + "static class ChatStore{static int logged;static String detail;ChatStore(Object c){}void recordDiagnostic(long sid,String source,String summary,String d){logged++;detail=d;}void close(){}}"
                 + "static class TextUtils{static boolean isEmpty(String s){return s==null||s.length()==0;}}"
-                + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(AiConfigActivity a,int i,int d){return new Toast();}void show(){}}"
+                + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(AiConfigActivity a,int i,int d){return new Toast();}"
+                + "static Toast makeText(AiConfigActivity a,String s,int d){a.toasts.add(s);return new Toast();}void show(){}}"
                 + "static class R{static class string{static final int toast_need_url_key=1,fetching=2,fetch_failed_summary=3,fetch_count=4,toast_need_model=5;}}"
                 + "EditText baseUrl=new EditText(),apiKey=new EditText(),model=new EditText();Button fetchModels=new Button();TextView fetchStatus=new TextView();"
                 + "ArrayList<String> previewModels=new ArrayList<String>();int requestGeneration;boolean destroyed,bindingDraft;Thread activeFetch;int renders;String selectedProvider=\"custom\";"
                 + "Map<String,Settings.AiProfile>drafts=new LinkedHashMap<String,Settings.AiProfile>();Set<String>editedProfiles=new LinkedHashSet<String>();"
                 + "List<Runnable> callbacks=Collections.synchronizedList(new ArrayList<Runnable>());Settings settings=new Settings();"
+                + "List<String>toasts=new ArrayList<String>();"
                 + "public AiConfigActivity(){baseUrl.text=\"https://provider.example/v1\";apiKey.text=\"secret\";model.text=\"selected\";previewModels.add(\"stored-model\");for(Settings.AiProfile p:settings.aiProfiles())drafts.put(p.id,p);}"
                 + "Object getApplicationContext(){return this;}boolean isFinishing(){return finishing;}void runOnUiThread(Runnable r){callbacks.add(r);}"
                 + "String getString(int id,Object...args){return id+Arrays.toString(args);}void renderModels(List<String> m){renders++;}"
@@ -246,6 +248,9 @@ public final class AiConfigRegressionTest {
             Field logged=store.getDeclaredField("logged"), detail=store.getDeclaredField("detail");logged.setAccessible(true);detail.setAccessible(true);
             check((Integer)logged.get(null)>0&&"bounded-private-diagnostic".equals(detail.get(null)),"Failed model request was not recorded in backend");
             check(!field(field(activity,"fetchStatus"),"text").toString().contains("private-provider-error")
+                            && (Integer)field(field(activity,"fetchStatus"),"visibility")==8
+                            && ((List<?>)field(activity,"toasts")).size()==1
+                            && !((List<?>)field(activity,"toasts")).get(0).toString().contains("private-provider-error")
                             && (Integer)field(field(activity,"settings"),"writes")==0,"UI leaked raw provider error or fetch wrote preferences");
         } finally {error.set(null,null);}
     }

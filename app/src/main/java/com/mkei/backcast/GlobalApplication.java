@@ -53,6 +53,7 @@ public class GlobalApplication extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        com.mkei.backcast.agent.NetworkRouting.install(new com.mkei.backcast.net.DeviceNetworks(this));
         CrashHandler.getInstance().registerGlobal(this);
         CrashHandler.getInstance().registerPart(this);
     }

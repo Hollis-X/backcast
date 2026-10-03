@@ -54,6 +54,12 @@ def main():
             "Lcom/mkei/backcast/GlobalApplication;",
             "Lcom/mkei/backcast/agent/LlmClient;",
             "Lcom/mkei/backcast/agent/LlmClient$RequestActivity;",
+            "Lcom/mkei/backcast/agent/NetworkRouting;",
+            "Lcom/mkei/backcast/agent/ConnectionRace;",
+            "Lcom/mkei/backcast/agent/InternetReachability;",
+            "Lcom/mkei/backcast/net/DeviceNetworks;",
+            "Lcom/mkei/backcast/ui/MarkdownRenderQueue;",
+            "Lcom/mkei/backcast/tool/ObjectionBootstrap;",
             "Lcom/openai/client/okhttp/OpenAIOkHttpClient;",
             "Lcom/openai/models/chat/completions/ChatCompletionChunk;",
             "Lcom/openai/services/blocking/chat/ChatCompletionServiceImpl;",
@@ -86,6 +92,8 @@ def main():
                               check=True, capture_output=True, text=True).stdout
     assert "sdkVersion:'26'" in manifest, "APK minimum API is not Android 8"
     assert "package: name='com.mkei.backcast'" in manifest, "Wrong application ID"
+    for permission in ("android.permission.ACCESS_NETWORK_STATE", "android.permission.CHANGE_NETWORK_STATE"):
+        assert permission in manifest, "Multi-network permission missing: " + permission
     print("PASS actual compiled manifest uses Android 8 and the existing application ID")
 
 

@@ -182,7 +182,8 @@ public class ShellTool implements Tool {
         if (temporary != null) command.append("export HOME=").append(RootShell.quote(temporary.directory().getPath())).append("; export PYTHONDONTWRITEBYTECODE=1; ");
         boolean probe = arguments.size() == 1 && ("--version".equals(arguments.get(0)) || "--help".equals(arguments.get(0))
                 || "objection".equals(launcher.id) && "version".equals(arguments.get(0)));
-        if (launcher.companion.length() > 0 && !probe) command.append("export BACKCAST_FRIDA_PORT=$((20000 + $$ % 40000)); ")
+        if (launcher.companion.length() > 0 && !probe) command.append("export BACKCAST_FRIDA_SERVER_VERSION=$(")
+                .append(RootShell.quote(launcher.companion)).append(" --version); export BACKCAST_FRIDA_PORT=$((20000 + $$ % 40000)); ")
                 .append(RootShell.quote(launcher.companion)).append(" --listen 127.0.0.1:$BACKCAST_FRIDA_PORT >/dev/null 2>&1 & export BACKCAST_FRIDA_PID=$!; ");
         command.append(RootShell.quote(launcher.executable));
         if ("apktool".equals(launcher.id) && !launcher.prefix.isEmpty() && temporary != null) {
@@ -330,14 +331,14 @@ public class ShellTool implements Tool {
         reader.start();
 
         try {
-            long deadline = System.currentTimeMillis() + timeoutSec * 1000L;
+            long deadline = System.nanoTime() + timeoutSec * 1000000000L;
             while (epoch == mine) {
                 tree.sample();
                 if (result.get() != Integer.MIN_VALUE) break;
                 if (finished(process)) {
                     break;
                 }
-                if (System.currentTimeMillis() >= deadline) {
+                if (System.nanoTime() - deadline >= 0) {
                     kill(process);
                     return cleanupWarning() + "命令超时（" + timeoutSec + "s）。\n输出片段：\n" + textOf(sb);
                 }

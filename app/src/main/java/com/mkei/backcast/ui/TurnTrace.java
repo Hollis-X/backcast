@@ -415,7 +415,7 @@ public class TurnTrace {
         return "正在生成参数";
     }
 
-    /** Live phase plus cumulative retries; this is not a per-tool duration. */
+    /** User-facing phase and timing only; retry/error metadata stays in the private log. */
     public String progressCaption(boolean live) {
         return progressCaption(live, -1L);
     }
@@ -433,13 +433,8 @@ public class TurnTrace {
             else if ("children".equals(phase)) current = "等待子任务";
             else if ("thinking".equals(phase)) current = "正在思考";
             else if ("responding".equals(phase)) current = "正在输出";
-            else if ("retry".equals(phase)) current = "正在重试";
             else current = "等待模型";
         }
-        if (retryCount > 0) current += (current.length() == 0 ? "" : " · ") + "已重试 " + retryCount + " 次";
-        if (live && retryReason.length() > 0)
-            current += " · " + ("retry".equals(phase) ? "" : "上次失败：")
-                    + (retryReason.length() > 48 ? retryReason.substring(0, 48) + "…" : retryReason);
         return current;
     }
 

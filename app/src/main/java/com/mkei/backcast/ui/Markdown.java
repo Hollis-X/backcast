@@ -6,14 +6,16 @@ import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ReplacementSpan;
+import android.text.style.BackgroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
+import android.text.style.TypefaceSpan;
 
 /**
  * 轻量 Markdown → Spannable。
  *
  * 只覆盖模型回复里常见的写法：标题、加粗、行内代码、代码块、列表、表格。
- * 不引入第三方库，避免旧构建环境拉不到依赖。
+ * 解析不接触 View，可交给 MarkdownRenderQueue 在后台执行。
  */
 public final class Markdown {
 
@@ -101,7 +103,9 @@ public final class Markdown {
         int start = out.length();
         out.append(body);
         out.append('\n');
-        styleCode(out, start, out.length(), codeBg);
+        // A ReplacementSpan is a single layout item; it cannot draw a multiline code block.
+        out.setSpan(new TypefaceSpan("monospace"), start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        out.setSpan(new BackgroundColorSpan(codeBg), start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         out.setSpan(new RelativeSizeSpan(0.92f), start, out.length(),
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return i;

@@ -40,7 +40,8 @@ public final class ToolkitTool implements Tool {
                 + "list 返回各工具参数示例。radare2 用 ['-c','ii;is;afl;q','文件']，本入口自动非交互退出；rabin2 的 -I/-i 分别查看信息/导入。"
                 + "addr2line 用 ['-f','-C','-e','文件.so','0x1234']，-e 后是文件，符号名先用 nm 找地址。"
                 + "run 使用 arguments 字符串数组，不能传 shell 命令；临时输出用 temporary=true，自动随轮次清理。"
-                + "status 仅验证版本入口，不代表目标应用的 Frida/Java hook 兼容；failure_kind/hint 提示纠正调用，不能把失败输出当成功或重复相同失败调用。";
+                + "status 仅验证版本入口，不代表目标应用的 Frida/Java hook 兼容；failure_kind/hint 提示纠正调用，不能把失败输出当成功或重复相同失败调用。"
+                + "Objection 的 frida_evidence 记录真实连接、附加、脚本与 RPC 阶段；超时本身不能证明反调试。";
     }
 
     @Override public JSONObject parameters() {
@@ -292,12 +293,46 @@ public final class ToolkitTool implements Tool {
     }
 
     private static void describeFailure(String id, String output, JSONObject result) throws Exception {
+        String phase = "";
+        if ("objection".equals(id)) {
+            JSONArray evidence = new JSONArray();
+            String active = "", failed = "";
+            for (String line : output.split("\\r?\\n")) if (line.startsWith(ObjectionBootstrap.MARKER)) {
+                try {
+                    JSONObject entry = new JSONObject(line.substring(ObjectionBootstrap.MARKER.length()));
+                    String candidate = entry.optString("phase");
+                    if (!"server_connect".equals(candidate) && !"command".equals(candidate) && !"attach".equals(candidate)
+                            && !"script_create".equals(candidate) && !"script_load".equals(candidate) && !"rpc".equals(candidate)) continue;
+                    String state = entry.optString("state");
+                    if ("failed".equals(state)) failed = candidate;
+                    else if ("started".equals(state)) active = candidate;
+                    else if ("completed".equals(state) && candidate.equals(active)) active = "";
+                    if (evidence.length() < 20) evidence.put(entry);
+                } catch (Exception ignored) { }
+            }
+            phase = failed.length() > 0 ? failed : active;
+            if (evidence.length() > 0) result.put("frida_phase", phase).put("frida_evidence", evidence);
+        }
         if ("objection".equals(id) && output.contains("Unable to find target application")) {
             result.put("failure_kind", "target_not_running").put("hint", "目标应用没有可附加的运行进程。先确认包名和运行状态，"
                     + "再指定实际 PID 或运行中的包名；版本探测成功不代表目标正在运行。");
+        } else if ("objection".equals(id) && ("attach".equals(phase)
+                && (output.contains("TimedOutError") || output.contains("命令超时"))
+                || output.contains("timed out while waiting for signal from process"))) {
+            result.put("failure_kind", "attach_timeout").put("frida_phase", "attach").put("hint", "Frida 在 device.attach 等待目标进程信号时超时，尚未加载 Objection 脚本。"
+                    + "超时本身不能证明反调试。保留本次 PID、进程起始身份、root 身份和 client/server 版本诊断；"
+                    + "核对目标仍在运行及系统日志，不要重复相同附加或仅提高超时。");
+        } else if ("objection".equals(id) && "server_connect".equals(phase)) {
+            result.put("failure_kind", "frida_server_unavailable").put("hint", "本次私有 Frida server 连接或版本配对失败，还没有附加目标进程。"
+                    + "先检查 frida_evidence 中运行身份、版本和启动状态，不要把该错误归因于目标应用。");
+        } else if ("objection".equals(id) && output.contains("SyntaxError")
+                && ("script_create".equals(phase) || phase.length() == 0
+                && (output.contains("Script(line ") || output.contains("script(line ")))) {
+            result.put("failure_kind", "frida_script_invalid").put("frida_phase", "script_create").put("hint", "Frida 已附加，但 Objection 脚本编译失败。"
+                    + "这是脚本语法或打包错误，不是附加超时；使用更新后的内置工具包并保留原始行号。");
         } else if ("objection".equals(id) && output.contains("TimedOutError")) {
-            result.put("failure_kind", "attach_timeout").put("hint", "Frida 附加目标进程超时。确认目标 PID、root 授权和设备 ART 兼容性；"
-                    + "不要只增加超时或重复同一附加请求，先检查目标及系统崩溃日志。");
+            result.put("failure_kind", "frida_operation_timeout").put("hint", "Frida 操作超时；按 frida_phase 和原始 traceback 区分脚本加载、RPC 或连接。"
+                    + "没有 attach 阶段证据时不能称附加失败，也不能凭超时判定反调试。");
         } else if ("objection".equals(id) && (output.contains("tryGetEnvJvmti") || output.contains("access violation"))) {
             result.put("failure_kind", "frida_java_bridge_incompatible").put("hint", "Frida Java 桥接在该设备/目标的 ART 初始化时失败。"
                     + "本次 Java hook 未完成；停止重复相同 hook，保留此错误用于兼容性诊断。版本探活不能验证 Java hook。");
@@ -345,10 +380,26 @@ public final class ToolkitTool implements Tool {
         for (int i = 0; i < args.size(); i++) {
             String value = args.get(i);
             if (value.startsWith("-")) {
-                if ("--help".equals(value)) return;
                 if ("--name".equals(value) || "-n".equals(value) || "--gadget".equals(value) || "-g".equals(value)
-                        || "--uid".equals(value)) i++;
-                continue;
+                        || "--uid".equals(value)) {
+                    if (++i >= args.size() || args.get(i).length() == 0 || args.get(i).startsWith("-")) {
+                        throw new IllegalArgumentException("Objection 目标选项缺少有效参数。");
+                    }
+                    continue;
+                }
+                if (value.startsWith("--name=") && value.length() > 7 || value.startsWith("--gadget=") && value.length() > 9
+                        || value.startsWith("--uid=") && value.length() > 6
+                        || value.startsWith("-n") && !value.startsWith("--") && value.length() > 2
+                        || value.startsWith("-g") && !value.startsWith("--") && value.length() > 2) continue;
+                if ("--help".equals(value) && args.size() == 1) return;
+                if ("--debug".equals(value) || "-d".equals(value) || "--spawn".equals(value) || "-s".equals(value)
+                        || "--no-pause".equals(value) || "-p".equals(value) || "--foremost".equals(value) || "-f".equals(value)
+                        || "--debugger".equals(value)) continue;
+                // Official Objection 1.12.5 uses -h for host and -P for port;
+                // -p means no-pause. Reject unknown/combined flags too, since
+                // Click can decode -dN as debug + network after our settings.
+                throw new IllegalArgumentException("Objection 连接由本次私有 Frida server 管理，不能覆盖 host/port/network/local/serial 或传未知连接选项。"
+                        + "只指定 name/PID、一次 run 命令及 debug/spawn/no-pause/foremost 等目标选项。");
             }
             if ("version".equals(value) || "run".equals(value)) return;
             throw new IllegalArgumentException("内置 Objection 使用非交互 run 单次命令或 version。start/explore/API 常驻服务和桌面 patch/sign 流程不由该入口执行。");

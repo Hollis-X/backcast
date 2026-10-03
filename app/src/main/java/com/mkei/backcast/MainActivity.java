@@ -43,6 +43,7 @@ import android.widget.LinearLayout;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -50,6 +51,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.agent.AgentLoop;
 import com.mkei.backcast.agent.ApprovalGate;
 import com.mkei.backcast.agent.Compactor;
+import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
@@ -63,6 +65,7 @@ import com.mkei.backcast.tool.WriteTool;
 import com.mkei.backcast.ui.ContextMeter;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
+import com.mkei.backcast.ui.MarkdownRenderQueue;
 import com.mkei.backcast.ui.SlashInput;
 import com.mkei.backcast.ui.SweepText;
 import com.mkei.backcast.ui.TranscriptScrollView;
@@ -77,6 +80,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.LinkedList;
 import java.util.Map;
+import java.util.WeakHashMap;
+import java.lang.ref.WeakReference;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -136,6 +142,23 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private static final int HISTORY_PAGE_SIZE = 48;
     private static final int HISTORY_FRAME_SIZE = 4;
     private final ExecutorService historyReader = Executors.newSingleThreadExecutor();
+    private final ExecutorService markdownWorker = Executors.newSingleThreadExecutor();
+    private final Map<TextView, Object> markdownKeys = new WeakHashMap<TextView, Object>();
+    private final MarkdownRenderQueue markdownQueue = new MarkdownRenderQueue(markdownWorker,
+            new Executor() {
+                @Override public void execute(final Runnable task) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (stream != null && !activityDestroyed) stream.postOnAnimation(task);
+                            else task.run();
+                        }
+                    });
+                }
+            }, new MarkdownRenderQueue.Renderer() {
+                @Override public CharSequence render(String source, int background) {
+                    return Markdown.render(source, background);
+                }
+            });
     private final List<Runnable> historyEvents = new LinkedList<Runnable>();
     private int historyToken;
     private long historySequence = -1;
@@ -153,6 +176,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private final Object approvalLock = new Object();
     private final List<ApprovalRequest> approvals = new LinkedList<ApprovalRequest>();
     private volatile boolean activityDestroyed;
+    private AgentLoop errorToastSource;
+    private int errorToastToken = -1, errorToastGeneration = -1;
 
     private static final class ApprovalRequest {
         final AgentLoop source;
@@ -660,6 +685,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         cancelApprovals();
         resetHistoryLoading();
         historyReader.shutdownNow();
+        markdownQueue.close();
+        markdownWorker.shutdownNow();
+        markdownKeys.clear();
         if (goalBar != null) {
             goalBar.removeCallbacks(goalTicker);
         }
@@ -1987,6 +2015,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                                             }
                                         });
                                     } catch (Exception error) {
+                                        recordUiFailure(id, "ui:history", error);
                                         ui(new Runnable() {
                                             @Override public void run() {
                                                 if (token != historyToken || loop != source || isFinishing()) return;
@@ -1994,7 +2023,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                                                 initialHistoryLoading = false;
                                                 hub.bind(id, listener);
                                                 historyEvents.clear();
-                                                addErrorText(getString(R.string.history_load_failed));
+                                                Toast.makeText(MainActivity.this, R.string.history_load_failed, Toast.LENGTH_SHORT).show();
                                                 send.setEnabled(true);
                                                 refreshIdentity();
                                                 refreshGoal();
@@ -2006,11 +2035,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                         }
                     });
                 } catch (Exception error) {
+                    recordUiFailure(id, "ui:history", error);
                     ui(new Runnable() {
                         @Override public void run() {
                             if (token != historyToken || id != sessionId || isFinishing()) return;
                             sessionOpening = false;
-                            addErrorText(getString(R.string.history_load_failed));
+                            Toast.makeText(MainActivity.this, R.string.history_load_failed, Toast.LENGTH_SHORT).show();
                             send.setEnabled(true);
                             stop.setEnabled(true);
                         }
@@ -2501,7 +2531,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final Runnable event = new Runnable() {
             @Override
             public void run() {
-                if (source == null || loop != source || !source.accepts(gen, token)
+                if (activityDestroyed || isFinishing() || source == null || loop != source || !source.accepts(gen, token)
                         || (turnUiToken >= 0 && turnUiToken != token)
                         || (!replaying && sequence >= 0 && sequence <= historySequence)) {
                     return;
@@ -2639,22 +2669,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
         @Override
         public void onError(final int gen, final String message) {
-            uiLive(gen, new Runnable() {
-                @Override
-                public void run() {
-                    hidePending();
-                    sealLiveAnswer();
-                    settleWork();
-                    if (compactLive) {
-                        // 压缩失败不留一行假的「压缩了 Ns」。
-                        dropCompactRow();
-                    } else {
-                        settleCompact();
-                    }
-                    addErrorText("运行已停止，详细错误已写入诊断数据库。点击查看请求状态。");
-                    refreshGoal();
-                }
-            });
+            handleTurnError(gen, message);
         }
 
         @Override
@@ -3132,6 +3147,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (PromptGuard.REFUSAL.equals(text)) {
             liveAnswerRaw.setLength(0); liveAnswerRaw.append(text); secretBlocked = true;
             liveAnswer.setText(""); liveAnswerRendered = 0;
+            flushLiveAnswer();
         }
         scheduleLiveFlush();
     }
@@ -3142,12 +3158,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 这一段正文结束。视图留在对话里，下一轮再新建。 */
     private void sealLiveAnswer() {
         flushLiveAnswer();
-        if (liveAnswer != null && liveAnswerRaw != null)
-            liveAnswer.setText(Markdown.render(liveAnswerRaw.toString(), getResources().getColor(R.color.code_bg)));
         liveAnswer = null; liveAnswerRaw = null; liveAnswerRendered = 0; secretBlocked = false;
     }
 
     private void releaseLiveViews() {
+        markdownQueue.cancelAll();
+        markdownKeys.clear();
         resetSheetDetails();
         turnMarkBody = null;
         turnUiToken = -1;
@@ -3200,9 +3216,78 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (liveAnswer == null || liveAnswerRaw == null) return;
         int end = liveAnswerRaw.length();
         if (end == liveAnswerRendered) return;
-        if (end < liveAnswerRendered) { liveAnswer.setText(""); liveAnswerRendered = 0; }
-        liveAnswer.append(liveAnswerRaw.substring(liveAnswerRendered, end));
+        renderMarkdown(liveAnswer, liveAnswerRaw.toString(), true);
         liveAnswerRendered = end;
+    }
+
+    /** The worker only holds an opaque key and a weak target; View access stays on the UI thread. */
+    private void renderMarkdown(final TextView view, String raw, boolean priority) {
+        Object key = markdownKeys.get(view);
+        if (key == null) { key = new Object(); markdownKeys.put(view, key); }
+        final WeakReference<TextView> target = new WeakReference<TextView>(view);
+        final int token = historyToken;
+        markdownQueue.submit(key, raw, getResources().getColor(R.color.code_bg), priority,
+                new MarkdownRenderQueue.Callback() {
+                    @Override public void apply(CharSequence result) {
+                        TextView current = target.get();
+                        if (current == null || activityDestroyed || isFinishing()
+                                || token != historyToken || current.getParent() == null) return;
+                        applyMarkdown(current, result);
+                    }
+                });
+    }
+
+    /** Preserve the visible message when Markdown changes the height of an earlier reply. */
+    private void applyMarkdown(TextView view, CharSequence result) {
+        View candidate = null;
+        final int y = scroll == null ? 0 : scroll.getScrollY();
+        if (scroll != null && stream != null && !followLatest && !initialHistoryLoading && !historyInserting) {
+            candidate = markdownAnchor(stream, y);
+        }
+        final View anchor = candidate;
+        final int offset = anchor == null ? 0 : markdownTop(anchor) - y;
+        final int token = historyToken, action = scrollActionToken;
+        view.setText(result);
+        if (anchor != null) {
+            scroll.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    scroll.getViewTreeObserver().removeOnPreDrawListener(this);
+                    if (!activityDestroyed && token == historyToken && action == scrollActionToken
+                            && !followLatest && !historyInserting && scroll.getScrollY() == y
+                            && markdownTop(anchor) >= 0) {
+                        scroll.scrollTo(0, Math.max(0, markdownTop(anchor) - offset));
+                    }
+                    return true;
+                }
+            });
+        }
+        autoScroll();
+    }
+
+    private View markdownAnchor(ViewGroup group, int localY) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE || child.getBottom() <= localY) continue;
+            if (child instanceof LinearLayout && ((LinearLayout) child).getOrientation() == LinearLayout.VERTICAL) {
+                View leaf = markdownAnchor((ViewGroup) child, localY - child.getTop());
+                if (leaf != null) return leaf;
+            }
+            return child;
+        }
+        return null;
+    }
+
+    /** Offset within the transcript; detached old pages never supply an anchor. */
+    private int markdownTop(View view) {
+        int top = 0;
+        View node = view;
+        while (node != stream) {
+            top += node.getTop();
+            ViewParent parent = node.getParent();
+            if (!(parent instanceof View)) return -1;
+            node = (View) parent;
+        }
+        return top;
     }
 
     /** 面板按发生顺序补块。思考出现在工具后面时，就画在那条工具后面。 */
@@ -3287,8 +3372,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 助手回复：白底正文，Markdown 渲染成加粗 / 代码 / 列表 / 表格。 */
     private void addAgentText(String text) {
         TextView tv = new TextView(this);
-        tv.setText(Markdown.render(visibleText(text),
-                getResources().getColor(R.color.code_bg)));
+        String raw = visibleText(text);
+        tv.setText(raw);
         tv.setTextSize(16);
         tv.setTextColor(getResources().getColor(R.color.text_primary));
         tv.setLineSpacing(dp(5), 1f);
@@ -3296,6 +3381,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         enableCopy(tv);
 
         host().addView(tv, fullWidth());
+        renderMarkdown(tv, raw, false);
         autoScroll();
     }
 
@@ -3400,21 +3486,52 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         autoScroll();
     }
 
-    private void addErrorText(String message) {
-        TextView tv = new TextView(this);
-        tv.setText(message);
-        tv.setTextSize(14);
-        tv.setTextColor(getResources().getColor(R.color.error_text));
-        tv.setLineSpacing(dp(3), 1f);
-        tv.setPadding(0, dp(6), 0, dp(10));
-        Icons.left(tv, Icons.WARNING, getResources().getColor(R.color.error_text), dp(16));
-        enableCopy(tv);
-        tv.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { showRequestDiagnostics(); }
+    /** A live failure settles its turn but never adds a transcript row or opens a detail panel. */
+    private void handleTurnError(final int generation, final String message) {
+        final AgentLoop source = AgentLoop.callingUiSource();
+        final int token = source == null ? -1 : source.callingToken();
+        final boolean replaying = source != null && source.isReplayingUiSnapshot();
+        uiLive(generation, new Runnable() {
+            @Override public void run() {
+                if (!compactLive && currentTrace != null && ("model".equals(currentTrace.phase)
+                        || "thinking".equals(currentTrace.phase) || "responding".equals(currentTrace.phase)
+                        || "preview".equals(currentTrace.phase) || "retry".equals(currentTrace.phase))) rewindLiveRound();
+                hidePending(); sealLiveAnswer(); settleWork();
+                if (compactLive) dropCompactRow(); else settleCompact();
+                refreshGoal();
+                if (replaying || errorToastSource == source && errorToastToken == token
+                        && errorToastGeneration == generation) return;
+                errorToastSource = source; errorToastToken = token; errorToastGeneration = generation;
+                Toast.makeText(MainActivity.this, failureToast(message), Toast.LENGTH_SHORT).show();
+            }
         });
+    }
 
-        host().addView(tv, fullWidth());
-        autoScroll();
+    /** API bodies and Java exception text belong to the private diagnostic log. */
+    private String failureToast(String message) {
+        String value = message == null ? "" : message.trim();
+        if (value.length() == 0 || value.length() > 100 || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0
+                || value.contains("Exception") || value.contains("HTTP ") || value.contains("java.")
+                || value.contains("{\"") || value.contains(" at ") || value.contains("Bearer "))
+            return "请求失败，详细原因已记录。";
+        return value;
+    }
+
+    private void recordUiFailure(final long sid, final String source, final Throwable failure) {
+        final Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                ChatStore store = null;
+                try {
+                    Settings stored = new Settings(app); List<String> secrets = new ArrayList<String>();
+                    for (Settings.AiProfile profile : stored.aiProfiles()) secrets.add(profile.apiKey);
+                    JSONObject evidence = Diagnostics.failure(failure).put("error", failure.getMessage());
+                    store = new ChatStore(app);
+                    store.recordDiagnostic(sid, source, "界面操作失败", Diagnostics.boundedJson(evidence, secrets.toArray(new String[secrets.size()])));
+                } catch (Exception loggingFailure) { }
+                finally { if (store != null) try { store.close(); } catch (RuntimeException closeFailure) { } }
+            }
+        }, "backcast-ui-diagnostic").start();
     }
 
     /** 用户消息只显示正文；目录仍保存在会话记录中供工具解析。 */
@@ -4037,6 +4154,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private void loadEarlierPage(final TextView row) {
         if (earlierLoading || initialHistoryLoading || earlierBeforeId <= 0
                 || row != earlierRow || stream.indexOfChild(row) < 0) return;
+        final CharSequence label = row.getText();
         earlierLoading = true;
         row.setEnabled(false);
         row.setText(R.string.history_loading);
@@ -4060,12 +4178,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                         }
                     });
                 } catch (Exception error) {
+                    recordUiFailure(sid, "ui:history", error);
                     ui(new Runnable() {
                         @Override public void run() {
                             if (token != historyToken || row != earlierRow) return;
                             earlierLoading = false;
                             row.setEnabled(true);
-                            row.setText(R.string.history_retry);
+                            row.setText(label);
+                            Toast.makeText(MainActivity.this, R.string.history_load_failed, Toast.LENGTH_SHORT).show();
                         }
                     });
                 }
@@ -4313,8 +4433,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 正文不进折叠。按发生顺序落到这一段正文里；命令之后新来的正文明起一段。 */
     private void addBodyInto(LinearLayout rows, String text) {
         TextView tv = new TextView(this);
-        tv.setText(Markdown.render(visibleText(text),
-                getResources().getColor(R.color.code_bg)));
+        String raw = visibleText(text);
+        tv.setText(raw);
         tv.setTextSize(16);
         tv.setTextColor(getResources().getColor(R.color.text_primary));
         tv.setLineSpacing(dp(5), 1f);
@@ -4333,6 +4453,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             turnBody = slot;
         }
         slot.addView(tv, fullWidth());
+        renderMarkdown(tv, raw, false);
     }
 
     private TurnTrace traceOf(LinearLayout rows) {
@@ -4499,7 +4620,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             @Override public void run() {
                 String value;
                 try { value = requestDiagnosticsText(chatStore.requestEvents(sid, 20)); }
-                catch (Exception error) { value = "请求诊断读取失败"; }
+                catch (Exception error) { recordUiFailure(sid, "ui:history", error); value = "请求状态读取失败"; }
                 final String text = value;
                 ui(new Runnable() {
                     @Override public void run() {
@@ -4524,7 +4645,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private String liveRequestDiagnosticsText(LlmClient.RequestActivity request) {
-        if (request == null) return "当前没有正在进行的模型请求。\n重试等待、授权等待和工具执行不计入单次请求耗时。";
+        if (request == null) return "当前没有正在进行的模型请求。\n授权等待和工具执行不计入单次请求耗时。";
         String state = request.quietMs >= 10000L ? "等待模型响应"
                 : request.hasProgress ? "正在接收输出"
                 : request.responseStarted ? "已收到响应，等待内容" : "等待首次响应";
@@ -4549,12 +4670,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     : "review".equals(event.purpose) ? "权限检查" : "模型请求";
             String outcome = "success".equals(event.outcome) ? "成功"
                     : "cancelled".equals(event.outcome) ? "已取消"
-                    : "retryable_error".equals(event.outcome) ? "可重试失败" : "失败";
+                    : "失败";
             text.append('\n').append(android.text.format.DateFormat.format("MM-dd HH:mm:ss", event.recordedAt))
                     .append(" · ").append(purpose).append(" · ").append(outcome)
                     .append('\n').append("请求耗时 ").append(event.elapsedMs).append("ms");
-            if (event.retryCount > 0) text.append(" · 本轮累计重试 ").append(event.retryCount).append(" 次");
-            if (event.reason.length() > 0) text.append('\n').append(event.reason);
             text.append('\n');
         }
         return text.toString();

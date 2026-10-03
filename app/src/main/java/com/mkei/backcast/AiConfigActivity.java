@@ -176,7 +176,12 @@ public class AiConfigActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 if (!isCurrentFetch(generation, providerId, url, key)) return;
                 activeFetch = null; fetchModels.setEnabled(true);
-                if (result.error != null) { showStatus(getString(R.string.fetch_failed_summary)); return; }
+                if (result.error != null) {
+                    fetchStatus.setVisibility(View.GONE);
+                    String summary = result.userMessage == null || result.userMessage.length() == 0
+                            ? "获取模型列表失败，详细原因已记录。" : result.userMessage;
+                    Toast.makeText(AiConfigActivity.this, summary, Toast.LENGTH_SHORT).show(); return;
+                }
                 previewModels = new ArrayList<String>(result.models);
                 showStatus(getString(R.string.fetch_count, previewModels.size())); renderModels(previewModels);
             });

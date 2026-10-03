@@ -25,7 +25,8 @@ public final class MultiDexConfigRegressionTest {
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
     private static final class Source extends SimpleJavaFileObject {
         final String body;
-        Source(String body) { super(URI.create("string:///GlobalApplication.java"), Kind.SOURCE); this.body = body; }
+        Source(String body) { this("GlobalApplication", body); }
+        Source(String name, String body) { super(URI.create("string:///" + name.replace('.', '/') + ".java"), Kind.SOURCE); this.body = body; }
         @Override public CharSequence getCharContent(boolean ignored) { return body; }
     }
     private static URLClassLoader compile(Path root, Path output) throws Exception {
@@ -55,7 +56,9 @@ public final class MultiDexConfigRegressionTest {
                 + "public void start(){attachBaseContext(new Context());onCreate();}}";
         try (StandardJavaFileManager manager = ToolProvider.getSystemJavaCompiler().getStandardFileManager(null, null, null)) {
             check(ToolProvider.getSystemJavaCompiler().getTask(null, manager, null, Arrays.asList("-proc:none", "-source", "7", "-target", "7",
-                    "-Xlint:-options", "-d", output.toString()), null, List.of(new Source(source))).call(), "Startup fixture did not compile as Java 7");
+                    "-Xlint:-options", "-d", output.toString()), null, List.of(new Source(source),
+                    new Source("com.mkei.backcast.agent.NetworkRouting", "package com.mkei.backcast.agent; public class NetworkRouting {public static Object provider; public static void install(Object value){provider=value;}}"),
+                    new Source("com.mkei.backcast.net.DeviceNetworks", "package com.mkei.backcast.net; public class DeviceNetworks {public final Object context; public DeviceNetworks(Object value){context=value;}}"))).call(), "Startup fixture did not compile as Java 7");
         }
         return new URLClassLoader(new URL[]{output.toUri().toURL()}, null);
     }
@@ -67,6 +70,8 @@ public final class MultiDexConfigRegressionTest {
             check(application.getField("events").get(null).equals(Arrays.asList("super-attach", "install", "super-create", "global-crash", "part-crash")),
                     "Multidex initialization does not precede application/crash runtime startup");
             check(application.getField("installed").get(null) == instance, "Multidex installation used a different application context");
+            Object route = loader.loadClass("com.mkei.backcast.agent.NetworkRouting").getField("provider").get(null);
+            check(route != null && route.getClass().getField("context").get(route) == instance, "Application omitted device network routing installation");
             System.out.println("PASS actual attachBaseContext installs multidex after super and before onCreate/crash runtime");
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance(); factory.setNamespaceAware(true);
             factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
