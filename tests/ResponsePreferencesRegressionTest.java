@@ -371,6 +371,83 @@ public final class ResponsePreferencesRegressionTest {
                 && "manual".equals(get(settings(context), "agentMode")), "Legacy ultra changed explicit preference save");
     }
 
+    @SuppressWarnings("unchecked")
+    private static List<Object> profiles(Object settings) throws Exception {
+        return (List<Object>) settingsType.getMethod("aiProfiles").invoke(settings);
+    }
+    private static Object profile(Object settings, String id) throws Exception {
+        for (Object item : profiles(settings)) if (id.equals(item.getClass().getField("id").get(item))) return item;
+        throw new AssertionError("Missing provider " + id);
+    }
+    private static String profileText(Object profile, String field) throws Exception {
+        return (String) profile.getClass().getField(field).get(profile);
+    }
+    private static void saveProfile(Object settings, String id, String url, String key, String model, List<String> models) throws Exception {
+        settingsType.getMethod("saveAiProfile", String.class, String.class, String.class, String.class, List.class)
+                .invoke(settings, id, url, key, model, models);
+    }
+    @SuppressWarnings("unchecked")
+    private static void oldAiConfigurationMigratesOnceWithoutLosingProfilesOrModelLists() throws Exception {
+        String[] urls={"https://api.deepseek.com/v1", "https://api.openai.com/v1/chat/completions", "https://api.x.ai/v1",
+                "https://gateway.example/v1", "https://api.openai.com.evil.example/v1", ""};
+        String[] expected={"deepseek","openai","grok","custom","custom","custom"};
+        for(int i=0;i<urls.length;i++) {
+            Object context=context(); java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
+            values.put("base_url",urls[i]); values.put("api_key","legacy-key"); values.put("model","legacy-model");
+            values.put("model_list","legacy-model\nother-model"); Object settings=settings(context);
+            check(expected[i].equals(get(settings,"activeProviderId"))&&urls[i].equals(get(settings,"baseUrl"))
+                            &&"legacy-key".equals(get(settings,"apiKey"))&&"legacy-model".equals(get(settings,"model"))
+                            &&Arrays.asList("legacy-model","other-model").equals(settingsType.getMethod("modelList").invoke(settings)),
+                    "Legacy AI migration lost a field or trusted a lookalike host");
+            check(urls[i].equals(values.get("base_url"))&&"legacy-key".equals(values.get("api_key")),"Migration destroyed the original saved configuration");
+            set(settings,"setActiveProvider","grok"); values.put("base_url","https://api.openai.com/v1");
+            check("grok".equals(get(settings(context),"activeProviderId")),"Legacy data replaced an already migrated provider selection");
+        }
+    }
+    @SuppressWarnings("unchecked")
+    private static void providersKeepSeparateCredentialsAndImmutableOfficialDefaults() throws Exception {
+        Object context=context(),settings=settings(context); List<Object> providers=profiles(settings);
+        check(providers.size()==4&&"https://api.deepseek.com/v1".equals(profileText(profile(settings,"deepseek"),"baseUrl"))
+                        &&"https://api.openai.com/v1".equals(profileText(profile(settings,"openai"),"baseUrl"))
+                        &&"https://api.x.ai/v1".equals(profileText(profile(settings,"grok"),"baseUrl")),"Official preset endpoints are incorrect");
+        for(Object p:providers)check("".equals(profileText(p,"apiKey"))&&"".equals(profileText(p,"model")),"Fresh presets claimed credentials or account models");
+        boolean immutable=false;try{providers.clear();}catch(UnsupportedOperationException expected){immutable=true;}check(immutable,"Provider snapshots can be changed externally");
+        for(String id:new String[]{"deepseek","openai","grok","custom"})saveProfile(settings,id,"https://"+id+".example/v1",id+"-key",id+"-model",Arrays.asList(id+"-model","common"));
+        for(String id:new String[]{"deepseek","openai","grok","custom"}){
+            set(settings,"setActiveProvider",id);Object restored=settings(context);
+            check((id+"-key").equals(get(restored,"apiKey"))&&(id+"-model").equals(get(restored,"model")),"Switching providers mixed credentials");
+            List<String> modelList=(List<String>)profile(restored,id).getClass().getField("modelList").get(profile(restored,id));
+            immutable=false;try{modelList.add("mutated");}catch(UnsupportedOperationException expected){immutable=true;}check(immutable,"Model snapshot aliases persisted storage");
+        }
+    }
+    private static void modelSelectionActivatesOnlyItsProviderAndKeepsLegacyAccessorsCompatible() throws Exception {
+        Object context=context(),settings=settings(context),other=settings(context);
+        saveProfile(settings,"openai","https://api.openai.com/v1","openai-key","existing",Arrays.asList("existing"));
+        saveProfile(other,"grok","https://api.x.ai/v1","grok-key","grok-original",Arrays.asList("grok-original"));
+        settingsType.getMethod("selectAiModel",String.class,String.class).invoke(other,"openai","hand-entered-model");
+        check("openai".equals(get(settings,"activeProviderId"))&&"hand-entered-model".equals(get(settings,"model"))
+                        &&"openai-key".equals(get(settings,"apiKey"))&&(Boolean)settingsType.getMethod("isConfigured").invoke(settings),"Model selection failed to atomically activate its provider");
+        check(Arrays.asList("existing","hand-entered-model").equals(settingsType.getMethod("modelList").invoke(settings)),"Selected manual model was not retained for switching");
+        settingsType.getMethod("saveAiConfiguration",String.class,String.class,String.class,List.class)
+                .invoke(settings,"https://openai-gateway.example/v1","changed-key","changed-model",Arrays.asList("changed-model"));
+        check("grok-key".equals(profileText(profile(other,"grok"),"apiKey"))
+                        &&"grok-original".equals(profileText(profile(other,"grok"),"model")),"Legacy save wrote through another provider");
+        boolean rejected=false;try{settingsType.getMethod("selectAiModel",String.class,String.class).invoke(settings,"grok","");}
+        catch(java.lang.reflect.InvocationTargetException expected){rejected=expected.getCause() instanceof IllegalArgumentException;}
+        check(rejected&&"openai".equals(get(settings,"activeProviderId")),"Invalid model changed active provider");
+    }
+    private static void independentSettingsWritesAndPartialDraftCommitDoNotClobberProviders() throws Exception {
+        final Object context=context(),first=settings(context),second=settings(context);
+        final java.util.concurrent.atomic.AtomicReference<Throwable> failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Thread a=new Thread(()->{try{for(int i=0;i<40;i++)saveProfile(first,"openai","https://api.openai.com/v1","openai-"+i,"model-a",Arrays.asList("model-a"));}catch(Throwable t){failure.set(t);}});
+        Thread b=new Thread(()->{try{for(int i=0;i<40;i++)saveProfile(second,"grok","https://api.x.ai/v1","grok-"+i,"model-b",Arrays.asList("model-b"));}catch(Throwable t){failure.set(t);}});
+        a.start();b.start();a.join(3000);b.join(3000);check(!a.isAlive()&&!b.isAlive()&&failure.get()==null,"Concurrent settings writes failed");
+        check("openai-39".equals(profileText(profile(first,"openai"),"apiKey"))&&"grok-39".equals(profileText(profile(first,"grok"),"apiKey")),"Concurrent provider writes lost a profile");
+        Object edited=profile(first,"openai");saveProfile(second,"grok","https://api.x.ai/v1","newer-grok-key","newer-grok-model",Arrays.asList("newer-grok-model"));
+        settingsType.getMethod("saveAiProfiles",List.class,String.class).invoke(first,Arrays.asList(edited),"openai");
+        check("newer-grok-key".equals(profileText(profile(first,"grok"),"apiKey"))&&"openai".equals(get(first,"activeProviderId")),"Partial draft commit overwrote an untouched concurrent profile");
+    }
+
     private static void run(String name) throws Exception {
         try { ResponsePreferencesRegressionTest.class.getDeclaredMethod(name).invoke(null); }
         catch (java.lang.reflect.InvocationTargetException failure) {
@@ -393,7 +470,11 @@ public final class ResponsePreferencesRegressionTest {
                     "legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection",
                     "unsavedModePreviewDoesNotPersistOrAlterPrompt", "groupedAiSavePreservesPreferencesPermissionsAndWorkspace",
                     "groupedPreferenceSavePreservesLatestAiAndToolSettings",
-                    "groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra"}) run(name);
+                    "groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra",
+                    "oldAiConfigurationMigratesOnceWithoutLosingProfilesOrModelLists",
+                    "providersKeepSeparateCredentialsAndImmutableOfficialDefaults",
+                    "modelSelectionActivatesOnlyItsProviderAndKeepsLegacyAccessorsCompatible",
+                    "independentSettingsWritesAndPartialDraftCommitDoNotClobberProviders"}) run(name);
             System.out.println(passed + " response preference tests passed");
         } finally {
             try (java.util.stream.Stream<Path> paths = Files.walk(build)) {

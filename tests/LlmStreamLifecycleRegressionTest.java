@@ -13,6 +13,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /** Stream ownership and completion through the official SDK against actual HTTP fixtures. */
 public final class LlmStreamLifecycleRegressionTest {
@@ -111,6 +113,7 @@ public final class LlmStreamLifecycleRegressionTest {
         final boolean silentBody;
         final String retryAfter;
         final boolean trickle;
+        final String detail;
         ErrorBodyServer(int status) throws IOException {
             this(status, true);
         }
@@ -121,14 +124,18 @@ public final class LlmStreamLifecycleRegressionTest {
             this(status, silentBody, retryAfter, false);
         }
         ErrorBodyServer(int status, boolean silentBody, String retryAfter, boolean trickle) throws IOException {
-            this.status = status; this.silentBody = silentBody; this.retryAfter = retryAfter; this.trickle = trickle;
+            this(status, silentBody, retryAfter, trickle, "incomplete provider detail");
+        }
+        ErrorBodyServer(int status, boolean silentBody, String retryAfter, boolean trickle, String detail) throws IOException {
+            this.status = status; this.silentBody = silentBody; this.retryAfter = retryAfter; this.trickle = trickle; this.detail = detail;
             executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
                 @Override public Thread newThread(Runnable task) {
                     Thread thread = new Thread(task, "fixture-error-body"); thread.setDaemon(true); return thread;
                 }
             });
             http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            http.setExecutor(executor); http.createContext("/v1/chat/completions", this); http.start();
+            http.setExecutor(executor); http.createContext("/v1/chat/completions", this);
+            http.createContext("/v1/models", this); http.start();
         }
         @Override public void handle(HttpExchange exchange) throws IOException {
             requests.incrementAndGet();
@@ -137,7 +144,9 @@ public final class LlmStreamLifecycleRegressionTest {
             finally { input.close(); }
             if (status == 503) exchange.getResponseHeaders().set("Retry-After", retryAfter);
             if (status == 302) exchange.getResponseHeaders().set("Location", "/v1/chat/completions");
-            byte[] detail = "incomplete provider detail".getBytes("UTF-8");
+            exchange.getResponseHeaders().set("x-request-id", "fixture-private-request-id");
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            byte[] detail = this.detail.getBytes("UTF-8");
             exchange.sendResponseHeaders(status, silentBody ? 1024 : detail.length);
             try {
                 exchange.getResponseBody().write(detail);
@@ -484,6 +493,107 @@ public final class LlmStreamLifecycleRegressionTest {
             }
         }
     }
+    private static void httpFailureRetainsPrivateProviderStatusAndCauseWithoutChangingUiError() throws Exception {
+        try (ErrorBodyServer server = new ErrorBodyServer(503, false)) {
+            LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + server.http.getAddress().getPort(), "fixture-no-match-key", "fixture");
+            config.providerId = "fixture-provider";
+            LlmClient.Reply reply = new LlmClient(config).send(Arrays.asList(Message.user("request only")), null, null);
+            JSONObject details = reply.diagnostic;
+            check(reply.error.startsWith("HTTP 503:") && details != null
+                    && details.getInt("http_status") == 503 && "http_error".equals(details.getString("stage"))
+                    && "fixture-provider".equals(details.getString("provider"))
+                    && "fixture-private-request-id".equals(details.getString("request_id"))
+                    && details.getString("provider_error").contains("incomplete provider detail")
+                    && details.getString("exception_class").contains("InternalServerException")
+                    && !reply.error.contains(" at ") && server.requests.get() == 1,
+                    "HTTP failure lost its private diagnostic or added it to the visible error: " + details);
+        }
+    }
+    private static void diagnosticsDistinguishHeaderWaitFromSilentStreamBody() throws Exception {
+        for (boolean headers : new boolean[]{true, false}) {
+            try (StreamingServer server = new StreamingServer("", null, false, true, false, headers ? 1500L : 0L)) {
+                LlmClient.Reply reply = send(server, headerClient(server, 1000, 4000), null);
+                JSONObject details = reply.diagnostic;
+                check(reply.error != null && details != null && details.getString("stage").equals(headers ? "headers" : "stream_body")
+                        && details.getBoolean("response_started") != headers && !details.getBoolean("has_progress")
+                        && details.getLong("elapsed_ms") >= 700 && details.getString("cause_class").contains("Timeout"),
+                        "Private diagnostic confused header and body timeout: " + details);
+            }
+        }
+    }
+    private static void providerEchoesOfCredentialsPromptsAndToolArgumentsAreRedacted() throws Exception {
+        String prompt = "private request line1\n\"line2\"";
+        String thought = "private reasoning transcript";
+        String arguments = new JSONObject().put("token", "private-tool-token").toString();
+        String detail = new JSONObject().put("error", new JSONObject().put("message",
+                "fixture-secret-key " + prompt + " " + thought + " " + arguments)).toString();
+        try (ErrorBodyServer server = new ErrorBodyServer(400, false, "0", false, detail)) {
+            LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + server.http.getAddress().getPort(), "fixture-secret-key", "fixture");
+            Message assistant = Message.assistant("previous private answer", new JSONArray().put(new JSONObject()
+                    .put("function", new JSONObject().put("name", "fixture").put("arguments", arguments))));
+            assistant.reasoning = thought;
+            LlmClient.Reply reply = new LlmClient(config).send(Arrays.asList(Message.user(prompt), assistant), null, null);
+            String stored = reply.diagnostic.toString();
+            check(!stored.contains("fixture-secret-key") && !stored.contains("private request")
+                    && !stored.contains(thought) && !stored.contains("private-tool-token")
+                    && stored.contains("400") && stored.length() <= 8192,
+                    "Private failure diagnostics retained echoed request secrets");
+        }
+    }
+    private static void modelListFailuresCarryTheSamePrivateDiagnostic() throws Exception {
+        try (ErrorBodyServer server = new ErrorBodyServer(403, false)) {
+            LlmClient.ModelsResult result = LlmClient.fetchModels("http://127.0.0.1:" + server.http.getAddress().getPort(),
+                    "fixture-model-list-key", "fixture-model-provider");
+            JSONObject details = result.diagnostic;
+            check(result.error.startsWith("HTTP 403:") && details != null
+                    && details.getInt("http_status") == 403 && "http_error".equals(details.getString("stage"))
+                    && "fixture-model-provider".equals(details.getString("provider"))
+                    && "GET".equals(details.getString("http_method")) && details.getString("endpoint").endsWith("/v1/models")
+                    && details.getString("cause_class").contains("PermissionDeniedException")
+                    && !details.toString().contains("fixture-model-list-key") && server.requests.get() == 1,
+                    "Model-list HTTP failure lost diagnostic context: " + details);
+        }
+    }
+    private static void clippedLongPromptEchoIsOmittedWithoutLosingHttpDiagnosis() throws Exception {
+        StringBuilder prompt = new StringBuilder("private-long-echo:");
+        for (int i = 0; i < 6000; i++) prompt.append('x');
+        String detail = new JSONObject().put("error", new JSONObject().put("message", prompt.toString())).toString();
+        try (ErrorBodyServer server = new ErrorBodyServer(400, false, "0", false, detail)) {
+            LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + server.http.getAddress().getPort(),
+                    "fixture-key-long-echo", "fixture");
+            LlmClient.Reply reply = new LlmClient(config).send(Arrays.asList(Message.user(prompt.toString())), null, null);
+            JSONObject stored = reply.diagnostic;
+            check(stored != null && stored.getInt("http_status") == 400
+                            && stored.getString("stage").equals("http_error")
+                            && stored.getString("provider_error").equals("供应商错误正文不完整，已省略")
+                            && stored.getString("exception_class").length() > 0 && stored.getString("cause_class").length() > 0
+                            && !stored.toString().contains("private-long-echo") && server.requests.get() == 1,
+                    "Clipped provider echo leaked request text or erased HTTP diagnosis");
+            check(reply.error.startsWith("HTTP 400:") && reply.error.contains("private-long-echo"),
+                    "Diagnostic omission changed the request classification or original error evidence");
+        }
+    }
+    private static void stalledPartialJsonErrorBodyIsOmittedWithoutChangingTheReadBudget() throws Exception {
+        for (String detail : new String[]{"{\"error\":{\"message\":\"private-partial-request",
+                "[{\"message\":\"private-partial-request"}) {
+            try (ErrorBodyServer server = new ErrorBodyServer(400, true, "0", false, detail)) {
+                LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + server.http.getAddress().getPort(),
+                        "fixture-key-partial-echo", "fixture");
+                config.timeoutMs = 6000; config.totalTimeoutMs = 9000;
+                long started = System.nanoTime();
+                LlmClient.Reply reply = new LlmClient(config).send(Arrays.asList(Message.user("private-partial-request-full")), null, null);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                JSONObject stored = reply.diagnostic;
+                check(reply.error.startsWith("HTTP 400:") && stored != null && stored.getInt("http_status") == 400
+                                && stored.getString("stage").equals("http_error") && stored.getBoolean("response_started")
+                                && stored.getString("provider_error").equals("供应商错误正文不完整，已省略")
+                                && stored.getString("exception_class").length() > 0
+                                && !stored.toString().contains("private-partial-request")
+                                && elapsed < 3000L && server.requests.get() == 1,
+                        "Partial stalled JSON leaked a prompt fragment, lost status, or waited for the model read budget");
+            }
+        }
+    }
     public static void main(String[] args) throws Exception {
         String[] cases = {"sseDoneClosesWithoutDrainingOpenStream", "firstDoneDoesNotWaitForAnotherNetworkRead",
                 "malformedSseStillClosesStream", "networkReadFailureStillClosesStream", "ordinaryBodyReadsToEofAndCloses",
@@ -495,7 +605,11 @@ public final class LlmStreamLifecycleRegressionTest {
                 "failedErrorBodyReadPreservesTheReceivedHttpStatus", "silentResponseBodyUsesTheConfiguredIdleBudget",
                 "totalBudgetStopsEvenAStreamWithContinuousModelOutput", "cancellationInterruptsSilentHeadersAndBodyImmediately",
                 "serverRetryAndRedirectInstructionsNeverRepeatRequestsInsideTransport",
-                "requestActivityTracksOnlyLiveSafeMonotonicTiming", "responseSizeLimitAppliesToSdkJsonAndSseBodies"};
+                "requestActivityTracksOnlyLiveSafeMonotonicTiming", "responseSizeLimitAppliesToSdkJsonAndSseBodies",
+                "httpFailureRetainsPrivateProviderStatusAndCauseWithoutChangingUiError",
+                "diagnosticsDistinguishHeaderWaitFromSilentStreamBody", "providerEchoesOfCredentialsPromptsAndToolArgumentsAreRedacted",
+                "modelListFailuresCarryTheSamePrivateDiagnostic", "clippedLongPromptEchoIsOmittedWithoutLosingHttpDiagnosis",
+                "stalledPartialJsonErrorBodyIsOmittedWithoutChangingTheReadBudget"};
         if (args.length > 0) cases = args;
         for (String name : cases) { LlmStreamLifecycleRegressionTest.class.getDeclaredMethod(name).invoke(null); System.out.println("PASS " + name); }
         System.out.println(cases.length + " stream lifecycle tests passed");

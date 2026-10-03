@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import javax.tools.JavaCompiler;
 import javax.tools.JavaFileObject;
@@ -51,24 +52,30 @@ public final class ChatStorePagingRegressionTest {
                 + "public int getInt(int i){return (int)getLong(i);} public boolean isNull(int i){return rows.get(at)[i]==null;} public void close(){} }");
         add(files, "android.database.sqlite.SQLiteOpenHelper",
                 "public abstract class SQLiteOpenHelper { private static final SQLiteDatabase db=new SQLiteDatabase();"
-                + "public SQLiteOpenHelper(android.content.Context c,String n,Object f,int v){}"
+                + "public static int requestedVersion;public SQLiteOpenHelper(android.content.Context c,String n,Object f,int v){requestedVersion=v;}"
                 + "public SQLiteDatabase getReadableDatabase(){return db;} public SQLiteDatabase getWritableDatabase(){return db;}"
                 + "public abstract void onCreate(SQLiteDatabase db); public abstract void onUpgrade(SQLiteDatabase db,int o,int n); }");
         add(files, "android.database.sqlite.SQLiteDatabase",
                 "import java.util.*; import android.database.Cursor; import android.content.ContentValues;"
                 + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5;"
                 + "private static final List<Map<String,Object>> rows=new ArrayList<Map<String,Object>>(); private static long next=1;"
-                + "public static final List<String> statements=new ArrayList<String>();"
-                + "public static void reset(){rows.clear();next=1;statements.clear();} public void execSQL(String s){statements.add(s);}"
-                + "public void execSQL(String s,Object[] a){if(!s.startsWith(\"DELETE FROM request_events WHERE session_id=? AND id NOT IN\")"
-                + "||!s.endsWith(\"ORDER BY id DESC LIMIT 200)\"))throw new AssertionError(s);"
+                + "public static final List<String> statements=new ArrayList<String>();public static boolean requestDiagnosticColumn;"
+                + "public static void reset(){rows.clear();next=1;statements.clear();requestDiagnosticColumn=false;} public void execSQL(String s){statements.add(s);"
+                + "if(s.startsWith(\"CREATE TABLE IF NOT EXISTS request_events\")&&s.contains(\"diagnostic TEXT\"))requestDiagnosticColumn=true;"
+                + "if(s.startsWith(\"ALTER TABLE request_events ADD COLUMN diagnostic\")){if(requestDiagnosticColumn)throw new AssertionError(\"Duplicate diagnostic column\");"
+                + "requestDiagnosticColumn=true;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"request_events\"))row.put(\"diagnostic\",\"\");}}"
+                + "public static List<Map<String,Object>> records(String table,long sid){List<Map<String,Object>> copy=new ArrayList<Map<String,Object>>();"
+                + "for(Map<String,Object> row:rows)if(row.get(\"table\").equals(table)&&((Number)row.get(\"session_id\")).longValue()==sid)copy.add(new HashMap<String,Object>(row));return copy;}"
+                + "public void execSQL(String s,Object[] a){String table=s.startsWith(\"DELETE FROM request_events WHERE session_id=? AND id NOT IN\")?\"request_events\":"
+                + "s.startsWith(\"DELETE FROM diagnostic_errors WHERE session_id=? AND id NOT IN\")?\"diagnostic_errors\":null;"
+                + "if(table==null||!s.contains(\"SELECT id FROM \"+table+\" WHERE session_id=?\")||!s.endsWith(\"ORDER BY id DESC LIMIT 200)\"))throw new AssertionError(s);"
                 + "long sid=((Number)a[0]).longValue();if(sid!=((Number)a[1]).longValue())throw new AssertionError(\"Retention crossed sessions\");"
                 + "List<Map<String,Object>> selected=new ArrayList<Map<String,Object>>();for(Map<String,Object> row:rows)"
-                + "if(row.get(\"table\").equals(\"request_events\")&&((Number)row.get(\"session_id\")).longValue()==sid)selected.add(row);"
+                + "if(row.get(\"table\").equals(table)&&((Number)row.get(\"session_id\")).longValue()==sid)selected.add(row);"
                 + "while(selected.size()>200)rows.remove(selected.remove(0));}"
                 + "public void beginTransaction(){} public void setTransactionSuccessful(){} public void endTransaction(){}"
                 + "public long insert(String table,String nullColumn,ContentValues values){Map<String,Object> row=new HashMap<String,Object>(values);"
-                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\"))rows.add(row);return id;}"
+                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\"))rows.add(row);return id;}"
                 + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){return insert(t,n,v);}"
                 + "public int update(String t,ContentValues v,String s,String[] a){if(t.equals(\"sessions\"))return 0;"
                 + "if(!s.equals(\"id=?\"))throw new AssertionError(s);int changed=0;for(Map<String,Object> row:rows)"
@@ -260,12 +267,17 @@ public final class ChatStorePagingRegressionTest {
     private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
         Object store = fresh();
         Object db = databaseType.getConstructor().newInstance();
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 11);
+        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 12,
+                "Fresh databases do not request the diagnostics schema version");
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 12);
         @SuppressWarnings("unchecked")
         List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 2 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
-                        && sql.get(1).contains("request_events(session_id,id)"),
-                "Version 10 upgrade did not create only the diagnostic table and index");
+        check(sql.size() == 4 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
+                        && sql.get(0).contains("diagnostic TEXT NOT NULL DEFAULT ''")
+                        && sql.get(1).contains("request_events(session_id,id)")
+                        && sql.get(2).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
+                        && sql.get(3).contains("diagnostic_errors(session_id,id)"),
+                "Version 10 direct upgrade omitted evidence tables or attempted to add an existing diagnostic column");
         MethodAccess.recordRequest(store, 7, "review", 123, "error", "权限检查失败\n服务暂不可用", 0);
         MethodAccess.recordRequest(store, 7, "compact", 0, "cancelled", "用户停止", 1);
         List<?> events = MethodAccess.requestEvents(store, 7, 20);
@@ -278,10 +290,126 @@ public final class ChatStorePagingRegressionTest {
         catch (UnsupportedOperationException expected) { }
     }
 
+    private static void versionElevenMigrationPreservesRequestRows() throws Exception {
+        Object store = fresh();
+        append(store, 7, Message.user("preserved conversation"));
+        Object db = databaseType.getConstructor().newInstance();
+        Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
+        @SuppressWarnings("unchecked") Map<String, Object> old = (Map<String, Object>) valuesType.getConstructor().newInstance();
+        old.put("session_id", 7L); old.put("recorded_at", 123L); old.put("elapsed_ms", 41L);
+        old.put("purpose", "compact"); old.put("outcome", "cancelled"); old.put("reason", "old reason"); old.put("retry_count", 2);
+        long oldId = (Long) databaseType.getMethod("insert", String.class, String.class, valuesType)
+                .invoke(db, "request_events", null, old);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 12);
+        @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
+        check(sql.size() == 3 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
+                        && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
+                        && sql.get(2).contains("diagnostic_errors(session_id,id)"),
+                "Version 11 migration recreated request history or did not apply the additive column default");
+        List<?> before = MethodAccess.requestEvents(store, 7, 20);
+        check(before.size() == 1 && number(before.get(0), "id") == oldId && number(before.get(0), "recordedAt") == 123
+                        && number(before.get(0), "elapsedMs") == 41 && "compact".equals(field(before.get(0), "purpose"))
+                        && "cancelled".equals(field(before.get(0), "outcome")) && "old reason".equals(field(before.get(0), "reason"))
+                        && (Integer) field(before.get(0), "retryCount") == 2 && "".equals(field(before.get(0), "diagnostic")),
+                "The migration lost an existing attempt or failed to decode the new empty diagnostic default");
+        MethodAccess.recordRequest(store, 7, "model", 3, "success", "", 0, "{\"provider\":\"grok\"}");
+        List<?> after = MethodAccess.requestEvents(store, 7, 20);
+        check(after.size() == 2 && number(after.get(1), "id") == oldId
+                        && "grok".equals(new JSONObject((String) field(after.get(0), "diagnostic")).getString("provider"))
+                        && "preserved conversation".equals(messages(page(store, 7, -1, 48)).get(0).content),
+                "New diagnostic writes after migration changed the old log or conversation");
+    }
+
+    private static String repeated(char value, int count) {
+        char[] text = new char[count]; Arrays.fill(text, value); return new String(text);
+    }
+
+    private static void structuredRequestDiagnosticsAreRedactedAndBounded() throws Exception {
+        Object store = fresh();
+        append(store, 7, Message.user("private user request"));
+        String evidence = new JSONObject().put("provider", "deepseek").put("status_code", 401)
+                .put("api_key", "sensitive-key").put("Authorization", "Bearer opaque-secret")
+                .put("messages", new JSONArray().put("private user request"))
+                .put("endpoint", "https://user:credential@example.test/v1/chat?api_key=query-secret")
+                .put("error", new JSONObject().put("code", "invalid_model").put("message", "model unavailable"))
+                .put("response_body", "{\"password\":\"nested-secret\",\"error\":\"bad model\"}").toString();
+        MethodAccess.recordRequest(store, 7, "unknown", -10, "unexpected", "Bearer opaque-secret\n" + repeated('x', 250), -2, evidence);
+        Object event = MethodAccess.requestEvents(store, 7, 20).get(0);
+        String detail = (String) field(event, "diagnostic"), reason = (String) field(event, "reason");
+        JSONObject parsed = new JSONObject(detail);
+        check("deepseek".equals(parsed.getString("provider")) && parsed.getInt("status_code") == 401
+                        && "invalid_model".equals(parsed.getJSONObject("error").getString("code"))
+                        && "https://example.test/v1/chat".equals(parsed.getString("endpoint")),
+                "Structured safe failure evidence or sanitized endpoint was lost");
+        for (String secret : Arrays.asList("sensitive-key", "opaque-secret", "private user request", "credential", "query-secret", "nested-secret"))
+            check(!detail.contains(secret) && !reason.contains(secret), "Request diagnostics retained confidential input: " + secret);
+        check(reason.length() <= 160 && !reason.contains("\n") && "model".equals(field(event, "purpose"))
+                        && "error".equals(field(event, "outcome")) && number(event, "elapsedMs") == 0
+                        && (Integer) field(event, "retryCount") == 0,
+                "Untrusted metadata was not normalized and bounded");
+        MethodAccess.recordRequest(store, 7, "review", 1, "error", "", 0,
+                new JSONObject().put("error", new JSONObject().put("message", repeated('x', 20000))).toString());
+        detail = (String) field(MethodAccess.requestEvents(store, 7, 20).get(0), "diagnostic");
+        check(detail.length() <= 8192 && new JSONObject(detail).getJSONObject("error").getString("message").length() < 20000,
+                "Large failure bodies exceeded the local evidence cap");
+        MethodAccess.recordRequest(store, 7, "model", 1, "error", "", 0, "Bearer plaintext-secret");
+        detail = (String) field(MethodAccess.requestEvents(store, 7, 20).get(0), "diagnostic");
+        check(!detail.contains("plaintext-secret") && new JSONObject(detail).has("detail"), "Plain text failure evidence was not structured and scrubbed");
+        MethodAccess.recordRequest(store, -1, "model", 1, "error", "", 0, evidence);
+        check(MethodAccess.requestEvents(store, -1, 20).isEmpty(), "Global configuration errors became model request history");
+        @SuppressWarnings("unchecked") List<Message> history = (List<Message>) storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
+        check(history.size() == 1 && "private user request".equals(history.get(0).content), "Request evidence was injected into model context");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> records(String table, long sid) throws Exception {
+        return (List<Map<String, Object>>) databaseType.getMethod("records", String.class, long.class).invoke(null, table, sid);
+    }
+
+    private static void configurationDiagnosticsAreRetainedAndSessionIsolated() throws Exception {
+        Object store = fresh();
+        append(store, 7, Message.user("keep model history"));
+        MethodAccess.recordDiagnostic(store, 8, "toolkit", "other session", "{\"status\":\"failed\"}");
+        for (int i = 0; i < 205; i++) {
+            MethodAccess.recordDiagnostic(store, -1, "configuration", "global " + i, "{\"number\":" + i + "}");
+            MethodAccess.recordDiagnostic(store, 7, "tool", "conversation " + i, "{\"number\":" + i + "}");
+        }
+        List<Map<String, Object>> global = records("diagnostic_errors", -1), conversation = records("diagnostic_errors", 7);
+        check(global.size() == 200 && "global 5".equals(global.get(0).get("summary"))
+                        && "global 204".equals(global.get(199).get("summary")) && conversation.size() == 200
+                        && "conversation 5".equals(conversation.get(0).get("summary")) && records("diagnostic_errors", 8).size() == 1,
+                "Diagnostic retention crossed global/session boundaries or retained stale failures");
+        MethodAccess.recordDiagnostic(store, -1, "Bearer source-secret\n" + repeated('s', 100),
+                "api_key=summary-secret\r" + repeated('s', 200),
+                "{\"password\":\"detail-secret\",\"error\":{\"message\":\"" + repeated('x', 20000) + "\"}}");
+        global = records("diagnostic_errors", -1);
+        Map<String, Object> last = global.get(global.size() - 1);
+        String source = (String) last.get("source"), summary = (String) last.get("summary"), detail = (String) last.get("detail");
+        check(source.length() <= 80 && summary.length() <= 160 && detail.length() <= 8192
+                        && !source.contains("source-secret") && !summary.contains("summary-secret") && !detail.contains("detail-secret")
+                        && !source.contains("\n") && !summary.contains("\r") && ((Number) last.get("recorded_at")).longValue() > 0
+                        && new JSONObject(detail).has("error"),
+                "Configuration failures lost structured evidence, redaction, timestamps or size limits");
+        check(messages(page(store, 7, -1, 48)).size() == 1 && MethodAccess.requestEvents(store, 7, 20).isEmpty()
+                        && MethodAccess.requestEvents(store, -1, 20).isEmpty(),
+                "Configuration/tool errors polluted model transcript or request attempts");
+        storeType.getMethod("delete", long.class).invoke(store, 7L);
+        check(records("diagnostic_errors", 7).isEmpty() && records("diagnostic_errors", -1).size() == 200
+                        && records("diagnostic_errors", 8).size() == 1,
+                "Deleting a conversation left its diagnostic errors or removed global/other session failures");
+    }
+
     private static final class MethodAccess {
         static void recordRequest(Object store, long sid, String purpose, long ms, String outcome, String reason, int retry) throws Exception {
             storeType.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class)
                     .invoke(store, sid, purpose, ms, outcome, reason, retry);
+        }
+        static void recordRequest(Object store, long sid, String purpose, long ms, String outcome, String reason, int retry, String diagnostic) throws Exception {
+            storeType.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class, String.class)
+                    .invoke(store, sid, purpose, ms, outcome, reason, retry, diagnostic);
+        }
+        static void recordDiagnostic(Object store, long sid, String source, String summary, String detail) throws Exception {
+            storeType.getMethod("recordDiagnostic", long.class, String.class, String.class, String.class).invoke(store, sid, source, summary, detail);
         }
         static List<?> requestEvents(Object store, long sid, int limit) throws Exception {
             return (List<?>) storeType.getMethod("requestEvents", long.class, int.class).invoke(store, sid, limit);
@@ -333,9 +461,10 @@ public final class ChatStorePagingRegressionTest {
             try (StandardJavaFileManager manager = compiler.getStandardFileManager(null, null, null)) {
                 for (JavaFileObject source : manager.getJavaFileObjects(Paths.get(args[0],
                         "app/src/main/java/com/mkei/backcast/ChatStore.java").toFile(), Paths.get(args[0],
-                        "app/src/main/java/com/mkei/backcast/agent/Goal.java").toFile())) files.add(source);
+                        "app/src/main/java/com/mkei/backcast/agent/Goal.java").toFile(), Paths.get(args[0],
+                        "app/src/main/java/com/mkei/backcast/agent/Diagnostics.java").toFile())) files.add(source);
                 check(compiler.getTask(null, manager, null, Arrays.asList("-encoding", "UTF-8", "-d", output.toString(),
-                        "-source", "7", "-target", "7", "-Xlint:-options", "-classpath", System.getProperty("java.class.path")),
+                        "-source", "8", "-target", "8", "-Xlint:-options", "-classpath", System.getProperty("java.class.path")),
                         null, files).call(), "ChatStore fixture did not compile");
             }
             try (URLClassLoader loader = new URLClassLoader(new URL[]{output.toUri().toURL()})) {
@@ -346,7 +475,8 @@ public final class ChatStorePagingRegressionTest {
                         "toolPageRetainsOnlyLeadingLabels", "hugeTurnStillHasHardPageLimit",
                         "messageMetadataSurvivesPaging", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
                         "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
-                        "legacyDatabaseUpgradeAddsLocalRequestDiagnostics")) {
+                        "legacyDatabaseUpgradeAddsLocalRequestDiagnostics", "versionElevenMigrationPreservesRequestRows",
+                        "structuredRequestDiagnosticsAreRedactedAndBounded", "configurationDiagnosticsAreRetainedAndSessionIsolated")) {
                     ChatStorePagingRegressionTest.class.getDeclaredMethod(name).invoke(null);
                     System.out.println("PASS " + name);
                     passed++;

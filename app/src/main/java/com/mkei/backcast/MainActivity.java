@@ -1551,7 +1551,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /**
      * 顶部模型胶囊的弹出菜单。
-     * 思考强度与工具权限。
+     * 已配置供应商的模型、思考强度与工具权限。
      */
     private void showModelPopup() {
         if (modelPopup != null && modelPopup.isShowing()) {
@@ -1568,10 +1568,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 R.color.text_primary);
         card.addView(title, wrapParams());
 
-        TextView current = popupText(displayModelName(settings.model()), 16,
+        TextView current = popupText(activeModelLabel(), 16,
                 R.color.text_secondary);
         current.setPadding(0, dp(4), 0, dp(12));
         card.addView(current, wrapParams());
+        appendModelPicker(card);
 
         TextView reasoningTitle = popupText(getString(R.string.popup_reasoning), 18,
                 R.color.text_primary);
@@ -1610,6 +1611,128 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         card.startAnimation(AnimationUtils.loadAnimation(this, R.anim.popup_in));
         View anchor = modelChipAnchor != null ? modelChipAnchor : modelChip;
         showAbove(modelPopup, anchor, dp(280));
+    }
+
+    /** Saved provider/model choices are grouped without displaying credentials or endpoints. */
+    private void appendModelPicker(LinearLayout card) {
+        TextView title = popupText(getString(R.string.popup_providers), 18, R.color.text_primary);
+        title.setPadding(0, dp(10), 0, dp(4));
+        card.addView(title, wrapParams());
+        boolean available = false;
+        for (Settings.AiProfile profile : settings.aiProfiles()) {
+            if (profile.baseUrl.length() == 0 || profile.apiKey.length() == 0) continue;
+            List<String> models = savedModels(profile);
+            if (models.isEmpty()) continue;
+            available = true;
+            TextView provider = popupText(profile.name, 13, R.color.text_secondary);
+            provider.setPadding(dp(8), dp(10), dp(8), dp(3));
+            card.addView(provider, wrapParams());
+            for (String model : models) addModelOption(card, profile.id, model);
+        }
+        TextView configure = popupText(getString(available ? R.string.popup_configure_ai
+                : R.string.popup_models_empty), 14, R.color.text_secondary);
+        configure.setMinHeight(dp(44));
+        configure.setGravity(Gravity.CENTER_VERTICAL);
+        configure.setPadding(dp(8), dp(4), dp(8), dp(4));
+        configure.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                if (modelPopup != null) modelPopup.dismiss();
+                startActivity(new Intent(MainActivity.this, AiConfigActivity.class));
+            }
+        });
+        card.addView(configure, wrapParams());
+    }
+
+    private static List<String> savedModels(Settings.AiProfile profile) {
+        List<String> models = new ArrayList<String>();
+        for (String raw : profile.modelList) {
+            String model = raw == null ? "" : raw.trim();
+            if (model.length() > 0 && model.indexOf('\n') < 0 && model.indexOf('\r') < 0
+                    && !models.contains(model)) models.add(model);
+        }
+        if (profile.model.length() > 0 && profile.model.indexOf('\n') < 0 && profile.model.indexOf('\r') < 0
+                && !models.contains(profile.model)) models.add(profile.model);
+        return models;
+    }
+
+    private void addModelOption(LinearLayout card, final String providerId, final String model) {
+        final long sid = sessionId;
+        final AgentLoop target = loop;
+        final int token = liveToken;
+        TextView row = popupText(displayModelName(model), 16, R.color.text_primary);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinHeight(dp(46));
+        row.setPadding(dp(12), 0, dp(12), 0);
+        if (providerId.equals(settings.activeProviderId()) && model.equals(settings.model())) {
+            row.setBackgroundResource(R.drawable.bg_popup_selected);
+            row.setText("✓ " + displayModelName(model));
+        }
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { chooseAiModel(providerId, model, sid, target, token); }
+        });
+        card.addView(row, wrapParams());
+    }
+
+    private boolean modelSelectionCurrent(long sid, AgentLoop target, int token) {
+        return !activityDestroyed && !isFinishing() && !sessionOpening
+                && sessionId == sid && loop == target && liveToken == token;
+    }
+
+    private Settings.AiProfile modelChoice(String providerId, String model) {
+        for (Settings.AiProfile profile : settings.aiProfiles()) {
+            if (profile.id.equals(providerId) && profile.baseUrl.length() > 0 && profile.apiKey.length() > 0
+                    && savedModels(profile).contains(model)) return profile;
+        }
+        return null;
+    }
+
+    private void chooseAiModel(final String providerId, final String model, final long sid,
+                               final AgentLoop target, final int token) {
+        if (!modelSelectionCurrent(sid, target, token)) return;
+        if (modelPopup != null) modelPopup.dismiss();
+        if (providerId.equals(settings.activeProviderId()) && model.equals(settings.model())) return;
+        Settings.AiProfile profile = modelChoice(providerId, model);
+        if (profile == null) return;
+        if (target == null || !target.busy()) {
+            applyAiModelSelection(providerId, model, sid, target, token);
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.popup_switch_running_title)
+                .setMessage(getString(R.string.popup_switch_running_body, profile.name, displayModelName(model)))
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.popup_switch_confirm, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        applyAiModelSelection(providerId, model, sid, target, token);
+                    }
+                }).show();
+    }
+
+    private void applyAiModelSelection(String providerId, String model, long sid, AgentLoop target, int token) {
+        if (!modelSelectionCurrent(sid, target, token) || modelChoice(providerId, model) == null) return;
+        if (target != null && target.busy()) cancelForModelSwitch(target);
+        settings.selectAiModel(providerId, model);
+        RunHub.get(this).retargetIfNeeded();
+        updateStatus();
+    }
+
+    /** Cancel uncommitted work only; the loop and its completed tool history stay intact. */
+    private void cancelForModelSwitch(AgentLoop target) {
+        liveToken++;
+        if (target.goalActive()) target.pauseGoal();
+        target.cancel();
+        cancelApprovals();
+        hidePending();
+        settleWork();
+        if (compactLive) dropCompactRow();
+        else settleCompact();
+        setBusy(false);
+        refreshGoal();
+    }
+
+    private String activeModelLabel() {
+        Settings.AiProfile profile = settings.activeAiProfile();
+        return profile.name + " · " + displayModelName(profile.model);
     }
 
     private void showToolkit() {
@@ -2018,7 +2141,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 modelChip.setText(R.string.status_no_model);
             } else {
                 String effort = effortLabel(settings.effectiveReasoningEffort());
-                String name = displayModelName(settings.model());
+                String name = activeModelLabel();
                 modelChip.setText(effort.length() == 0 ? name : name + "  " + effort);
             }
         }
@@ -2528,7 +2651,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     } else {
                         settleCompact();
                     }
-                    addErrorText(message);
+                    addErrorText("运行已停止，详细错误已写入诊断数据库。点击查看请求状态。");
                     refreshGoal();
                 }
             });
@@ -3286,6 +3409,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         tv.setPadding(0, dp(6), 0, dp(10));
         Icons.left(tv, Icons.WARNING, getResources().getColor(R.color.error_text), dp(16));
         enableCopy(tv);
+        tv.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { showRequestDiagnostics(); }
+        });
 
         host().addView(tv, fullWidth());
         autoScroll();
@@ -4416,7 +4542,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private String requestDiagnosticsText(List<ChatStore.RequestEvent> events) {
-        StringBuilder text = new StringBuilder("本会话最近 20 次请求\n仅记录请求耗时和安全错误分类；不是工具执行耗时。\n");
+        StringBuilder text = new StringBuilder("本会话最近 20 次请求\n这里显示模型请求耗时，不是工具执行耗时。详细错误保存在本地诊断日志，不进入聊天上下文。\n");
         if (events.isEmpty()) return text.append("\n暂无记录。更新前的请求没有诊断数据。").toString();
         for (ChatStore.RequestEvent event : events) {
             String purpose = "compact".equals(event.purpose) ? "上下文压缩"

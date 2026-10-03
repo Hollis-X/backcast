@@ -46,6 +46,8 @@ public class LlmClient {
         public String baseUrl;
         public String apiKey;
         public String model;
+        /** Stable configuration identifier for private request diagnostics. */
+        public String providerId;
         public int timeoutMs = 120000;
         public int maxTokens;
         public int totalTimeoutMs;
@@ -122,6 +124,8 @@ public class LlmClient {
         public String reasoning;
         public String raw;
         public String error;
+        /** Private failure evidence for the request recorder, never a model/UI message. */
+        public JSONObject diagnostic;
         /** 这一次请求服务端报的用量。0 表示对方没给。 */
         public long promptTokens;
         public long completionTokens;
@@ -222,6 +226,9 @@ public class LlmClient {
         volatile BufferedSource source;
         volatile int status;
         String errorDetail;
+        String requestId, contentType;
+        String stage = "prepare";
+        String requestMethod = "POST";
         long idleDeadlineNanos, totalDeadlineNanos;
         int maxChars;
     }
@@ -252,6 +259,8 @@ public class LlmClient {
                             if (mine.dead) { chain.call().cancel(); throw new java.io.IOException("Cancelled"); }
                             Response response = chain.proceed(chain.request());
                             mine.status = response.code(); mine.responseStarted = true;
+                            mine.requestId = response.header("x-request-id");
+                            mine.contentType = response.header("Content-Type");
                             if (response.body() != null) {
                                 if (mine.status >= 200 && mine.status < 300 && mine.maxChars > 0)
                                     response = limitBody(response, mine.maxChars);
@@ -260,6 +269,7 @@ public class LlmClient {
                                         + TimeUnit.MILLISECONDS.toNanos(Math.max(1000L, config.timeoutMs));
                                 configureDeadline(mine, 0L);
                                 if (mine.status < 200 || mine.status >= 300) {
+                                    mine.stage = "http_error";
                                     MediaType type = response.body().contentType();
                                     String detail = readErrorDetail(response);
                                     mine.errorDetail = detail;
@@ -350,6 +360,7 @@ public class LlmClient {
                     verbosityUnsupported = true;
                     includeVerbosity = false;
                 } else {
+                    if (reply.error != null) sealDiagnostic(reply, mine, messages);
                     return reply;
                 }
             }
@@ -372,6 +383,7 @@ public class LlmClient {
         if (mine.dead) {
             return reply;
         }
+        mine.requestId = null; mine.contentType = null; mine.responseStarted = false; mine.stage = "prepare";
         SdkSession sdk = null;
         HttpResponseFor<StreamResponse<ChatCompletionChunk>> response = null;
         StreamResponse<ChatCompletionChunk> stream = null;
@@ -423,6 +435,7 @@ public class LlmClient {
                 params.putAdditionalBodyProperty(entry.getKey(), JsonValue.from(entry.getValue()));
             params.putAdditionalHeader("Accept-Encoding", "identity");
             waitingHeaders = true;
+            mine.stage = "headers";
             response = sdk.client.chat().completions().withRawResponse().createStreaming(params.build());
             waitingHeaders = false;
             if (mine.dead) {
@@ -432,9 +445,11 @@ public class LlmClient {
             for (String value : response.headers().values("Content-Type"))
                 if (value.toLowerCase(java.util.Locale.US).contains("application/json")) jsonResponse = true;
             if (jsonResponse) {
+                mine.stage = "json_body";
                 String text = sdk.options.jsonMapper().readTree(response.body()).toString();
                 reply.raw = text; parseInto(reply, text); emitFull(reply, sink);
             } else {
+                mine.stage = "stream_body";
                 stream = response.parse();
                 List<CallAcc> calls = new ArrayList<CallAcc>();
                 long finishedDeadline = 0L;
@@ -459,12 +474,19 @@ public class LlmClient {
                     Throwable failure = rootCause(streamFailure);
                     if (reply.finishReason == null) {
                         if (failure instanceof java.io.InterruptedIOException
-                                && (mine.totalDeadlineNanos == 0L || System.nanoTime() < mine.totalDeadlineNanos)) noteIdle(reply, calls);
+                                && (mine.totalDeadlineNanos == 0L || System.nanoTime() < mine.totalDeadlineNanos)) {
+                            noteIdle(reply, calls);
+                            if (reply.error != null) reply.diagnostic = diagnostic(mine, streamFailure);
+                        }
                         else throw streamFailure;
                     }
                 }
                 if (!mine.dead && reply.error == null) {
                     reply.toolCalls = callsToJson(calls); validateToolCalls(reply);
+                    if (reply.error != null) {
+                        mine.stage = "validation";
+                        reply.diagnostic = diagnostic(mine, null);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -478,9 +500,11 @@ public class LlmClient {
                     reply.error = "HTTP " + mine.status + ": " + trim(detail, 500);
                 } else reply.error = (waitingHeaders && failure instanceof java.io.InterruptedIOException
                         ? "响应头等待超时：" : "") + failure.getClass().getSimpleName() + ": " + failure.getMessage();
+                reply.diagnostic = diagnostic(mine, e);
             }
         } finally {
             reply.finishText();
+            if (reply.error != null && reply.diagnostic == null) reply.diagnostic = diagnostic(mine, null);
             if (stream != null) try { stream.close(); } catch (RuntimeException closeFailure) { }
             if (response != null) try { response.close(); } catch (RuntimeException closeFailure) { }
             if (sdk != null) try { sdk.close(); } catch (RuntimeException closeFailure) { }
@@ -498,6 +522,98 @@ public class LlmClient {
         reply.toolCalls = null;
         reply.reasoning = null;
         reply.displayParts = null;
+        reply.diagnostic = null;
+    }
+
+    private JSONObject diagnostic(Attempt mine, Throwable failure) {
+        JSONObject result = new JSONObject();
+        try {
+            long now = System.nanoTime();
+            result.put("provider", config.providerId == null ? "" : trim(config.providerId, 128));
+            result.put("model", config.model == null ? "" : trim(config.model, 128));
+            // Request bodies, credentials, URL query strings and userinfo are deliberately absent.
+            try {
+                java.net.URI endpoint = new java.net.URI("GET".equals(mine.requestMethod) ? config.modelsUrl() : config.baseUrl);
+                result.put("endpoint", trim(new java.net.URI(endpoint.getScheme(), null, endpoint.getHost(),
+                        endpoint.getPort(), endpoint.getPath(), null, null).toString(), 512));
+            } catch (Exception invalidEndpoint) { result.put("endpoint", "invalid"); }
+            result.put("stage", mine.stage);
+            result.put("http_method", mine.requestMethod);
+            result.put("http_status", mine.status);
+            result.put("response_started", mine.responseStarted);
+            result.put("has_progress", mine.lastProgressNanos > 0L);
+            result.put("elapsed_ms", Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - mine.startedNanos)));
+            result.put("quiet_ms", Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now
+                    - (mine.lastProgressNanos == 0L ? mine.startedNanos : mine.lastProgressNanos))));
+            if (mine.requestId != null) result.put("request_id", trim(mine.requestId, 256));
+            if (mine.contentType != null) result.put("content_type", trim(mine.contentType, 256));
+            if (mine.errorDetail != null) result.put("provider_error", trim(mine.errorDetail, 4096));
+            if (failure != null) {
+                result.put("exception_class", failure.getClass().getName());
+                result.put("cause_class", rootCause(failure).getClass().getName());
+                StringBuilder frames = new StringBuilder();
+                java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(
+                        new java.util.IdentityHashMap<Throwable, Boolean>());
+                int count = 0;
+                while (failure != null && seen.add(failure) && count < 256 && frames.length() < 3072) {
+                    frames.append(failure.getClass().getName()).append('\n');
+                    for (StackTraceElement frame : failure.getStackTrace()) {
+                        if (++count > 256 || frames.length() >= 3072) break;
+                        frames.append(" at ").append(frame).append('\n');
+                    }
+                    failure = failure.getCause();
+                }
+                result.put("stack", trim(frames.toString(), 3072));
+            }
+        } catch (Exception unavailableMetadata) {
+            // Diagnostics must not replace the request's actual result.
+        }
+        return result;
+    }
+
+    private void sealDiagnostic(Reply reply, Attempt mine, List<Message> messages) {
+        try {
+            if (reply.diagnostic == null) reply.diagnostic = diagnostic(mine, null);
+            String providerError = reply.diagnostic.optString("provider_error", "");
+            if (incompleteDiagnosticBody(providerError))
+                reply.diagnostic.put("provider_error", "供应商错误正文不完整，已省略");
+            List<String> secrets = new ArrayList<String>();
+            secrets.add(config.apiKey);
+            for (Message message : messages) if (message != null) {
+                secrets.add(message.content); secrets.add(message.reasoning);
+                diagnosticArguments(message.toolCalls, secrets);
+            }
+            secrets.add(reply.content); secrets.add(reply.reasoning);
+            diagnosticArguments(reply.toolCalls, secrets);
+            reply.diagnostic = new JSONObject(Diagnostics.boundedJson(reply.diagnostic,
+                    secrets.toArray(new String[secrets.size()])));
+        } catch (Exception unavailableDiagnostics) {
+            reply.diagnostic = null;
+        }
+    }
+
+    /** A clipped echo cannot be safely matched against the full request's sensitive strings. */
+    private static boolean incompleteDiagnosticBody(String body) {
+        if (body == null || body.length() == 0) return false;
+        if (body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= 4096) return true;
+        String text = body.trim();
+        if (!text.startsWith("{") && !text.startsWith("[")) return false;
+        try {
+            JSONTokener parser = new JSONTokener(text);
+            Object value = parser.nextValue();
+            return (!(value instanceof JSONObject) && !(value instanceof JSONArray)) || parser.nextClean() != 0;
+        } catch (Exception incomplete) {
+            return true;
+        }
+    }
+
+    private static void diagnosticArguments(JSONArray calls, List<String> secrets) {
+        if (calls == null) return;
+        for (int i = 0; i < calls.length(); i++) {
+            JSONObject call = calls.optJSONObject(i);
+            JSONObject function = call == null ? null : call.optJSONObject("function");
+            if (function != null) secrets.add(function.optString("arguments", ""));
+        }
     }
 
     /** HTTP failure details are optional: cap both memory and time before applying request policy. */
@@ -824,18 +940,27 @@ public class LlmClient {
     public static class ModelsResult {
         public List<String> models = new ArrayList<String>();
         public String error;
+        public JSONObject diagnostic;
     }
 
     /** 请求 /v1/models，返回可用模型 id 列表。 */
     public static ModelsResult fetchModels(String baseUrl, String apiKey) {
+        return fetchModels(baseUrl, apiKey, null);
+    }
+
+    public static ModelsResult fetchModels(String baseUrl, String apiKey, String providerId) {
         ModelsResult result = new ModelsResult();
         SdkSession sdk = null;
+        LlmClient owner = null;
+        Attempt mine = new Attempt(); mine.startedNanos = System.nanoTime();
+        mine.totalDeadlineNanos = mine.startedNanos + TimeUnit.SECONDS.toNanos(30L);
+        mine.stage = "models_headers";
+        mine.requestMethod = "GET";
         try {
             Config cfg = new Config(baseUrl, apiKey, "");
             cfg.timeoutMs = 30000; cfg.totalTimeoutMs = 30000;
-            LlmClient owner = new LlmClient(cfg);
-            Attempt mine = new Attempt(); mine.startedNanos = System.nanoTime();
-            mine.totalDeadlineNanos = mine.startedNanos + TimeUnit.SECONDS.toNanos(30L);
+            cfg.providerId = providerId;
+            owner = new LlmClient(cfg);
             sdk = owner.new SdkSession(mine);
             for (Model model : sdk.client.models().list().data()) {
                 String id = model.id();
@@ -850,6 +975,11 @@ public class LlmClient {
             result.error = e instanceof com.openai.errors.OpenAIServiceException
                     ? "HTTP " + ((com.openai.errors.OpenAIServiceException) e).statusCode() + ": " + trim(e.getMessage(), 300)
                     : rootCause(e).getClass().getSimpleName() + ": " + rootCause(e).getMessage();
+            if (owner != null) {
+                Reply failure = new Reply(); failure.diagnostic = owner.diagnostic(mine, e);
+                owner.sealDiagnostic(failure, mine, java.util.Collections.<Message>emptyList());
+                result.diagnostic = failure.diagnostic;
+            }
         } finally {
             if (sdk != null) try { sdk.close(); } catch (RuntimeException closeFailure) { }
         }

@@ -105,10 +105,19 @@ public class AgentLoop {
         void replace(long sessionId, List<Message> messages);
     }
 
-    /** Transport diagnostics stay outside model messages and contain no response body or credentials. */
+    /** Transport diagnostics stay outside model messages. */
     public interface RequestRecorder {
         void recordRequest(long sessionId, String purpose, long elapsedMs, String outcome,
                 String reason, int retryCount);
+    }
+
+    public interface DetailedRequestRecorder extends RequestRecorder {
+        void recordRequest(long sessionId, String purpose, long elapsedMs, String outcome,
+                String reason, int retryCount, String diagnostic);
+    }
+
+    public interface ErrorRecorder {
+        void recordDiagnostic(long sessionId, String source, String summary, String detail);
     }
 
     /** 把「还在跑」和目标写进库。进程被杀掉之后靠这个接上。 */
@@ -211,6 +220,8 @@ public class AgentLoop {
     private String coordinationOwner;
     private volatile boolean refused;
     private Recorder recorder;
+    private volatile DetailedRequestRecorder detailedRequestRecorder;
+    private volatile ErrorRecorder errorRecorder;
     private int contextLimit = DEFAULT_CONTEXT_LIMIT;
     private float compactRatio = DEFAULT_COMPACT_RATIO;
     private long contextTokenBaseline;
@@ -337,6 +348,12 @@ public class AgentLoop {
 
     public void setRecorder(Recorder recorder) {
         this.recorder = recorder;
+    }
+
+    /** Child checkpoints and private diagnostics have independent storage lifetimes. */
+    public void setDiagnosticRecorder(DetailedRequestRecorder requests, ErrorRecorder errors) {
+        detailedRequestRecorder = requests;
+        errorRecorder = errors;
     }
 
     /** 设置工具调用的放行策略；传 null 表示完全访问，直接执行。 */
@@ -483,7 +500,12 @@ public class AgentLoop {
             UiEventBuffer.Event event = event(UiEventBuffer.END, gen, value);
             event.name = name; emit(event);
         }
-        @Override public void onError(int gen, String value) { emit(event(UiEventBuffer.ERROR, gen, value)); }
+        @Override public void onError(int gen, String value) {
+            JSONObject evidence = new JSONObject();
+            try { evidence.put("error", value); } catch (Exception ignored) { }
+            recordError(evidence);
+            emit(event(UiEventBuffer.ERROR, gen, value));
+        }
         @Override public void onContextUsage(int gen, int used, int limit) {
             UiEventBuffer.Event event = event(UiEventBuffer.CONTEXT, gen, "");
             event.first = used; event.second = limit; emit(event);
@@ -1219,7 +1241,7 @@ public class AgentLoop {
         LlmClient current;
         final Object lease = new Object();
         long requestSession;
-        Recorder requestRecorder;
+        Object requestRecorder;
         synchronized (lock) {
             if (stale(token, gen)) return new LlmClient.Reply();
             current = client;
@@ -1228,7 +1250,7 @@ public class AgentLoop {
             requestToken = token;
             requestGeneration = gen;
             requestSession = sessionKey;
-            requestRecorder = recorder;
+            requestRecorder = detailedRequestRecorder != null ? detailedRequestRecorder : recorder;
         }
         long started = SystemClock.elapsedRealtime();
         try {
@@ -1240,12 +1262,17 @@ public class AgentLoop {
                 boolean cancelledRequest = stale(token, gen);
                 Integer retries = requestRetries.get();
                 try {
-                    ((RequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
-                            Math.max(0L, SystemClock.elapsedRealtime() - started),
-                            cancelledRequest ? "cancelled" : reply.error == null ? "success"
-                                    : isTransient(reply.error) ? "retryable_error" : "error",
-                            cancelledRequest || reply.error == null ? "" : retryReason(reply.error),
-                            retries == null ? 0 : retries.intValue());
+                    long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - started);
+                    String outcome = cancelledRequest ? "cancelled" : reply.error == null ? "success"
+                            : isTransient(reply.error) ? "retryable_error" : "error";
+                    String reason = cancelledRequest || reply.error == null ? "" : retryReason(reply.error);
+                    int retryCount = retries == null ? 0 : retries.intValue();
+                    if (requestRecorder instanceof DetailedRequestRecorder) {
+                        ((DetailedRequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
+                                elapsed, outcome, reason, retryCount,
+                                reply.diagnostic == null ? "" : Diagnostics.boundedJson(reply.diagnostic));
+                    } else ((RequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
+                            elapsed, outcome, reason, retryCount);
                 } catch (RuntimeException diagnosticFailure) {
                     // A full or unavailable diagnostic store must not discard a valid model response.
                 }
@@ -1264,6 +1291,39 @@ public class AgentLoop {
                 }
             }
         }
+    }
+
+    private void recordError(JSONObject evidence) {
+        recordError(evidence, "agent", "运行失败");
+    }
+
+    private void recordError(JSONObject evidence, String source, String summary) {
+        Object target = errorRecorder != null ? errorRecorder : recorder;
+        if (!(target instanceof ErrorRecorder)) return;
+        List<String> secrets = new ArrayList<String>();
+        synchronized (lock) {
+            for (Message message : history) {
+                if (Message.TOOL.equals(message.role)) continue;
+                secrets.add(message.content);
+                secrets.add(message.reasoning);
+                if (message.toolCalls != null) for (int i = 0; i < message.toolCalls.length(); i++) {
+                    JSONObject call = message.toolCalls.optJSONObject(i);
+                    JSONObject function = call == null ? null : call.optJSONObject("function");
+                    if (function != null) secrets.add(function.optString("arguments"));
+                }
+            }
+        }
+        try {
+            ((ErrorRecorder) target).recordDiagnostic(sessionKey, source, summary,
+                    Diagnostics.boundedJson(evidence, secrets.toArray(new String[secrets.size()])));
+        } catch (RuntimeException unavailable) { }
+    }
+
+    private void reportException(int gen, Exception error) {
+        JSONObject evidence = Diagnostics.failure(error);
+        try { evidence.put("error", error.getMessage()); } catch (Exception ignored) { }
+        recordError(evidence);
+        listener.emit(listener.event(UiEventBuffer.ERROR, gen, error.getClass().getSimpleName()));
     }
 
     /** 界面回调里用来丢掉已经停止的那一轮。只在循环线程上有值。 */
@@ -1327,7 +1387,7 @@ public class AgentLoop {
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
             if (!stale(token, gen)) {
-                listener.onError(gen, e.getClass().getSimpleName() + ": " + e.getMessage());
+                reportException(gen, e);
             }
         } finally {
             endTurn(token, gen, sessionId);
@@ -1395,7 +1455,7 @@ public class AgentLoop {
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
             if (token != 0 && !stale(token, gen)) {
-                listener.onError(gen, e.getClass().getSimpleName() + ": " + e.getMessage());
+                reportException(gen, e);
             }
         } finally {
             endTurn(token, gen, sessionId);
@@ -1493,7 +1553,7 @@ public class AgentLoop {
             }
         } catch (Exception e) {
             if (token != 0 && !stale(token, gen)) {
-                listener.onError(gen, e.getClass().getSimpleName() + ": " + e.getMessage());
+                reportException(gen, e);
             }
         } finally {
             endTurn(token, gen, sessionId);
@@ -2421,6 +2481,12 @@ public class AgentLoop {
     }
 
     private void recordToolResult(long sessionId, Message message, int gen, int token, String name) {
+        if (ToolOutcome.failed(name, message.content)) {
+            JSONObject evidence = new JSONObject();
+            try { evidence.put("tool", name).put("tool_call_id", message.toolCallId).put("error", message.content); }
+            catch (Exception ignored) { }
+            recordError(evidence, "tool:" + name, "工具执行失败");
+        }
         synchronized (uiLock) {
             record(sessionId, message);
             if (!stale(token, gen)) listener.onToolEnd(gen, name, message.content);
@@ -2576,6 +2642,9 @@ public class AgentLoop {
             if (cancelled) return "已停止。";
             result = tool.run(args);
         } catch (Exception e) {
+            JSONObject evidence = Diagnostics.failure(e);
+            try { evidence.put("tool", name); } catch (Exception ignored) { }
+            recordError(evidence, "tool:" + name, "工具执行异常");
             result = FAIL_PREFIX + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
             if (runningTool == tool) runningTool = null;

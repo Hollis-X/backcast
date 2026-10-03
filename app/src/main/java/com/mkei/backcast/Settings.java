@@ -6,6 +6,8 @@ import com.mkei.backcast.agent.ResponsePreferences;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Arrays;
+import java.util.Collections;
 import java.io.File;
 
 /**
@@ -20,6 +22,26 @@ public class Settings {
     private static final String KEY_USE_ROOT = "use_root";
     private static final String KEY_SYSTEM_PROMPT = "system_prompt";
     private static final String KEY_MODEL_LIST = "model_list";
+    private static final String KEY_AI_PROFILES_MIGRATED = "ai_profiles_migrated";
+    private static final String KEY_ACTIVE_PROVIDER = "active_ai_provider";
+    private static final Object AI_LOCK = new Object();
+    public static final String PROVIDER_DEEPSEEK = "deepseek";
+    public static final String PROVIDER_OPENAI = "openai";
+    public static final String PROVIDER_GROK = "grok";
+    public static final String PROVIDER_CUSTOM = "custom";
+    private static final String[] PROVIDER_IDS = {PROVIDER_DEEPSEEK, PROVIDER_OPENAI, PROVIDER_GROK, PROVIDER_CUSTOM};
+
+    /** Independent provider snapshot. Never include credentials in display labels or logs. */
+    public static final class AiProfile {
+        public final String id, name, baseUrl, apiKey, model;
+        public final List<String> modelList;
+        public AiProfile(String id, String baseUrl, String apiKey, String model, List<String> models) {
+            requireProvider(id);
+            this.id = id; this.name = providerName(id);
+            this.baseUrl = clean(baseUrl); this.apiKey = clean(apiKey); this.model = clean(model);
+            this.modelList = Collections.unmodifiableList(decodeModels(encodeModels(models)));
+        }
+    }
     private static final String KEY_REASONING_EFFORT = "reasoning_effort";
     private static final String KEY_EFFORT_POLICY_MIGRATED = "effort_policy_migrated";
     private static final String KEY_ACCESS = "access_level";
@@ -155,15 +177,109 @@ public class Settings {
     }
 
     public String baseUrl() {
-        return prefs.getString(KEY_BASE_URL, "");
+        return activeAiProfile().baseUrl;
     }
 
     public String apiKey() {
-        return prefs.getString(KEY_API_KEY, "");
+        return activeAiProfile().apiKey;
     }
 
     public String model() {
-        return prefs.getString(KEY_MODEL, "");
+        return activeAiProfile().model;
+    }
+
+    private static String clean(String value) { return value == null ? "" : value.trim(); }
+    private static void requireProvider(String id) {
+        if (!Arrays.asList(PROVIDER_IDS).contains(id)) throw new IllegalArgumentException("未知 AI 供应商。");
+    }
+    private static String providerName(String id) {
+        if (PROVIDER_DEEPSEEK.equals(id)) return "DeepSeek";
+        if (PROVIDER_OPENAI.equals(id)) return "OpenAI";
+        if (PROVIDER_GROK.equals(id)) return "Grok";
+        return "自定义";
+    }
+    private static String providerUrl(String id) {
+        if (PROVIDER_DEEPSEEK.equals(id)) return "https://api.deepseek.com/v1";
+        if (PROVIDER_OPENAI.equals(id)) return "https://api.openai.com/v1";
+        if (PROVIDER_GROK.equals(id)) return "https://api.x.ai/v1";
+        return "";
+    }
+    private static String profileKey(String id, String suffix) { return "ai_profile_" + id + "_" + suffix; }
+    private static String providerForLegacyUrl(String url) {
+        try {
+            String host = new java.net.URI(clean(url)).getHost();
+            if ("api.deepseek.com".equalsIgnoreCase(host)) return PROVIDER_DEEPSEEK;
+            if ("api.openai.com".equalsIgnoreCase(host)) return PROVIDER_OPENAI;
+            if ("api.x.ai".equalsIgnoreCase(host)) return PROVIDER_GROK;
+        } catch (java.net.URISyntaxException invalid) { }
+        return PROVIDER_CUSTOM;
+    }
+    private void migrateAiProfilesLocked() {
+        if (prefs.getBoolean(KEY_AI_PROFILES_MIGRATED, false)) return;
+        String url = prefs.getString(KEY_BASE_URL, "");
+        String id = providerForLegacyUrl(url);
+        prefs.edit().putString(profileKey(id, "url"), url)
+                .putString(profileKey(id, "key"), prefs.getString(KEY_API_KEY, ""))
+                .putString(profileKey(id, "model"), prefs.getString(KEY_MODEL, ""))
+                .putString(profileKey(id, "models"), prefs.getString(KEY_MODEL_LIST, ""))
+                .putString(KEY_ACTIVE_PROVIDER, id).putBoolean(KEY_AI_PROFILES_MIGRATED, true).apply();
+    }
+    private String activeProviderLocked() {
+        migrateAiProfilesLocked();
+        String id = prefs.getString(KEY_ACTIVE_PROVIDER, PROVIDER_CUSTOM);
+        return Arrays.asList(PROVIDER_IDS).contains(id) ? id : PROVIDER_CUSTOM;
+    }
+    private AiProfile profileLocked(String id) {
+        return new AiProfile(id, prefs.getString(profileKey(id, "url"), providerUrl(id)),
+                prefs.getString(profileKey(id, "key"), ""), prefs.getString(profileKey(id, "model"), ""),
+                decodeModels(prefs.getString(profileKey(id, "models"), "")));
+    }
+    public List<AiProfile> aiProfiles() {
+        synchronized (AI_LOCK) {
+            migrateAiProfilesLocked();
+            List<AiProfile> profiles = new ArrayList<AiProfile>();
+            for (String id : PROVIDER_IDS) profiles.add(profileLocked(id));
+            return Collections.unmodifiableList(profiles);
+        }
+    }
+    public String activeProviderId() { synchronized (AI_LOCK) { return activeProviderLocked(); } }
+    public AiProfile activeAiProfile() { synchronized (AI_LOCK) { return profileLocked(activeProviderLocked()); } }
+    public void setActiveProvider(String id) {
+        requireProvider(id);
+        synchronized (AI_LOCK) { migrateAiProfilesLocked(); prefs.edit().putString(KEY_ACTIVE_PROVIDER, id).apply(); }
+    }
+    private static SharedPreferences.Editor writeProfile(SharedPreferences.Editor editor, AiProfile profile) {
+        List<String> models = new ArrayList<String>(profile.modelList);
+        if (profile.model.length() > 0 && !models.contains(profile.model)) models.add(profile.model);
+        return editor.putString(profileKey(profile.id, "url"), profile.baseUrl)
+                .putString(profileKey(profile.id, "key"), profile.apiKey)
+                .putString(profileKey(profile.id, "model"), profile.model)
+                .putString(profileKey(profile.id, "models"), encodeModels(models));
+    }
+    public void saveAiProfile(String id, String url, String key, String model, List<String> models) {
+        AiProfile profile = new AiProfile(id, url, key, model, models);
+        synchronized (AI_LOCK) { migrateAiProfilesLocked(); writeProfile(prefs.edit(), profile).apply(); }
+    }
+    /** Commit only edited drafts, then activate the selection in the same transaction. */
+    public void saveAiProfiles(List<AiProfile> edited, String activeId) {
+        requireProvider(activeId);
+        synchronized (AI_LOCK) {
+            migrateAiProfilesLocked(); SharedPreferences.Editor editor = prefs.edit();
+            if (edited != null) for (AiProfile profile : edited) writeProfile(editor, profile);
+            editor.putString(KEY_ACTIVE_PROVIDER, activeId).apply();
+        }
+    }
+    /** Selecting a model also activates its provider without overwriting its credentials. */
+    public void selectAiModel(String providerId, String model) {
+        requireProvider(providerId);
+        String selected = clean(model);
+        if (selected.length() == 0 || selected.indexOf('\n') >= 0 || selected.indexOf('\r') >= 0)
+            throw new IllegalArgumentException("模型名称不能为空或包含换行。");
+        synchronized (AI_LOCK) {
+            migrateAiProfilesLocked(); AiProfile current = profileLocked(providerId);
+            writeProfile(prefs.edit(), new AiProfile(providerId, current.baseUrl, current.apiKey, selected, current.modelList))
+                    .putString(KEY_ACTIVE_PROVIDER, providerId).apply();
+        }
     }
 
     public boolean useRoot() {
@@ -574,22 +690,15 @@ public class Settings {
 
     public void save(String baseUrl, String apiKey, String model,
                      boolean useRoot, String systemPrompt) {
-        prefs.edit()
-                .putString(KEY_BASE_URL, baseUrl == null ? "" : baseUrl.trim())
-                .putString(KEY_API_KEY, apiKey == null ? "" : apiKey.trim())
-                .putString(KEY_MODEL, model == null ? "" : model.trim())
-                .putBoolean(KEY_USE_ROOT, useRoot)
-                .putString(KEY_SYSTEM_PROMPT, systemPrompt == null ? "" : systemPrompt)
-                .apply();
+        synchronized (AI_LOCK) {
+            saveAiConfiguration(baseUrl, apiKey, model, modelList());
+            prefs.edit().putBoolean(KEY_USE_ROOT, useRoot)
+                    .putString(KEY_SYSTEM_PROMPT, systemPrompt == null ? "" : systemPrompt).apply();
+        }
     }
 
     public void saveAiConfiguration(String baseUrl, String apiKey, String model, List<String> models) {
-        prefs.edit()
-                .putString(KEY_BASE_URL, baseUrl == null ? "" : baseUrl.trim())
-                .putString(KEY_API_KEY, apiKey == null ? "" : apiKey.trim())
-                .putString(KEY_MODEL, model == null ? "" : model.trim())
-                .putString(KEY_MODEL_LIST, encodeModels(models))
-                .apply();
+        synchronized (AI_LOCK) { saveAiProfile(activeProviderLocked(), baseUrl, apiKey, model, models); }
     }
 
     public void saveUserPreferences(String verbosity, String summary, String language, String effort,
@@ -607,12 +716,16 @@ public class Settings {
     }
 
     public boolean isConfigured() {
-        return baseUrl().length() > 0 && apiKey().length() > 0 && model().length() > 0;
+        AiProfile profile = activeAiProfile();
+        return profile.baseUrl.length() > 0 && profile.apiKey.length() > 0 && profile.model.length() > 0;
     }
 
     /** 已保存的模型列表，用换行分隔。 */
     public List<String> modelList() {
-        String raw = prefs.getString(KEY_MODEL_LIST, "");
+        return new ArrayList<String>(activeAiProfile().modelList);
+    }
+
+    private static List<String> decodeModels(String raw) {
         List<String> list = new ArrayList<String>();
         if (raw == null || raw.length() == 0) {
             return list;
@@ -627,7 +740,10 @@ public class Settings {
     }
 
     public void saveModelList(List<String> models) {
-        prefs.edit().putString(KEY_MODEL_LIST, encodeModels(models)).apply();
+        synchronized (AI_LOCK) {
+            String id = activeProviderLocked();
+            prefs.edit().putString(profileKey(id, "models"), encodeModels(models)).apply();
+        }
     }
 
     private static String encodeModels(List<String> models) {
@@ -648,7 +764,10 @@ public class Settings {
     }
 
     public void setModel(String model) {
-        prefs.edit().putString(KEY_MODEL, model == null ? "" : model.trim()).apply();
+        synchronized (AI_LOCK) {
+            String id = activeProviderLocked(); AiProfile profile = profileLocked(id);
+            writeProfile(prefs.edit(), new AiProfile(id, profile.baseUrl, profile.apiKey, model, profile.modelList)).apply();
+        }
     }
 
     /** off 表示请求里不带 reasoning_effort 参数。 */

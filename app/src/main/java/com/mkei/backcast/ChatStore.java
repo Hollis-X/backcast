@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
 import com.mkei.backcast.agent.Message;
+import com.mkei.backcast.agent.Diagnostics;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -26,17 +27,23 @@ public class ChatStore extends SQLiteOpenHelper {
         public String title;
     }
 
-    /** Local transport diagnostics; no request body, credentials or provider response. */
+    /** Local transport evidence; sensitive values are removed before persistence. */
     public static final class RequestEvent {
         public final long id, recordedAt, elapsedMs;
         public final String purpose, outcome, reason;
+        public final String diagnostic;
         public final int retryCount;
 
         RequestEvent(long id, long recordedAt, long elapsedMs, String purpose,
                 String outcome, String reason, int retryCount) {
+            this(id, recordedAt, elapsedMs, purpose, outcome, reason, retryCount, "");
+        }
+        RequestEvent(long id, long recordedAt, long elapsedMs, String purpose,
+                String outcome, String reason, int retryCount, String diagnostic) {
             this.id = id; this.recordedAt = recordedAt; this.elapsedMs = elapsedMs;
             this.purpose = purpose; this.outcome = outcome; this.reason = reason;
             this.retryCount = retryCount;
+            this.diagnostic = diagnostic == null ? "" : diagnostic;
         }
     }
 
@@ -90,7 +97,7 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public ChatStore(Context context) {
-        super(context.getApplicationContext(), "backcast.db", null, 11);
+        super(context.getApplicationContext(), "backcast.db", null, 12);
     }
 
     @Override
@@ -115,6 +122,7 @@ public class ChatStore extends SQLiteOpenHelper {
         createRuns(db);
         createContext(db);
         createRequestEvents(db);
+        createDiagnosticErrors(db);
     }
 
     @Override
@@ -150,6 +158,8 @@ public class ChatStore extends SQLiteOpenHelper {
             db.execSQL("ALTER TABLE runs ADD COLUMN budget_wrap_finished INTEGER");
         }
         if (oldVersion < 11) createRequestEvents(db);
+        if (oldVersion == 11) db.execSQL("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''");
+        if (oldVersion < 12) createDiagnosticErrors(db);
     }
 
     private static void createRequestEvents(SQLiteDatabase db) {
@@ -157,13 +167,18 @@ public class ChatStore extends SQLiteOpenHelper {
                 + "id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER NOT NULL,"
                 + "recorded_at INTEGER NOT NULL, purpose TEXT NOT NULL,"
                 + "elapsed_ms INTEGER NOT NULL,outcome TEXT NOT NULL,reason TEXT NOT NULL,"
-                + "retry_count INTEGER NOT NULL)");
+                + "retry_count INTEGER NOT NULL,diagnostic TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_events_session ON request_events(session_id,id)");
     }
 
     /** Keep at most 200 completed attempts per conversation, independently of model history. */
     public synchronized void recordRequest(long sessionId, String purpose, long elapsedMs,
             String outcome, String reason, int retryCount) {
+        recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount, "");
+    }
+
+    public synchronized void recordRequest(long sessionId, String purpose, long elapsedMs,
+            String outcome, String reason, int retryCount, String diagnostic) {
         if (sessionId < 0) return;
         ContentValues values = new ContentValues();
         values.put("session_id", Long.valueOf(sessionId));
@@ -172,9 +187,10 @@ public class ChatStore extends SQLiteOpenHelper {
         values.put("elapsed_ms", Long.valueOf(Math.max(0L, elapsedMs)));
         values.put("outcome", "success".equals(outcome) ? "success" : "retryable_error".equals(outcome)
                 ? "retryable_error" : "cancelled".equals(outcome) ? "cancelled" : "error");
-        String safe = reason == null ? "" : reason.replace('\n', ' ').replace('\r', ' ').trim();
+        String safe = Diagnostics.scrub(reason).replace('\n', ' ').replace('\r', ' ').trim();
         values.put("reason", safe.length() > 160 ? safe.substring(0, 160) : safe);
         values.put("retry_count", Integer.valueOf(Math.max(0, retryCount)));
+        values.put("diagnostic", Diagnostics.detail(diagnostic));
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -189,14 +205,42 @@ public class ChatStore extends SQLiteOpenHelper {
     public synchronized List<RequestEvent> requestEvents(long sessionId, int limit) {
         List<RequestEvent> events = new ArrayList<RequestEvent>();
         Cursor cursor = getReadableDatabase().query("request_events",
-                new String[]{"id", "recorded_at", "elapsed_ms", "purpose", "outcome", "reason", "retry_count"},
+                new String[]{"id", "recorded_at", "elapsed_ms", "purpose", "outcome", "reason", "retry_count", "diagnostic"},
                 "session_id=?", new String[]{String.valueOf(sessionId)}, null, null, "id DESC",
                 String.valueOf(Math.max(1, Math.min(200, limit))));
         try {
             while (cursor.moveToNext()) events.add(new RequestEvent(cursor.getLong(0), cursor.getLong(1),
-                    cursor.getLong(2), cursor.getString(3), cursor.getString(4), cursor.getString(5), cursor.getInt(6)));
+                    cursor.getLong(2), cursor.getString(3), cursor.getString(4), cursor.getString(5), cursor.getInt(6), cursor.getString(7)));
         } finally { cursor.close(); }
         return Collections.unmodifiableList(events);
+    }
+
+    private static void createDiagnosticErrors(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS diagnostic_errors ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER NOT NULL,"
+                + "recorded_at INTEGER NOT NULL,source TEXT NOT NULL,summary TEXT NOT NULL,detail TEXT NOT NULL)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_diagnostic_errors_session ON diagnostic_errors(session_id,id)");
+    }
+
+    /** -1 is an app configuration error, not tied to a conversation. */
+    public synchronized void recordDiagnostic(long sessionId, String source, String summary, String detail) {
+        ContentValues values = new ContentValues();
+        values.put("session_id", Long.valueOf(sessionId));
+        values.put("recorded_at", Long.valueOf(System.currentTimeMillis()));
+        String safeSource = Diagnostics.scrub(source).replace('\n', ' ').replace('\r', ' ');
+        values.put("source", safeSource.substring(0, Math.min(80, safeSource.length())));
+        String safeSummary = Diagnostics.scrub(summary).replace('\n', ' ').replace('\r', ' ');
+        values.put("summary", safeSummary.substring(0, Math.min(160, safeSummary.length())));
+        values.put("detail", Diagnostics.detail(detail));
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.insert("diagnostic_errors", null, values);
+            db.execSQL("DELETE FROM diagnostic_errors WHERE session_id=? AND id NOT IN ("
+                    + "SELECT id FROM diagnostic_errors WHERE session_id=? ORDER BY id DESC LIMIT 200)",
+                    new Object[]{Long.valueOf(sessionId), Long.valueOf(sessionId)});
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
     }
 
     /** 运行状态独立于聊天记录和模型窗口。 */
@@ -647,6 +691,7 @@ public class ChatStore extends SQLiteOpenHelper {
             db.delete("runs", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("context_windows", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("request_events", "session_id=?", new String[]{String.valueOf(sessionId)});
+            db.delete("diagnostic_errors", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("sessions", "id=?", new String[]{String.valueOf(sessionId)});
             db.setTransactionSuccessful();
         } finally {

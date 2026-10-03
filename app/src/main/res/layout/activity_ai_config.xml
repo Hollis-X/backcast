@@ -10,6 +10,13 @@
         android:layout_weight="1" android:padding="14dp" android:fillViewport="true">
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/label_ai_provider" android:textColor="@color/text_secondary" android:textSize="12sp"/>
+            <Spinner android:id="@+id/ai_provider" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:saveEnabled="false" android:padding="8dp"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/ai_provider_help" android:textColor="@color/text_secondary" android:textSize="12sp"
+                android:paddingBottom="14dp"/>
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="@string/label_base_url" android:textColor="@color/text_secondary" android:textSize="12sp" android:paddingBottom="4dp"/>
             <EditText android:id="@+id/base_url" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:background="@color/surface" android:hint="@string/hint_base_url" android:textColorHint="@color/text_secondary"
@@ -29,6 +36,8 @@
                 android:background="@color/surface" android:textColorHint="@color/text_secondary"
                 android:textColor="@color/text_primary" android:textSize="13sp" android:padding="10dp"
                 android:inputType="textNoSuggestions" android:typeface="monospace" android:saveEnabled="false"/>
+            <Button android:id="@+id/add_saved_model" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="@string/action_add_saved_model" android:textColor="@color/text_primary" android:backgroundTint="@color/divider"/>
             <Button android:id="@+id/fetch_models" android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:layout_marginTop="8dp" android:text="@string/action_fetch_models"
                 android:textColor="@color/text_primary" android:backgroundTint="@color/divider"/>

@@ -18,6 +18,7 @@ import javax.tools.JavaFileObject;
 import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
+import org.json.JSONObject;
 
 /** Runs the real RunHub against isolated lifecycle and persistence fixtures. */
 public final class RunHubRecoveryTest {
@@ -48,11 +49,16 @@ public final class RunHubRecoveryTest {
         add(files, "android.os.Build", "public class Build {public static final String CPU_ABI=\"arm64-v8a\";public static class VERSION {public static final int SDK_INT=30;}}");
         add(files, "com.mkei.backcast.Settings", "public class Settings {"
                 + "public static final String AGENT_OFF=\"off\",EFFORT_ULTRA=\"ultra\";public static String mode=\"manual\",effort=\"off\",directory=\".\";"
+                + "public static String provider=\"deepseek\",url=\"http://localhost\",key=\"fixture\",selectedModel=\"fixture\";public static boolean failLegacyProfileReads;"
+                + "public static final class AiProfile {public final String id,name,baseUrl,apiKey,model;public final java.util.List<String> modelList;"
+                + "public AiProfile(String i,String n,String u,String k,String m,java.util.List<String> l){id=i;name=n;baseUrl=u;apiKey=k;model=m;modelList=java.util.Collections.unmodifiableList(new java.util.ArrayList<String>(l));}}"
                 + "public static java.util.List<String> additional=new java.util.ArrayList<String>();"
-                + "public static int concurrency=3;public static boolean root;public static void reset(){mode=\"manual\";effort=\"off\";directory=\".\";additional.clear();concurrency=3;root=false;}"
+                + "public static int concurrency=3;public static boolean root;public static void reset(){mode=\"manual\";effort=\"off\";directory=\".\";additional.clear();concurrency=3;root=false;provider=\"deepseek\";url=\"http://localhost\";key=\"fixture\";selectedModel=\"fixture\";failLegacyProfileReads=false;}"
                 + "public Settings(android.content.Context c) {} public boolean isConfigured() { return true; }"
-                + "public String fullSystemPrompt() { return \"system/\"+mode; } public String baseUrl() { return \"http://localhost\"; }"
-                + "public String apiKey() { return \"fixture\"; } public String model() { return \"fixture\"; }"
+                + "public String fullSystemPrompt() { return \"system/\"+mode; } public String baseUrl() { legacyRead();return url; }"
+                + "public String apiKey() {legacyRead();return key; } public String model() {legacyRead();return selectedModel; }"
+                + "private void legacyRead(){if(failLegacyProfileReads)throw new AssertionError(\"Client configuration used independent credential reads\");}"
+                + "public AiProfile activeAiProfile(){return new AiProfile(provider,provider,url,key,selectedModel,java.util.Collections.singletonList(selectedModel));}"
                 + "public String reasoningEffort() {return effort;}public String effectiveReasoningEffort(){return effort;}"
                 + "public String agentMode(){return mode;}public int agentConcurrency(){return concurrency;}"
                 + "public String outputVerbosity() { return \"default\"; } public String outputLanguage() { return \"zh-CN\"; }"
@@ -64,10 +70,10 @@ public final class RunHubRecoveryTest {
                 + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,turnAt,turnWall,seenAt,tokensUsed,tokenBudget; public boolean running; public Boolean budgetWrapFinished; }"
                 + "private static final java.util.Map<Long,Run> runs=new java.util.HashMap<Long,Run>();"
                 + "public static long pausedRead=-1; public static java.util.concurrent.CountDownLatch readStarted,readRelease;"
-                + "public static long requestSession,requestElapsed;public static String requestPurpose,requestOutcome,requestReason;public static int requestRetry;"
+                + "public static long requestSession,requestElapsed,diagnosticSession;public static String requestPurpose,requestOutcome,requestReason,requestDiagnostic,diagnosticSource,diagnosticSummary,diagnosticDetail;public static int requestRetry,diagnosticCalls;"
                 + "public static void pauseRead(long sid) { pausedRead=sid; readStarted=new java.util.concurrent.CountDownLatch(1); readRelease=new java.util.concurrent.CountDownLatch(1); }"
                 + "public ChatStore(android.content.Context c) {}"
-                + "public static void reset() { runs.clear(); pausedRead=-1; }"
+                + "public static void reset() { runs.clear(); pausedRead=-1;requestSession=requestElapsed=diagnosticSession=0;requestRetry=diagnosticCalls=0;requestPurpose=requestOutcome=requestReason=requestDiagnostic=diagnosticSource=diagnosticSummary=diagnosticDetail=null; }"
                 + "public static void pending(long sid) { Run r=new Run(); r.running=true; r.turnAt=10; r.turnWall=20; runs.put(sid,r); }"
                 + "public static void pendingBudget(long sid,Boolean finished) { pending(sid); Run r=runs.get(sid); r.goal=\"spent goal\"; r.status=\"budget_limited\"; r.budgetWrapFinished=finished; }"
                 + "public Run readRun(long sid) { Run r=runs.get(sid); return r==null?new Run():r; }"
@@ -75,7 +81,9 @@ public final class RunHubRecoveryTest {
                 + "public java.util.List<com.mkei.backcast.agent.Message> contextMessages(long sid) { if(pausedRead==sid) { readStarted.countDown(); try { readRelease.await(5,java.util.concurrent.TimeUnit.SECONDS); } catch(InterruptedException e) { throw new RuntimeException(e); } } return new java.util.ArrayList<com.mkei.backcast.agent.Message>(); }"
                 + "public void append(long sid,com.mkei.backcast.agent.Message m) {}"
                 + "public void replaceAll(long sid,java.util.List<com.mkei.backcast.agent.Message> m) {}"
-                + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry){requestSession=sid;requestPurpose=purpose;requestElapsed=elapsed;requestOutcome=outcome;requestReason=reason;requestRetry=retry;}"
+                + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry){recordRequest(sid,purpose,elapsed,outcome,reason,retry,\"\");}"
+                + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String detail){requestSession=sid;requestPurpose=purpose;requestElapsed=elapsed;requestOutcome=outcome;requestReason=reason;requestRetry=retry;requestDiagnostic=detail;}"
+                + "public void recordDiagnostic(long sid,String source,String summary,String detail){diagnosticSession=sid;diagnosticSource=source;diagnosticSummary=summary;diagnosticDetail=detail;diagnosticCalls++;}"
                 + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished) {} }");
         add(files, "com.mkei.backcast.agent.AgentLoop",
                 "public class AgentLoop {"
@@ -83,6 +91,8 @@ public final class RunHubRecoveryTest {
                 + "public interface Listener {} public static class Quiet implements Listener {}"
                 + "public interface Recorder { void record(long sid,Message m); void replace(long sid,java.util.List<Message> m); }"
                 + "public interface RequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry);}"
+                + "public interface DetailedRequestRecorder extends RequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String diagnostic);}"
+                + "public interface ErrorRecorder {void recordDiagnostic(long sid,String source,String summary,String detail);}"
                 + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished); }"
                 + "public interface UsageObserver{void onUsage(long tokens);}public UsageObserver usageObserver;"
                 + "public LlmClient client;public ToolRegistry registry;public SubAgentManager children;public String access=\"full\",environment,directory,resetPrompt;"
@@ -101,6 +111,7 @@ public final class RunHubRecoveryTest {
                 + "public void restoreGoal(String g,String s,long ms) {} public void restoreGoal(String g,String s,long ms,long used,long budget,Boolean budgetWrapFinished) { restoredBudgetWrapFinished=budgetWrapFinished; } public void restoreTurnClock(long at,long wall,long seen) { clockRestores++; }"
                 + "public void resume(long id,int token) { resumes++; }"
                 + "public Recorder recorder;public Durability durability;public void setRecorder(Recorder r) {recorder=r;} public void setDurability(Durability d) {durability=d;}"
+                + "public DetailedRequestRecorder diagnosticRecorder;public ErrorRecorder errorRecorder;public void setDiagnosticRecorder(DetailedRequestRecorder r,ErrorRecorder e){diagnosticRecorder=r;errorRecorder=e;}"
                 + "public void setContextBudget(int l,float r) {limit=l;ratio=r;}public int contextLimit(){return limit;}"
                 + "public void setAccessLevel(String level) {access=level;}public String accessLevel(){return access;}"
                 + "public void setApprovalGate(ApprovalGate g) {gate=g;}public ApprovalGate approvalGate(){return gate;}"
@@ -115,7 +126,7 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.agent.ApprovalGate", "public class ApprovalGate { public static final String ACCESS_FULL=\"full\"; }");
         add(files, "com.mkei.backcast.agent.Goal", "public class Goal { public static boolean isSteer(String s) { return false; } public static boolean isNote(String s) { return false; } }");
         add(files, "com.mkei.backcast.agent.Message", "public class Message { public String content; }");
-        add(files, "com.mkei.backcast.agent.LlmClient", "public class LlmClient {public Config config; public static class Config { public String verbosity,responseInstructions,effort,model; public Config(String a,String b,String c,String d) {model=c;effort=d;} } public LlmClient(Config c) {config=c;} }");
+        add(files, "com.mkei.backcast.agent.LlmClient", "public class LlmClient {public Config config; public static class Config { public String verbosity,responseInstructions,effort,model,baseUrl,apiKey,providerId; public Config(String a,String b,String c,String d) {baseUrl=a;apiKey=b;model=c;effort=d;} } public LlmClient(Config c) {config=c;} }");
         add(files, "com.mkei.backcast.agent.SubAgentManager", "public class SubAgentManager {"
                 + "public static final String ROOT=\"main\";public static class Record{public String id,name=\"child fixture\";public long sessionId;}"
                 + "public interface Factory{AgentLoop create(Record task,AgentLoop.Listener listener,SubAgentManager manager) throws Exception;}"
@@ -416,6 +427,8 @@ public final class RunHubRecoveryTest {
     }
     private static void realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger() throws Exception {
         Object hub=freshHub();setting("mode","ultra");setting("effort","ultra");setting("directory","/work/project");setting("root",true);
+        setting("provider", "grok"); setting("url", "https://provider.test/v1"); setting("key", "provider-key");
+        setting("selectedModel", "provider-model"); setting("failLegacyProfileReads", true);
         Object root=bind(hub,24L,listener()),manager=children(hub,root);
         Class<?> gateType=hubType.getClassLoader().loadClass("com.mkei.backcast.agent.ApprovalGate");
         Object gate=gateType.getConstructor().newInstance();
@@ -430,6 +443,12 @@ public final class RunHubRecoveryTest {
         check("ultra".equals(field(config,"effort")) && "language fixture".equals(field(config,"responseInstructions"))
                 && field(child,"delegationParent")==root && (Boolean)field(root,"automaticDelegation"),
                 "Child API config or inherited root authorization was lost");
+        Object parentConfig = field(field(root, "client"), "config");
+        for (Object selected : new Object[]{parentConfig, config}) check("grok".equals(field(selected, "providerId"))
+                        && "https://provider.test/v1".equals(field(selected, "baseUrl"))
+                        && "provider-key".equals(field(selected, "apiKey")) && "provider-model".equals(field(selected, "model")),
+                "Parent/child client did not capture one coherent immutable provider profile");
+        check(parentConfig != config, "Parent and child unexpectedly share mutable request configuration");
         Object registry=field(child,"registry");
         @SuppressWarnings("unchecked") List<String> names=(List<String>)field(registry,"names");
         check(!names.contains("GoalTool") && !names.contains("GetGoalTool") && names.contains("Coordination")
@@ -467,6 +486,19 @@ public final class RunHubRecoveryTest {
         @SuppressWarnings("unchecked") List<String> childNames=(List<String>)field(field(child,"registry"),"names");
         check(names.contains("Coordination") && childNames.contains("Coordination") && names.contains("GoalTool"),
                 "Explicit delegation management or parent goal control was removed");
+        Object oldParent = field(field(root, "client"), "config"), oldChild = field(field(child, "client"), "config");
+        setting("provider", "openai"); setting("url", "https://openai.test/v1"); setting("key", "new-key");
+        setting("selectedModel", "new-model"); setting("failLegacyProfileReads", true);
+        call(hub, "retargetIfNeeded", new Class[0]);
+        for (Object loop : new Object[]{root, child}) {
+            Object next = field(field(loop, "client"), "config");
+            check("openai".equals(field(next, "providerId")) && "https://openai.test/v1".equals(field(next, "baseUrl"))
+                            && "new-key".equals(field(next, "apiKey")) && "new-model".equals(field(next, "model")),
+                    "Retargeting did not update parent and reusable child to the selected provider/model together");
+        }
+        check("deepseek".equals(field(oldParent, "providerId")) && "fixture".equals(field(oldParent, "apiKey"))
+                        && "fixture".equals(field(oldChild, "model")) && children(hub, root) == manager,
+                "Provider switching rewrote an old request configuration or discarded the existing child manager");
     }
     private static void accessChangesAndDroppingRootCloseOwnedChildren() throws Exception {
         Object hub=freshHub(),root=bind(hub,26L,listener()),manager=children(hub,root),child=child(manager,"owned",993L);
@@ -583,6 +615,50 @@ public final class RunHubRecoveryTest {
                         && "retryable_error".equals(storeType.getField("requestOutcome").get(null))
                         && "接口返回 HTTP 503".equals(storeType.getField("requestReason").get(null)),
                 "RunHub changed request diagnostics or routed them to a different session");
+        ClassLoader loader = hubType.getClassLoader();
+        Class<?> detailed = loader.loadClass("com.mkei.backcast.agent.AgentLoop$DetailedRequestRecorder");
+        Class<?> errors = loader.loadClass("com.mkei.backcast.agent.AgentLoop$ErrorRecorder");
+        check(detailed.isInstance(recorder) && errors.isInstance(recorder), "Root recorder lacks structured request and local error recording");
+        String evidence = "{\"provider\":\"grok\",\"error\":{\"code\":\"invalid_model\"}}";
+        Method recordDetailed = detailed.getMethod("recordRequest", long.class, String.class, long.class,
+                String.class, String.class, int.class, String.class);
+        recordDetailed.invoke(recorder, 31L, "model", 58L, "error", "invalid model", 0, evidence);
+        check(evidence.equals(storeType.getField("requestDiagnostic").get(null))
+                        && storeType.getField("requestElapsed").getLong(null) == 58L
+                        && storeType.getField("requestSession").getLong(null) == 31L,
+                "Structured model failure evidence was dropped or changed before ChatStore");
+        Method recordError = errors.getMethod("recordDiagnostic", long.class, String.class, String.class, String.class);
+        recordError.invoke(recorder, -1L, "configuration", "model list failure", evidence);
+        check(storeType.getField("diagnosticSession").getLong(null) == -1L
+                        && "configuration".equals(storeType.getField("diagnosticSource").get(null))
+                        && "model list failure".equals(storeType.getField("diagnosticSummary").get(null))
+                        && evidence.equals(storeType.getField("diagnosticDetail").get(null)),
+                "Configuration failure did not remain a global diagnostic with full safe detail");
+        Object manager = children(hub, root), child = child(manager, "worker_a", 910L);
+        Object childRecorder = field(child, "diagnosticRecorder"), childErrors = field(child, "errorRecorder");
+        Class<?> checkpoint = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Recorder");
+        Object replacement = Proxy.newProxyInstance(loader, new Class<?>[]{checkpoint}, (p, m, a) -> null);
+        call(child, "setRecorder", new Class<?>[]{checkpoint}, replacement);
+        check(field(child, "recorder") == replacement && field(child, "diagnosticRecorder") == childRecorder,
+                "Manager checkpoint attachment overwrote child diagnostic recording");
+        recordDetailed.invoke(childRecorder, 910L, "compact", 137000L, "retryable_error", "HTTP 503", 1, evidence);
+        JSONObject childEvidence = new JSONObject((String) storeType.getField("requestDiagnostic").get(null));
+        check(storeType.getField("requestSession").getLong(null) == 31L
+                        && storeType.getField("requestElapsed").getLong(null) == 137000L
+                        && "worker_a".equals(childEvidence.getString("agent_id"))
+                        && "invalid_model".equals(childEvidence.getJSONObject("error").getString("code")),
+                "Child request diagnostic was filed under its hidden session or lost child/evidence attribution");
+        recordError.invoke(childErrors, 910L, "toolkit", "worker failure", evidence);
+        check(storeType.getField("diagnosticSession").getLong(null) == 31L
+                        && "agent:worker_a".equals(storeType.getField("diagnosticSource").get(null))
+                        && "worker failure".equals(storeType.getField("diagnosticSummary").get(null))
+                        && evidence.equals(storeType.getField("diagnosticDetail").get(null)),
+                "Child runtime error did not reach the parent's visible diagnostic stream");
+        call(hub, "adopt", new Class<?>[]{loopType, long.class}, root, 32L);
+        recordDetailed.invoke(childRecorder, 910L, "review", 2L, "success", "", 0, "");
+        check(storeType.getField("requestSession").getLong(null) == 32L
+                        && "worker_a".equals(new JSONObject((String) storeType.getField("requestDiagnostic").get(null)).getString("agent_id")),
+                "Child diagnostics captured an old parent session instead of following session adoption");
     }
 
     public static void main(String[] args) throws Exception {
@@ -594,9 +670,11 @@ public final class RunHubRecoveryTest {
             List<JavaFileObject> files = new ArrayList<>();
             fixtures(files);
             try (StandardJavaFileManager manager = compiler.getStandardFileManager(null, null, null)) {
-                for (JavaFileObject file : manager.getJavaFileObjects(Paths.get(args[0]).toFile())) files.add(file);
+                Path runHub = Paths.get(args[0]);
+                for (JavaFileObject file : manager.getJavaFileObjects(runHub.toFile(),
+                        runHub.getParent().resolve("agent/Diagnostics.java").toFile())) files.add(file);
                 boolean compiled = compiler.getTask(null, manager, null,
-                        Arrays.asList("-encoding", "UTF-8", "-d", output.toString()), null, files).call();
+                        Arrays.asList("-encoding", "UTF-8", "-d", output.toString(), "-classpath", System.getProperty("java.class.path")), null, files).call();
                 check(compiled, "RunHub fixture compilation failed");
             }
             try (URLClassLoader loader = new URLClassLoader(new URL[]{output.toUri().toURL()})) {

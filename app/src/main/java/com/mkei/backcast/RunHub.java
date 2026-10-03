@@ -65,12 +65,41 @@ public final class RunHub {
         }
     }
 
-    private final class StoredRecorder implements AgentLoop.Recorder, AgentLoop.RequestRecorder {
+    private final class StoredRecorder implements AgentLoop.Recorder, AgentLoop.DetailedRequestRecorder, AgentLoop.ErrorRecorder {
         @Override public void record(long sessionId, Message message) { store.append(sessionId, message); }
         @Override public void replace(long sessionId, List<Message> messages) { store.replaceAll(sessionId, messages); }
         @Override public void recordRequest(long sessionId, String purpose, long elapsedMs,
                 String outcome, String reason, int retryCount) {
             store.recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount);
+        }
+        @Override public void recordRequest(long sessionId, String purpose, long elapsedMs,
+                String outcome, String reason, int retryCount, String diagnostic) {
+            store.recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount, diagnostic);
+        }
+        @Override public void recordDiagnostic(long sessionId, String source, String summary, String detail) {
+            store.recordDiagnostic(sessionId, source, summary, detail);
+        }
+    }
+
+    private final class ChildDiagnostics implements AgentLoop.DetailedRequestRecorder, AgentLoop.ErrorRecorder {
+        private final AgentLoop parent;
+        private final String id;
+        ChildDiagnostics(AgentLoop parent, String id) { this.parent = parent; this.id = id; }
+        @Override public void recordRequest(long sid, String purpose, long elapsedMs,
+                String outcome, String reason, int retryCount) {
+            recordRequest(sid, purpose, elapsedMs, outcome, reason, retryCount, "");
+        }
+        @Override public void recordRequest(long sid, String purpose, long elapsedMs,
+                String outcome, String reason, int retryCount, String detail) {
+            org.json.JSONObject evidence;
+            try { evidence = new org.json.JSONObject(detail); }
+            catch (Exception empty) { evidence = new org.json.JSONObject(); }
+            try { evidence.put("agent_id", id); } catch (Exception ignored) { }
+            store.recordRequest(parent.sessionKey(), purpose, elapsedMs, outcome, reason, retryCount,
+                    com.mkei.backcast.agent.Diagnostics.boundedJson(evidence));
+        }
+        @Override public void recordDiagnostic(long sid, String source, String summary, String detail) {
+            store.recordDiagnostic(parent.sessionKey(), "agent:" + id, summary, detail);
         }
     }
 
@@ -306,7 +335,8 @@ public final class RunHub {
         if (!settings.isConfigured()) {
             return;
         }
-        String sig = settings.baseUrl() + "\n" + settings.apiKey() + "\n" + settings.model()
+        Settings.AiProfile profile = settings.activeAiProfile();
+        String sig = profile.id + "\n" + profile.baseUrl + "\n" + profile.apiKey + "\n" + profile.model
                 + "\n" + settings.effectiveReasoningEffort() + "\n" + settings.useRoot()
                 + "\n" + settings.workDir() + "\n" + settings.authorizedWorkDirs() + "\n" + settings.outputVerbosity()
                 + "\n" + settings.outputLanguage() + "\n" + settings.agentMode()
@@ -423,9 +453,11 @@ public final class RunHub {
     }
 
     private LlmClient newClient() {
+        Settings.AiProfile profile = settings.activeAiProfile();
         LlmClient.Config config = new LlmClient.Config(
-                settings.baseUrl(), settings.apiKey(), settings.model(),
+                profile.baseUrl, profile.apiKey, profile.model,
                 settings.effectiveReasoningEffort());
+        config.providerId = profile.id;
         config.verbosity = settings.outputVerbosity();
         config.responseInstructions = settings.responseInstructions();
         return new LlmClient(config);
@@ -476,6 +508,8 @@ public final class RunHub {
                 @Override public AgentLoop create(final SubAgentManager.Record task, AgentLoop.Listener listener,
                         final SubAgentManager manager) {
                     AgentLoop child = new AgentLoop(newClient(), new ToolRegistry(), listener);
+                    ChildDiagnostics diagnostics = new ChildDiagnostics(parent, task.id);
+                    child.setDiagnosticRecorder(diagnostics, diagnostics);
                     childOwners.put(child, new ChildOwner(parent, manager, task.id));
                     temporary.put(child, new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
                             new java.io.File(app.getFilesDir(), "temporary-workspaces/children/" + task.id), task.sessionId));

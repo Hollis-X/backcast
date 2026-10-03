@@ -216,8 +216,10 @@ public final class SubAgentRegressionTest {
             }
         });
         String id = f.spawn("failure", "fail explicitly"); f.settle();
-        check(SubAgentManager.FAILED.equals(f.manager.find(id).status) && f.manager.find(id).error.contains("fixture child error"),
-                "Child failure disappeared or remained running");
+        check(SubAgentManager.FAILED.equals(f.manager.find(id).status)
+                && f.manager.find(id).error.contains("IllegalStateException")
+                && !f.manager.find(id).error.contains("fixture child error"),
+                "Child failure disappeared, remained running, or exposed the original exception payload");
         check(new JSONObject(f.manager.collectResults()).getJSONArray("agents").length() == 1, "Failed result was not collected");
     }
 

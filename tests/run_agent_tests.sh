@@ -21,6 +21,7 @@ javac -proc:none -encoding UTF-8 -source 8 -target 8 -Xlint:-options -cp "$json"
     "$root"/tests/support/android/os/SystemClock.java \
     "$root"/tests/AgentLoopRegressionTest.java \
     "$root"/tests/RequestPolicyRegressionTest.java \
+    "$root"/tests/DiagnosticsRegressionTest.java \
     "$root"/tests/GoalContractRegressionTest.java \
     "$root"/tests/ContextCompactionRegressionTest.java \
     "$root"/tests/LlmUsageRegressionTest.java \
@@ -59,6 +60,15 @@ if [ "${3:-}" = "snapshot" ]; then
 fi
 if [ "${3:-}" = "request-policy" ]; then
     java -cp "$build:$json" RequestPolicyRegressionTest
+    exit "$?"
+fi
+if [ "${3:-}" = "diagnostics" ]; then
+    java -cp "$build:$json" DiagnosticsRegressionTest || exit "$?"
+    java -cp "$build:$json" "$root/tests/ChatStorePagingRegressionTest.java" "$root"
+    exit "$?"
+fi
+if [ "${3:-}" = "model-picker" ]; then
+    java -cp "$build:$json" "$root/tests/AiModelPickerUiRegressionTest.java" "$root"
     exit "$?"
 fi
 if [ "${3:-}" = "http" ]; then
@@ -150,6 +160,8 @@ java -cp "$build:$json" AgentLoopRegressionTest
 loop_status=$?
 java -cp "$build:$json" RequestPolicyRegressionTest
 request_policy_status=$?
+java -cp "$build:$json" DiagnosticsRegressionTest
+error_storage_status=$?
 java -cp "$build:$json" GoalContractRegressionTest
 goal_status=$?
 java -cp "$build:$json" ContextCompactionRegressionTest
@@ -214,9 +226,11 @@ java -cp "$build:$json" "$root/tests/TurnUiRegressionTest.java" "$root"
 ui_status=$?
 java -cp "$build:$json" "$root/tests/AgentPanelRegressionTest.java" "$root"
 panel_status=$?
+java -cp "$build:$json" "$root/tests/AiModelPickerUiRegressionTest.java" "$root"
+model_picker_status=$?
 java -cp "$build:$json" "$root/tests/ChatStorePagingRegressionTest.java" "$root"
 paging_status=$?
-java "$root/tests/RunHubRecoveryTest.java" "$root/app/src/main/java/com/mkei/backcast/RunHub.java"
+java -cp "$json" "$root/tests/RunHubRecoveryTest.java" "$root/app/src/main/java/com/mkei/backcast/RunHub.java"
 recovery_status=$?
 java "$root/tests/ResponsePreferencesRegressionTest.java" "$root"
 preferences_status=$?
@@ -233,4 +247,4 @@ resource_budget_status=$?
 java "$root/tests/TranscriptScrollRegressionTest.java" "$root"
 scroll_status=$?
 if [ "$diagnostics_status" -ne 0 ] || [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ] || [ "$install_progress_status" -ne 0 ] || [ "$program_arguments_status" -ne 0 ] || [ "$art_runtime_status" -ne 0 ] || [ "$install_ui_status" -ne 0 ] || [ "$workspace_status" -ne 0 ] || [ "$workspace_ui_status" -ne 0 ] || [ "$batch_probe_status" -ne 0 ] || [ "$batch_probe_ui_status" -ne 0 ] || [ "$toolkit_operation_status" -ne 0 ]; then exit 1; fi
-if [ "$http_runtime_status" -ne 0 ] || [ "$request_policy_status" -ne 0 ] || [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$child_progress_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi
+if [ "$model_picker_status" -ne 0 ] || [ "$error_storage_status" -ne 0 ] || [ "$http_runtime_status" -ne 0 ] || [ "$request_policy_status" -ne 0 ] || [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$child_progress_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi
