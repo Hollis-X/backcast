@@ -295,6 +295,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private TurnTrace.Range sheetRange;
     private WorkTimeline sheetTimeline;
     private WorkTimeline.CommandView sheetCommand;
+    private TextView sheetRequestOutput;
     private ReasoningNotes reasoningNotes;
     private String reasoningPreference = "";
     private final Runnable sheetRefresh = new Runnable() {
@@ -4281,6 +4282,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 if (panel.getChildAt(i) instanceof WorkTimeline.CommandView) panel.removeViewAt(i);
         }
         sheetCommand = null;
+        sheetRequestOutput = null;
         sheetTrace = null;
         sheetRange = null;
         sheetTimeline = null;
@@ -4294,7 +4296,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         int width = getResources().getDisplayMetrics().widthPixels - panel.getPaddingLeft() - panel.getPaddingRight();
         sheetTimeline.measure(View.MeasureSpec.makeMeasureSpec(Math.max(1, width), View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int height = sheetTimeline.getMeasuredHeight() + panel.getPaddingTop() + panel.getPaddingBottom() + dp(40);
+        int height = sheetTimeline.getMeasuredHeight() + panel.getPaddingTop() + panel.getPaddingBottom() + dp(80);
         height = Math.min(height, (int) (getResources().getDisplayMetrics().heightPixels * .72f));
         ViewGroup.LayoutParams lp = panel.getLayoutParams();
         if (lp.height != height) { lp.height = height; panel.setLayoutParams(lp); }
@@ -4308,11 +4310,70 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         body.removeAllViews();
         sheetTrace = range.trace;
         sheetRange = range;
+        TextView diagnostics = new TextView(this);
+        diagnostics.setText("请求诊断");
+        diagnostics.setTextSize(14);
+        diagnostics.setTextColor(0xFF6E6E76);
+        diagnostics.setPadding(0, dp(10), 0, dp(10));
+        diagnostics.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { showRequestDiagnostics(); }
+        });
+        body.addView(diagnostics, fullWidth());
         sheetTimeline = new WorkTimeline(this, activityActions());
         body.addView(sheetTimeline, fullWidth());
         syncSheetTools();
         fitActivitySheet();
         body.postDelayed(sheetRefresh, 750);
+    }
+
+    /** Read diagnostics off the UI thread and reject results after sheet/session changes. */
+    private void showRequestDiagnostics() {
+        final long sid = sessionId;
+        if (sid < 0) return;
+        LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
+        if (body == null) return;
+        showSheet();
+        body.removeAllViews();
+        final TextView output = new TextView(this);
+        output.setText("本会话最近 20 次请求\n正在读取…");
+        output.setTextSize(14);
+        output.setTextColor(0xFF252528);
+        output.setLineSpacing(dp(5), 1f);
+        enableCopy(output);
+        body.addView(output, fullWidth());
+        sheetRequestOutput = output;
+        historyReader.execute(new Runnable() {
+            @Override public void run() {
+                String value;
+                try { value = requestDiagnosticsText(chatStore.requestEvents(sid, 20)); }
+                catch (Exception error) { value = "请求诊断读取失败"; }
+                final String text = value;
+                ui(new Runnable() {
+                    @Override public void run() {
+                        if (sessionId == sid && sheetRequestOutput == output && !isFinishing()) output.setText(text);
+                    }
+                });
+            }
+        });
+    }
+
+    private String requestDiagnosticsText(List<ChatStore.RequestEvent> events) {
+        StringBuilder text = new StringBuilder("本会话最近 20 次请求\n仅记录请求耗时和安全错误分类；不是工具执行耗时。\n");
+        if (events.isEmpty()) return text.append("\n暂无记录。更新前的请求没有诊断数据。").toString();
+        for (ChatStore.RequestEvent event : events) {
+            String purpose = "compact".equals(event.purpose) ? "上下文压缩"
+                    : "review".equals(event.purpose) ? "权限检查" : "模型请求";
+            String outcome = "success".equals(event.outcome) ? "成功"
+                    : "cancelled".equals(event.outcome) ? "已取消"
+                    : "retryable_error".equals(event.outcome) ? "可重试失败" : "失败";
+            text.append('\n').append(android.text.format.DateFormat.format("MM-dd HH:mm:ss", event.recordedAt))
+                    .append(" · ").append(purpose).append(" · ").append(outcome)
+                    .append('\n').append("请求耗时 ").append(event.elapsedMs).append("ms");
+            if (event.retryCount > 0) text.append(" · 本轮累计重试 ").append(event.retryCount).append(" 次");
+            if (event.reason.length() > 0) text.append('\n').append(event.reason);
+            text.append('\n');
+        }
+        return text.toString();
     }
 
     private void hideWorkSheet() {
@@ -4322,6 +4383,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View body = findViewById(R.id.sheet_body);
         if (body != null) body.removeCallbacks(sheetRefresh);
         sheetTrace = null; sheetTimeline = null; sheetRange = null;
+        sheetRequestOutput = null;
         if (overlay == null || overlay.getVisibility() != View.VISIBLE) return;
         sheetToken++;
         final int token = sheetToken;

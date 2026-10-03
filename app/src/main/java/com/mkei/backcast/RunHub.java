@@ -65,6 +65,15 @@ public final class RunHub {
         }
     }
 
+    private final class StoredRecorder implements AgentLoop.Recorder, AgentLoop.RequestRecorder {
+        @Override public void record(long sessionId, Message message) { store.append(sessionId, message); }
+        @Override public void replace(long sessionId, List<Message> messages) { store.replaceAll(sessionId, messages); }
+        @Override public void recordRequest(long sessionId, String purpose, long elapsedMs,
+                String outcome, String reason, int retryCount) {
+            store.recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount);
+        }
+    }
+
     private RunHub(android.content.Context context) {
         app = context.getApplicationContext();
         store = new ChatStore(app);
@@ -77,17 +86,7 @@ public final class RunHub {
                 }, android.os.Build.CPU_ABI, android.os.Build.VERSION.SDK_INT);
         uiMaterials = new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
                 new java.io.File(app.getFilesDir(), "temporary-workspaces/tool-ui"), 0);
-        recorder = new AgentLoop.Recorder() {
-            @Override
-            public void record(long sessionId, Message message) {
-                store.append(sessionId, message);
-            }
-
-            @Override
-            public void replace(long sessionId, List<Message> messages) {
-                store.replaceAll(sessionId, messages);
-            }
-        };
+        recorder = new StoredRecorder();
         durability = new AgentLoop.Durability() {
             @Override
             public void save(long sessionId, boolean running, String goal, String status, long elapsedMs,

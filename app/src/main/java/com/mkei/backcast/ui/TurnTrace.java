@@ -36,6 +36,8 @@ public class TurnTrace {
     public String phase = "model";
     public int retryCount;
     public String retryReason = "";
+    /** Allows inspecting a failed/slow request even before any model text arrives. */
+    public boolean requestDiagnosticsAvailable;
     /**
      * 正文开始时 order 的条数。
      * 这个下标之前的思考和命令留在工作时间下面，之后新来的才挂到正文下面。
@@ -99,6 +101,7 @@ public class TurnTrace {
         }
 
         public boolean hasDetail() {
+            if (trace.requestDiagnosticsAvailable) return true;
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
                 if (piece.step != null || trace.showReasoning && piece.think != null) return true;
@@ -130,7 +133,7 @@ public class TurnTrace {
     }
 
     public boolean hasDetail() {
-        return showReasoning && hasThink() || !steps.isEmpty();
+        return requestDiagnosticsAvailable || showReasoning && hasThink() || !steps.isEmpty();
     }
 
     /**
@@ -349,6 +352,7 @@ public class TurnTrace {
 
     /** Approval updates the same row as the preview, without claiming execution. */
     public void setProgress(String next, String name, String detail, int attempt) {
+        requestDiagnosticsAvailable = true;
         String value = next == null ? "" : next;
         retryCount = Math.max(retryCount, Math.max(0, attempt));
         if ("retry".equals(value)) {
@@ -423,8 +427,9 @@ public class TurnTrace {
             else current = "等待模型";
         }
         if (retryCount > 0) current += (current.length() == 0 ? "" : " · ") + "已重试 " + retryCount + " 次";
-        if (live && "retry".equals(phase) && retryReason.length() > 0)
-            current += " · " + (retryReason.length() > 48 ? retryReason.substring(0, 48) + "…" : retryReason);
+        if (live && retryReason.length() > 0)
+            current += " · " + ("retry".equals(phase) ? "" : "上次失败：")
+                    + (retryReason.length() > 48 ? retryReason.substring(0, 48) + "…" : retryReason);
         return current;
     }
 

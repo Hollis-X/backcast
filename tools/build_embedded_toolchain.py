@@ -19,6 +19,7 @@ import subprocess
 import tarfile
 import urllib.request
 import zipfile
+from objection_android import BRIDGE_VERSION, MODE, PATCH_DESCRIPTION, patch_common
 
 BASE = "https://packages.termux.dev/apt/"
 APKTOOL = "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar"
@@ -149,6 +150,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh-manifest", action="store_true", help="Record gzip and uncompressed tar checksums without rebuilding payloads")
     parser.add_argument("--rebuild-common", action="store_true", help="Rebuild only Apktool dex and retain the shipped Python/native dependencies")
+    parser.add_argument("--patch-objection-common", action="store_true", help="Apply the guarded ART compatibility patch without rebuilding or downloading native tools")
     parser.add_argument("--work", type=pathlib.Path)
     parser.add_argument("--r8", type=pathlib.Path)
     parser.add_argument("--android-jar", type=pathlib.Path)
@@ -163,6 +165,27 @@ def main():
             artifact.update(artifact_metadata(repo / "app/src/main/assets" / artifact["asset"]))
         manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         return
+    if args.patch_objection_common:
+        if args.work is None:
+            parser.error("--work is required for the disposable extraction directory")
+        args.work.mkdir(parents=True, exist_ok=True)
+        common = args.work / "common"
+        common.mkdir(exist_ok=True)
+        with tarfile.open(output / "common.tar.gz") as archive:
+            archive.extractall(common, filter="data")
+        patch_common(common)
+        manifest_path = output / "manifest.json"
+        data = json.loads(manifest_path.read_text())
+        artifact = next(item for item in data["artifacts"] if item["abi"] == "any")
+        artifact.update(compress(common, output / "common.tar.gz"))
+        data["java_bridge"] = BRIDGE_VERSION
+        data["objection_art_mode"] = MODE
+        data["objection_art_patch_source"] = "https://github.com/frida/frida-java-bridge/pull/407"
+        if PATCH_DESCRIPTION not in data["patches"]:
+            data["patches"].append(PATCH_DESCRIPTION)
+        manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        print(json.dumps(artifact, indent=2))
+        return
     if args.work is None or args.r8 is None or args.android_jar is None:
         parser.error("--work, --r8 and --android-jar are required when rebuilding")
     work = args.work
@@ -176,6 +199,7 @@ def main():
         with tarfile.open(output / "common.tar.gz") as archive:
             archive.extractall(common, filter="data")
         sources = build_apktool(repo, work, args, common)
+        patch_common(common)
         for source in sources:
             data["sources"] = [old for old in data["sources"] if old["url"] != source["url"]]
             data["sources"].append(source)
@@ -183,8 +207,11 @@ def main():
         common_artifact.update(compress(common, output / "common.tar.gz"))
         data["converter"]["sha256"] = hashlib.sha256(args.r8.read_bytes()).hexdigest()
         data["pngj"] = "2.1.0"
+        data["java_bridge"] = BRIDGE_VERSION
+        data["objection_art_mode"] = MODE
+        data["objection_art_patch_source"] = "https://github.com/frida/frida-java-bridge/pull/407"
         data["patches"] = [patch for patch in data["patches"] if not patch.startswith("Apktool Res9patchStreamDecoder:")]
-        for patch in (PNG_PATCH, OS_PATCH):
+        for patch in (PNG_PATCH, OS_PATCH, PATCH_DESCRIPTION):
             if patch not in data["patches"]:
                 data["patches"].append(patch)
         for artifact in data["artifacts"]:
@@ -238,6 +265,7 @@ def main():
             release = json.load(urllib.request.urlopen("https://pypi.org/pypi/" + package_metadata["Name"] + "/" + package_metadata["Version"] + "/json"))
             entry = next(item for item in release["urls"] if item["filename"] == path.name)
             sources.append(fetch(entry["url"], path, entry["digests"]["sha256"]))
+    patch_common(common)
     artifacts = [{"asset": "toolchain/common.tar.gz", "abi": "any", "min_sdk": 26, **compress(common, output / "common.tar.gz")}]
     for arch, abi, rarch in [("aarch64", "arm64-v8a", "aarch64"), ("arm", "armeabi-v7a", "arm")]:
         packages = index(BASE + "termux-main/dists/stable/main/binary-" + arch + "/Packages.gz")
@@ -345,7 +373,7 @@ def main():
         if artifact["bytes"] >= 100 * 1024 * 1024:
             raise ValueError("Asset exceeds GitHub's file limit: " + abi)
         artifacts.append(artifact)
-    manifest = {"version": "2026.10.01", "apktool": "2.9.3", "pngj": "2.1.0", "radare2": "6.2.2", "objection": "1.12.5", "patches": [PNG_PATCH, OS_PATCH, "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix", "Materialize upstream internal symlinks as regular copies for private extraction", "Exclude desktop aapt binaries; include Android aapt2", "Exclude unneeded pip and Frida tracer web UI"], "converter": {"tool": "Google R8/D8 8.3.37", "sha256": hashlib.sha256(args.r8.read_bytes()).hexdigest(), "dex_min_api": 26}, "artifacts": artifacts, "sources": sources}
+    manifest = {"version": "2026.10.01", "apktool": "2.9.3", "pngj": "2.1.0", "radare2": "6.2.2", "objection": "1.12.5", "java_bridge": BRIDGE_VERSION, "objection_art_mode": MODE, "objection_art_patch_source": "https://github.com/frida/frida-java-bridge/pull/407", "patches": [PNG_PATCH, OS_PATCH, PATCH_DESCRIPTION, "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix", "Materialize upstream internal symlinks as regular copies for private extraction", "Exclude desktop aapt binaries; include Android aapt2", "Exclude unneeded pip and Frida tracer web UI"], "converter": {"tool": "Google R8/D8 8.3.37", "sha256": hashlib.sha256(args.r8.read_bytes()).hexdigest(), "dex_min_api": 26}, "artifacts": artifacts, "sources": sources}
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(artifacts, indent=2))
 

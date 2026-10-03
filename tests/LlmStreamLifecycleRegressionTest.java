@@ -58,6 +58,7 @@ public final class LlmStreamLifecycleRegressionTest {
         final AtomicInteger requests = new AtomicInteger();
         final String first, tail;
         final boolean payloadHeartbeat, silentTail, fragmented;
+        final long headerDelayMs;
         StreamingServer(String first, String tail, boolean payloadHeartbeat) throws IOException {
             this(first, tail, payloadHeartbeat, false);
         }
@@ -65,7 +66,11 @@ public final class LlmStreamLifecycleRegressionTest {
             this(first, tail, payloadHeartbeat, silentTail, false);
         }
         StreamingServer(String first, String tail, boolean payloadHeartbeat, boolean silentTail, boolean fragmented) throws IOException {
+            this(first, tail, payloadHeartbeat, silentTail, fragmented, fragmented ? 350L : 0L);
+        }
+        StreamingServer(String first, String tail, boolean payloadHeartbeat, boolean silentTail, boolean fragmented, long headerDelayMs) throws IOException {
             this.first = first; this.tail = tail; this.payloadHeartbeat = payloadHeartbeat; this.silentTail = silentTail; this.fragmented = fragmented;
+            this.headerDelayMs = headerDelayMs;
             executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
                 @Override public Thread newThread(Runnable runnable) {
                     Thread thread = new Thread(runnable, "fixture-stream-tail"); thread.setDaemon(true); return thread;
@@ -84,8 +89,8 @@ public final class LlmStreamLifecycleRegressionTest {
             InputStream request = exchange.getRequestBody();
             try { byte[] bytes = new byte[4096]; while (request.read(bytes) >= 0) { } }
             finally { request.close(); }
-            if (fragmented) {
-                try { if (stop.await(350, TimeUnit.MILLISECONDS)) return; }
+            if (headerDelayMs > 0) {
+                try { if (stop.await(headerDelayMs, TimeUnit.MILLISECONDS)) return; }
                 catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); exchange.close(); return; }
             }
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
@@ -117,6 +122,41 @@ public final class LlmStreamLifecycleRegressionTest {
             stop.countDown(); http.stop(0); executor.shutdownNow();
             try { check(executor.awaitTermination(2, TimeUnit.SECONDS), "HTTP fixture worker leaked"); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
+        }
+    }
+    private static final class ErrorBodyServer implements HttpHandler, java.io.Closeable {
+        final HttpServer http;
+        final ExecutorService executor;
+        final CountDownLatch stop = new CountDownLatch(1);
+        final AtomicInteger requests = new AtomicInteger();
+        final int status;
+        ErrorBodyServer(int status) throws IOException {
+            this.status = status;
+            executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+                @Override public Thread newThread(Runnable task) {
+                    Thread thread = new Thread(task, "fixture-error-body"); thread.setDaemon(true); return thread;
+                }
+            });
+            http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            http.setExecutor(executor); http.createContext("/v1/chat/completions", this); http.start();
+        }
+        @Override public void handle(HttpExchange exchange) throws IOException {
+            requests.incrementAndGet();
+            InputStream input = exchange.getRequestBody();
+            try { byte[] bytes = new byte[4096]; while (input.read(bytes) >= 0) { } }
+            finally { input.close(); }
+            exchange.sendResponseHeaders(status, 1024);
+            try {
+                exchange.getResponseBody().write("incomplete provider detail".getBytes("UTF-8"));
+                exchange.getResponseBody().flush();
+                stop.await();
+            } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { exchange.close(); }
+        }
+        @Override public void close() throws IOException {
+            stop.countDown(); http.stop(0); executor.shutdownNow();
+            try { check(executor.awaitTermination(2, TimeUnit.SECONDS), "Error-body fixture worker leaked"); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
         }
     }
     private static Object attempt(boolean cancelled) throws Exception {
@@ -244,13 +284,60 @@ public final class LlmStreamLifecycleRegressionTest {
             } finally { client.abort(); worker.join(2500); }
         }
     }
+    private static LlmClient headerClient(StreamingServer server, int idle, int total) {
+        LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + server.http.getAddress().getPort(), "fixture", "fixture");
+        config.timeoutMs = idle; config.totalTimeoutMs = total;
+        return new LlmClient(config);
+    }
+    private static void responseHeadersCanArriveAfterTheTenSecondStreamSlice() throws Exception {
+        try (StreamingServer server = new StreamingServer(SSE, null, false, false, false, 11000L)) {
+            long start = System.nanoTime(); LlmClient.Reply reply = send(server, headerClient(server, 20000, 20000), null);
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            check(reply.error == null && "answer".equals(reply.content) && server.requests.get() == 1,
+                    "Headers inside configured budget failed/retried at the stream slice: " + reply.error);
+            check(elapsed >= 10000 && elapsed < 18000, "Delayed header fixture did not cross the original ten-second timeout: " + elapsed);
+        }
+    }
+    private static void headerTimeoutUsesIdleAndRemainingTotalBudgetAndReportsItsStage() throws Exception {
+        for (int total : new int[]{4000, 500}) {
+            try (StreamingServer server = new StreamingServer(SSE, null, false, false, false, 1500L)) {
+                long start = System.nanoTime(); LlmClient.Reply reply = send(server, headerClient(server, 1000, total), null);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                check(reply.error != null && reply.error.startsWith("响应头等待超时：SocketTimeoutException:")
+                                && !reply.hasToolCalls() && reply.content.length() == 0,
+                        "Header timeout lost its safe fixed stage category: " + reply.error);
+                check(elapsed < (total == 500 ? 1300 : 1800) && server.requests.get() == 1,
+                        "Header deadline ignored idle or remaining total budget: " + elapsed);
+            }
+        }
+    }
+    private static void failedErrorBodyReadPreservesTheReceivedHttpStatus() throws Exception {
+        for (int status : new int[]{401, 403, 503}) {
+            try (ErrorBodyServer server = new ErrorBodyServer(status)) {
+                LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + server.http.getAddress().getPort(), "fixture", "fixture");
+                config.timeoutMs = 1000; config.totalTimeoutMs = 4000;
+                long start = System.nanoTime();
+                LlmClient.Reply reply = new LlmClient(config).send(Arrays.asList(Message.user("fixture")), null, null);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+                check(reply.error != null && ("HTTP " + status + ":").equals(reply.error.trim()),
+                        "Error-body timeout discarded HTTP status: " + reply.error);
+                check(!reply.hasToolCalls() && reply.content.length() == 0 && server.requests.get() == 1,
+                        "Failed error body produced model output or an optional-parameter retry");
+                // JDK streaming POST exposes no 401 error stream; 403/503 exercise the timed-out body read.
+                check((status == 401 || elapsed >= 700) && elapsed < 2500,
+                        "Error-body fixture did not fail within its configured read timeout: " + status + " " + elapsed);
+            }
+        }
+    }
     public static void main(String[] args) throws Exception {
         String[] cases = {"sseDoneClosesWithoutDrainingOpenStream", "firstDoneDoesNotWaitForAnotherNetworkRead",
                 "malformedSseStillClosesStream", "networkReadFailureStillClosesStream", "ordinaryBodyReadsToEofAndCloses",
                 "ordinaryBodyFailureClosesAndPreservesCause", "closeFailureDoesNotDiscardCompleteReply", "cancelledAttemptClosesWithoutReading",
                 "finishedToolCallDoesNotWaitForDoneOrConnectionClose", "delayedUsageTailIsRetainedWithoutDone",
                 "emptyPayloadsDoNotKeepUnfinishedGenerationAlive", "partialToolArgumentsNeverEscapeAtDoneFinishOrEof",
-                "completeEofCallsRemainCompatibleButTruncatedFinishCannotExecute", "abortDuringCompletionTailDiscardsAllOutput"};
+                "completeEofCallsRemainCompatibleButTruncatedFinishCannotExecute", "abortDuringCompletionTailDiscardsAllOutput",
+                "responseHeadersCanArriveAfterTheTenSecondStreamSlice", "headerTimeoutUsesIdleAndRemainingTotalBudgetAndReportsItsStage",
+                "failedErrorBodyReadPreservesTheReceivedHttpStatus"};
         for (String name : cases) { LlmStreamLifecycleRegressionTest.class.getDeclaredMethod(name).invoke(null); System.out.println("PASS " + name); }
         System.out.println(cases.length + " stream lifecycle tests passed");
     }

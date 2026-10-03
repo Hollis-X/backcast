@@ -105,6 +105,12 @@ public class AgentLoop {
         void replace(long sessionId, List<Message> messages);
     }
 
+    /** Transport diagnostics stay outside model messages and contain no response body or credentials. */
+    public interface RequestRecorder {
+        void recordRequest(long sessionId, String purpose, long elapsedMs, String outcome,
+                String reason, int retryCount);
+    }
+
     /** 把「还在跑」和目标写进库。进程被杀掉之后靠这个接上。 */
     public interface Durability {
         /**
@@ -1198,18 +1204,37 @@ public class AgentLoop {
     }
 
     private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, LlmClient.Sink sink,
-            final int token, final int gen) {
+            final int token, final int gen, String purpose) {
         LlmClient current;
+        long requestSession;
+        Recorder requestRecorder;
         synchronized (lock) {
             if (stale(token, gen)) return new LlmClient.Reply();
             current = client;
             requestClient = current;
+            requestSession = sessionKey;
+            requestRecorder = recorder;
         }
+        long started = SystemClock.elapsedRealtime();
         try {
             if (stale(token, gen)) return new LlmClient.Reply();
             LlmClient.Reply reply = current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
                 @Override public boolean isCurrent() { return !stale(token, gen); }
             });
+            if (requestRecorder instanceof RequestRecorder && requestSession >= 0 && reply != null) {
+                boolean cancelledRequest = stale(token, gen);
+                Integer retries = requestRetries.get();
+                try {
+                    ((RequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
+                            Math.max(0L, SystemClock.elapsedRealtime() - started),
+                            cancelledRequest ? "cancelled" : reply.error == null ? "success"
+                                    : isTransient(reply.error) ? "retryable_error" : "error",
+                            cancelledRequest || reply.error == null ? "" : retryReason(reply.error),
+                            retries == null ? 0 : retries.intValue());
+                } catch (RuntimeException diagnosticFailure) {
+                    // A full or unavailable diagnostic store must not discard a valid model response.
+                }
+            }
             UsageObserver observer = usageObserver;
             if (observer != null && reply != null && !stale(token, gen)) {
                 long used = Math.max(0L, reply.promptTokens) + Math.max(0L, reply.completionTokens);
@@ -1423,7 +1448,7 @@ public class AgentLoop {
         int seen = runToken;
         try {
             synchronized (lock) {
-                if (gen != generation || runToken != seen) {
+                if (gen != generation || runToken != seen || busy) {
                     return;
                 }
                 if (!canCompactLocked()) {
@@ -1436,9 +1461,11 @@ public class AgentLoop {
                 acceptedUi = uiToken;
                 cancelled = false;
                 busy = true;
+                pinTurnToolsLocked(token);
                 goalAccounting = goalActive() || budgetPromptDue();
                 resumeAfter = false;
             }
+            beginTemporaryTurn();
             saveRun(true);
             if (refuseDisclosure(sessionId, gen, token)) {
                 return;
@@ -1490,9 +1517,10 @@ public class AgentLoop {
             request.add(Message.user(Compactor.PROMPT));
         }
 
+        int requestStrikes = 0;
         while (!stale(token, gen)) {
 
-            LlmClient.Reply reply = sendRequest(request, null, null, token, gen);
+            LlmClient.Reply reply = sendRequest(request, null, null, token, gen, "compact");
             if (stale(token, gen)) {
                 return false;
             }
@@ -1504,10 +1532,11 @@ public class AgentLoop {
                         continue;
                     }
                 }
-                if (isTransient(reply.error) && !stale(token, gen)) {
+                if (isTransient(reply.error) && requestStrikes < MAX_REQUEST_RETRIES && !stale(token, gen)) {
+                    requestStrikes++;
                     reportRequestRetry(gen, reply.error);
                     try {
-                        Thread.sleep(retryWait(1));
+                        Thread.sleep(retryWait(requestStrikes));
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
                         return false;
@@ -1517,7 +1546,7 @@ public class AgentLoop {
                     }
                     continue;
                 }
-                listener.onError(gen, reply.error);
+                listener.onError(gen, requestFailure(reply.error, requestStrikes));
                 return false;
             }
             accountGoalUsage(reply.promptTokens, reply.completionTokens);
@@ -1669,15 +1698,17 @@ public class AgentLoop {
         return request;
     }
 
-    /**
-     * 断线、超时、服务端暂时拒绝。
-     * 这类错误不结束这一轮：退到后台时连接会被关掉，停在这里就会留下红字。
-     */
+    /** Only temporary network/server failures qualify for bounded retries. */
     private static boolean isTransient(String error) {
         if (error == null) {
             return false;
         }
         String e = error.toLowerCase();
+        java.util.regex.Matcher status = java.util.regex.Pattern.compile("^http (\\d{3})\\b").matcher(e);
+        if (status.find()) {
+            int code = Integer.parseInt(status.group(1));
+            return code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504;
+        }
         return e.contains("socket")
                 || e.contains("connection reset")
                 || e.contains("connection abort")
@@ -1685,16 +1716,12 @@ public class AgentLoop {
                 || e.contains("unexpected end")
                 || e.contains("timeout")
                 || e.contains("timed out")
+                || e.contains("长时间没有输出")
                 || e.contains("failed to connect")
                 || e.contains("unable to resolve")
                 || e.contains("unknownhost")
                 || e.contains("network is unreachable")
-                || e.contains("connection refused")
-                || e.contains("http 429")
-                || e.contains("http 500")
-                || e.contains("http 502")
-                || e.contains("http 503")
-                || e.contains("http 504");
+                || e.contains("connection refused");
     }
 
     /** 连续空续跑。对齐 Codex：标成 blocked，不再自动续。 */
@@ -1727,9 +1754,12 @@ public class AgentLoop {
         saveRun(false);
     }
 
-    /** 目标碰到不是断线的错误时，再试几次。断线不看这个上限。 */
-    private int retryBudget() {
-        return goalActive() ? 5 : 0;
+    private static final int MAX_REQUEST_RETRIES = 2;
+
+    private static String requestFailure(String error, int retries) {
+        String prefix = retries > 0 ? "模型请求连续失败，已停止本轮（重试 " + retries + " 次）："
+                : "模型请求失败，已停止本轮：";
+        return prefix + retryReason(error) + "。请检查接口或网络后再继续。";
     }
 
     private static long retryWait(int strike) {
@@ -1742,8 +1772,10 @@ public class AgentLoop {
         String value = error == null ? "" : error.toLowerCase(java.util.Locale.US);
         java.util.regex.Matcher status = java.util.regex.Pattern.compile("http (\\d{3})").matcher(value);
         if (status.find()) return "接口返回 HTTP " + status.group(1);
+        if (value.contains("响应头等待超时")) return "等待接口首响应超时";
         if (value.contains("timeout") || value.contains("timed out") || value.contains("长时间没有输出")) return "等待模型响应超时";
         if (isContextOverflow(error)) return "模型上下文超限，正在压缩后重试";
+        if (value.contains("工具调用参数") || value.contains("jsonexception")) return "模型返回的工具参数不完整或无效";
         if (isTransient(error)) return "网络连接中断";
         return "模型请求失败";
     }
@@ -1761,6 +1793,11 @@ public class AgentLoop {
             return false;
         }
         String e = error.toLowerCase();
+        java.util.regex.Matcher status = java.util.regex.Pattern.compile("^http (\\d{3})\\b").matcher(e);
+        if (status.find()) {
+            int code = Integer.parseInt(status.group(1));
+            if (code != 400 && code != 413 && code != 422) return false;
+        }
         return e.contains("context_length_exceeded")
                 || e.contains("context length")
                 || e.contains("context window")
@@ -1972,7 +2009,7 @@ public class AgentLoop {
                         listener.onToolPreview(liveGen, index, id, name, arguments);
                     }
                 }
-            }, token, gen);
+            }, token, gen, "model");
             if (stale(token, gen)) {
                 return;
             }
@@ -1987,8 +2024,7 @@ public class AgentLoop {
                     compactedAfterOverflow = true;
                     continue;
                 }
-                // 断线一直问到连上，或者用户点停止。普通任务和目标都一样，不在这里收尾。
-                boolean again = isTransient(reply.error) || strikes < retryBudget();
+                boolean again = isTransient(reply.error) && strikes < MAX_REQUEST_RETRIES;
                 if (again) {
                     strikes++;
                     listener.onRetry(gen);
@@ -2004,7 +2040,7 @@ public class AgentLoop {
                     }
                     continue;
                 }
-                listener.onError(gen, reply.error);
+                listener.onError(gen, requestFailure(reply.error, strikes));
                 return;
             }
             strikes = 0;
@@ -2319,7 +2355,7 @@ public class AgentLoop {
         List<Message> review = new ArrayList<Message>();
         review.add(Message.system(REVIEW_PROMPT));
         review.add(Message.user("Tool: " + name + "\nArguments: " + String.valueOf(args)));
-        LlmClient.Reply reply = sendRequest(review, null, null, token, gen);
+        LlmClient.Reply reply = sendRequest(review, null, null, token, gen, "review");
         if (stale(token, gen)) {
             return null;
         }
@@ -2360,8 +2396,9 @@ public class AgentLoop {
         synchronized (uiLock) {
             if (message == null) return;
             if (recorder != null && sessionId >= 0) recorder.record(sessionId, message);
-            if (Message.ASSISTANT.equals(message.role) || Message.USER.equals(message.role)
-                    || Message.TOOL.equals(message.role)) uiEvents.clear();
+            if (Message.USER.equals(message.role)) uiEvents.clear();
+            else if (Message.ASSISTANT.equals(message.role) || Message.TOOL.equals(message.role))
+                uiEvents.clearOutputPreservingRetry();
         }
     }
 

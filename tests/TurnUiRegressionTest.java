@@ -207,6 +207,7 @@ public final class TurnUiRegressionTest {
                 + "void addView(View v,int i,Object p){children.add(i,v);v.parent=this;} int indexOfChild(View v){return children.indexOf(v);}"
                 + "void removeView(View v){children.remove(v);v.parent=null;}"
                 + "void removeViewAt(int i){removeView(children.get(i));}"
+                + "void removeAllViews(){for(View v:new ArrayList<View>(children))removeView(v);}"
                 + "void layout(){int y=0;for(View child:children){if(child instanceof ViewGroup)((ViewGroup)child).layout();child.top=y;y+=child.getHeight();}}"
                 + "int getHeight(){int y=0;for(View child:children)y+=child.getHeight();return children.isEmpty()?height:y;} }"
                 + "static class LinearLayout extends ViewGroup { static final int HORIZONTAL=0,VERTICAL=1;"
@@ -234,13 +235,14 @@ public final class TurnUiRegressionTest {
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
                 + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51; }"
-                + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6;} }"
+                + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400;}"
                 + "Resources getResources(){return new Resources();} void enableCopy(TextView t){}"
                 + "static final String INPUT_METHOD_SERVICE=\"input\"; TextView prompt=new TextView();View currentFocus=prompt,mainRoot=new View();"
                 + "android.view.inputmethod.InputMethodManager keyboard=new android.view.inputmethod.InputMethodManager();"
-                + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return mainRoot;}"
+                + "LinearLayout diagnosticsBody=new LinearLayout();TextView sheetRequestOutput;void showSheet(){sheetRequestOutput=null;}"
+                + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return id==R.id.sheet_body?diagnosticsBody:mainRoot;}"
                 + "static List<Runnable> posted=new ArrayList<Runnable>(); List<Runnable> uiTasks=Collections.synchronizedList(new ArrayList<Runnable>());"
                 + "Object approvalLock=new Object();List<ApprovalRequest> approvals=new LinkedList<ApprovalRequest>();volatile boolean activityDestroyed;"
                 + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newSingleThreadExecutor();"
@@ -249,7 +251,10 @@ public final class TurnUiRegressionTest {
                 + "static class QueuedReader { List<Runnable> tasks=new ArrayList<Runnable>(); void execute(Runnable r){tasks.add(r);} }"
                 + "static class ChatStore { static class MessagePage { List<Message> messages,trailingResults=new ArrayList<Message>(); String requestBefore=\"\"; Message leadingAssistant; long firstId,earlierCount;"
                 + "MessagePage(List<Message> m){messages=m;} } MessagePage nextPage; int reads; long sid,before; int limit;"
-                + "MessagePage messagePage(long s,long b,int l){reads++;sid=s;before=b;limit=l;return nextPage;} }"
+                + "MessagePage messagePage(long s,long b,int l){reads++;sid=s;before=b;limit=l;return nextPage;}"
+                + "static class RequestEvent{public long recordedAt,elapsedMs;public String purpose,outcome,reason;public int retryCount;}"
+                + "List<RequestEvent> diagnosticEvents=new ArrayList<RequestEvent>();int diagnosticReads,diagnosticLimit;long diagnosticSid;"
+                + "List<RequestEvent> requestEvents(long s,int count){diagnosticReads++;diagnosticSid=s;diagnosticLimit=count;return diagnosticEvents;} }"
                 + "QueuedReader historyReader=new QueuedReader(); ChatStore chatStore=new ChatStore();"
                 + "int historyToken,scrollActionToken; long historySequence=-1,sessionId=7,earlierBeforeId; boolean sessionOpening,earlierLoading,initialHistoryLoading,historyInserting,followLatest=true,autoScrollQueued,finishing,latestJumpAnimating;"
                 + "List<Runnable> historyEvents=new ArrayList<Runnable>(); LinearLayout stream=new LinearLayout(),renderHost; TextView earlierRow; ImageView latestButton=new ImageView();"
@@ -315,7 +320,7 @@ public final class TurnUiRegressionTest {
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
                 "refreshFoldResults", "summaryChevron", "syncWorkChevron", "applyTurnProgress",
-                "bindSummary", "displayElapsed", "seconds")) {
+                "bindSummary", "displayElapsed", "seconds", "requestDiagnosticsText", "showRequestDiagnostics")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
             source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this"));
         }
@@ -586,7 +591,7 @@ public final class TurnUiRegressionTest {
                 "Live header does not distinguish total latency from actual tool execution: " + get(header, "text"));
         invoke(view, "applyTurnProgress", "model", "", "", 2);
         invoke(view, "bindSummary", header, trace);
-        check(get(header, "text").equals("总耗时 400s · 等待模型 · 已重试 2 次"),
+        check(get(header, "text").equals("总耗时 400s · 等待模型 · 已重试 2 次 · 上次失败：连接中断，准备重新请求"),
                 "Next model request faked a new retry or retained the retry phase");
         invoke(view, "applyTurnProgress", "model", "", "", 3);
         check((Integer) get(trace, "retryCount") == 3, "Snapshot's cumulative count was lost outside retry phase");
@@ -594,6 +599,48 @@ public final class TurnUiRegressionTest {
         invoke(view, "bindSummary", header, trace);
         check(get(header, "text").equals("工作了 400s · 已重试 3 次"), "Sealed header still claims active execution");
         pass("retryRollbackPreservesWholeTurnClockAndCumulativeRetryMetadata");
+    }
+
+    private static void requestDiagnosticsKeepRealDurationsAndRejectStaleSheetReads() throws Exception {
+        Object view = fixture(), store = get(view, "chatStore");
+        Object event = nested(view, "RequestEvent", new Class<?>[0]);
+        field(event, "purpose", "model"); field(event, "outcome", "retryable_error");
+        field(event, "reason", "接口返回 HTTP 503"); field(event, "elapsedMs", 12567L);
+        field(event, "recordedAt", 1791012896053L); field(event, "retryCount", 2);
+        @SuppressWarnings("unchecked") List<Object> events = (List<Object>) get(store, "diagnosticEvents");
+        events.add(event);
+        call(view, "showRequestDiagnostics");
+        Object output = get(view, "sheetRequestOutput");
+        check((Integer) get(store, "diagnosticReads") == 0, "Request log read blocked the UI thread");
+        drain(get(view, "historyReader"), "tasks");
+        check((Integer) get(store, "diagnosticLimit") == 20 && (Long) get(store, "diagnosticSid") == 7L,
+                "Diagnostics query was unbounded or read another conversation");
+        drain(view, "uiTasks");
+        String text = (String) get(output, "text");
+        check(text.contains("请求耗时 12567ms") && text.contains("接口返回 HTTP 503")
+                        && text.contains("可重试失败") && text.contains("本轮累计重试 2 次")
+                        && text.contains("不是工具执行耗时"), "Diagnostic detail lost timing or attributed it to tool execution");
+        call(view, "showRequestDiagnostics"); Object old = get(view, "sheetRequestOutput");
+        drain(get(view, "historyReader"), "tasks");
+        call(view, "showRequestDiagnostics"); Object next = get(view, "sheetRequestOutput");
+        drain(view, "uiTasks");
+        check(((String) get(old, "text")).contains("正在读取") && ((String) get(next, "text")).contains("正在读取"),
+                "A replaced sheet accepted an older reader callback");
+        drain(get(view, "historyReader"), "tasks"); field(view, "sessionId", 8L);
+        drain(view, "uiTasks");
+        check(((String) get(next, "text")).contains("正在读取"), "Diagnostics updated a switched conversation");
+        check(((String) invoke(view, "requestDiagnosticsText", new ArrayList<Object>())).contains("更新前的请求没有诊断数据"),
+                "Legacy missing diagnostics were reported as success or zero latency");
+        Object trace = get(progressFixture(), "currentTrace");
+        for (int i = 0; i < 5; i++) invoke(trace, "setProgress", "model", "", "", 0);
+        check((Integer) get(trace, "retryCount") == 0 && !((String) invoke(trace, "progressCaption", true)).contains("重试"),
+                "Successful multi-request work was counted as retries");
+        check((Boolean) call(trace, "hasDetail"), "A slow request with no model output cannot open its diagnostic detail");
+        Class<?> rangeType = null;
+        for (Class<?> candidate : trace.getClass().getDeclaredClasses()) if (candidate.getSimpleName().equals("Range")) rangeType = candidate;
+        Object emptyRange = rangeType.getConstructor(trace.getClass(), int.class).newInstance(trace, 0);
+        check((Boolean) call(emptyRange, "hasDetail"), "Empty initial work range cannot open request diagnostics");
+        pass("requestDiagnosticsKeepRealRequestDurationAndRejectStaleSheetResults");
     }
 
     private static void restoredPendingCallUsesOneRowAndReceivesResult() throws Exception {
@@ -1406,6 +1453,7 @@ public final class TurnUiRegressionTest {
                 previewUpdatesOneStep();
                 toolStagesDistinguishPreviewApprovalAndActualExecution();
                 retryRollbackPreservesTotalClockAndReportedCount();
+                requestDiagnosticsKeepRealDurationsAndRejectStaleSheetReads();
                 restoredPendingCallUsesOneRowAndReceivesResult();
                 currentExecutionWinsQueuedPreviewsAndChildrenHaveOwnStage();
                 slicedReplayMatchesFullReplay();

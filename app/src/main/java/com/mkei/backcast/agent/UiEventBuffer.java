@@ -57,6 +57,18 @@ final class UiEventBuffer {
 
     void clear() { events.clear(); }
 
+    /** Committed output has its transcript row; the last safe error remains turn metadata. */
+    void clearOutputPreservingRetry() {
+        Event retry = null;
+        for (Event event : events) if (isRetryProgress(event)) retry = event;
+        clear();
+        if (retry != null) events.add(retry.copy());
+    }
+
+    private static boolean isRetryProgress(Event event) {
+        return event.kind == PROGRESS && "retry".equals(event.name);
+    }
+
     void add(Event event) {
         if (event.kind == END) return;
         if (event.kind == RETRY) {
@@ -77,6 +89,7 @@ final class UiEventBuffer {
                 Event previous = events.get(i);
                 if (previous.kind == event.kind && previous.token == event.token
                         && previous.generation == event.generation
+                        && (event.kind != PROGRESS || isRetryProgress(previous) == isRetryProgress(event))
                         && (event.kind != PREVIEW || previous.first == event.first)) {
                     if (event.kind == PREVIEW) events.set(i, event.copy());
                     else { events.remove(i); events.add(event.copy()); }

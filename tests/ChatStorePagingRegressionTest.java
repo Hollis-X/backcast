@@ -58,16 +58,28 @@ public final class ChatStorePagingRegressionTest {
                 "import java.util.*; import android.database.Cursor; import android.content.ContentValues;"
                 + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5;"
                 + "private static final List<Map<String,Object>> rows=new ArrayList<Map<String,Object>>(); private static long next=1;"
-                + "public static void reset(){rows.clear();next=1;} public void execSQL(String s){} public void execSQL(String s,Object[] a){}"
+                + "public static final List<String> statements=new ArrayList<String>();"
+                + "public static void reset(){rows.clear();next=1;statements.clear();} public void execSQL(String s){statements.add(s);}"
+                + "public void execSQL(String s,Object[] a){if(!s.startsWith(\"DELETE FROM request_events WHERE session_id=? AND id NOT IN\")"
+                + "||!s.endsWith(\"ORDER BY id DESC LIMIT 200)\"))throw new AssertionError(s);"
+                + "long sid=((Number)a[0]).longValue();if(sid!=((Number)a[1]).longValue())throw new AssertionError(\"Retention crossed sessions\");"
+                + "List<Map<String,Object>> selected=new ArrayList<Map<String,Object>>();for(Map<String,Object> row:rows)"
+                + "if(row.get(\"table\").equals(\"request_events\")&&((Number)row.get(\"session_id\")).longValue()==sid)selected.add(row);"
+                + "while(selected.size()>200)rows.remove(selected.remove(0));}"
                 + "public void beginTransaction(){} public void setTransactionSuccessful(){} public void endTransaction(){}"
                 + "public long insert(String table,String nullColumn,ContentValues values){Map<String,Object> row=new HashMap<String,Object>(values);"
-                + "long id=next++;row.put(\"id\",Long.valueOf(id));if(table.equals(\"messages\"))rows.add(row);return id;}"
+                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\"))rows.add(row);return id;}"
                 + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){return insert(t,n,v);}"
-                + "public int update(String t,ContentValues v,String s,String[] a){return 0;} public int delete(String t,String s,String[] a){return 0;}"
+                + "public int update(String t,ContentValues v,String s,String[] a){if(t.equals(\"sessions\"))return 0;"
+                + "if(!s.equals(\"id=?\"))throw new AssertionError(s);int changed=0;for(Map<String,Object> row:rows)"
+                + "if(row.get(\"table\").equals(t)&&((Number)row.get(\"id\")).longValue()==Long.parseLong(a[0])){row.putAll(v);changed++;}return changed;}"
+                + "public int delete(String t,String s,String[] a){if(!s.equals(\"session_id=?\")&&!t.equals(\"sessions\"))throw new AssertionError(s);"
+                + "int changed=0;for(Iterator<Map<String,Object>> i=rows.iterator();i.hasNext();){Map<String,Object> row=i.next();"
+                + "if(row.get(\"table\").equals(t)&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(a[0])){i.remove();changed++;}}return changed;}"
                 + "public Cursor query(String t,String[] c,String s,String[] a,String g,String h,String o){return query(t,c,s,a,g,h,o,null);}"
                 + "public Cursor query(String table,String[] columns,String selection,String[] args,String group,String having,String order,String limit){"
                 + "List<Map<String,Object>> selected=new ArrayList<Map<String,Object>>();"
-                + "for(Map<String,Object> row:rows){boolean include=true;int arg=0;"
+                + "for(Map<String,Object> row:rows){if(!row.get(\"table\").equals(table))continue;boolean include=true;int arg=0;"
                 + "for(String condition:selection.split(\" AND \")){"
                 + "if(condition.equals(\"session_id=?\")){if(((Number)row.get(\"session_id\")).longValue()!=Long.parseLong(args[arg++]))include=false;}"
                 + "else if(condition.equals(\"id<?\")){if(((Number)row.get(\"id\")).longValue()>=Long.parseLong(args[arg++]))include=false;}"
@@ -84,7 +96,7 @@ public final class ChatStorePagingRegressionTest {
                 + "for(int i=0;i<Math.min(maximum,selected.size());i++){Object[] data=new Object[columns.length];"
                 + "for(int j=0;j<columns.length;j++)data[j]=selected.get(i).get(columns[j]);projected.add(data);}return new Cursor(projected);}"
                 + "public Cursor rawQuery(String sql,String[] args){if(!sql.startsWith(\"SELECT COUNT(*) FROM messages\"))throw new AssertionError(sql);"
-                + "long count=0;for(Map<String,Object> row:rows)if(((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0])"
+                + "long count=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\")&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0])"
                 + "&&((Number)row.get(\"id\")).longValue()<Long.parseLong(args[1]))count++;"
                 + "List<Object[]> result=new ArrayList<Object[]>();result.add(new Object[]{Long.valueOf(count)});return new Cursor(result);} }");
     }
@@ -200,6 +212,82 @@ public final class ChatStorePagingRegressionTest {
                 && field(page, "leadingAssistant") == null, "Empty page carried stale cursors or context");
     }
 
+    private static void stoppedEmptyTurnDoesNotRewritePreviousTurnTime() throws Exception {
+        Object store = fresh();
+        append(store, 7, Message.user("previous turn"));
+        Message previous = Message.assistant("previous answer", null);
+        previous.elapsedMs = 3000; previous.thinkMs = 400;
+        append(store, 7, previous);
+        append(store, 7, Message.user("new turn with no reply yet"));
+        storeType.getMethod("markElapsed", long.class, long.class, long.class).invoke(store, 7L, 2684000L, 1000L);
+        List<Message> result = messages(page(store, 7, -1, 48));
+        check(result.get(1).elapsedMs == 3000 && result.get(1).thinkMs == 400,
+                "Stopping a reply-less new turn inflated the previous answer's elapsed time");
+        append(store, 8, Message.user("other session"));
+        append(store, 8, Message.assistant("other answer", null));
+        append(store, 7, Message.assistant("current answer", null));
+        storeType.getMethod("markElapsed", long.class, long.class, long.class).invoke(store, 7L, 5000L, 700L);
+        storeType.getMethod("markElapsed", long.class, long.class, long.class).invoke(store, 7L, 1000L, 100L);
+        result = messages(page(store, 7, -1, 48));
+        check(result.get(1).elapsedMs == 3000 && result.get(3).elapsedMs == 5000 && result.get(3).thinkMs == 700,
+                "Current turn timing lost monotonic metadata or crossed its user boundary");
+        check(messages(page(store, 8, -1, 48)).get(1).elapsedMs == 0, "Elapsed time crossed sessions");
+    }
+
+    private static void requestDiagnosticsAreBoundedAndSeparateFromConversation() throws Exception {
+        Object store = fresh();
+        append(store, 7, Message.user("inspect"));
+        MethodAccess.recordRequest(store, 8, "model", 45, "success", "", 0);
+        for (int i = 0; i < 205; i++) MethodAccess.recordRequest(store, 7, "model", i,
+                i == 204 ? "retryable_error" : "success", i == 204 ? "接口返回 HTTP 503" : "", i == 204 ? 2 : 0);
+        List<?> all = MethodAccess.requestEvents(store, 7, Integer.MAX_VALUE);
+        check(all.size() == 200 && number(all.get(0), "elapsedMs") == 204
+                        && number(all.get(199), "elapsedMs") == 5,
+                "Request history exceeded its cap or discarded the newest attempts");
+        check(MethodAccess.requestEvents(store, 7, 20).size() == 20 && MethodAccess.requestEvents(store, 7, 0).size() == 1,
+                "Diagnostic reads were unbounded");
+        check("retryable_error".equals(field(all.get(0), "outcome"))
+                        && "接口返回 HTTP 503".equals(field(all.get(0), "reason"))
+                        && (Integer) field(all.get(0), "retryCount") == 2,
+                "Safe request failure metadata was not preserved");
+        check(MethodAccess.requestEvents(store, 8, 200).size() == 1, "Retention deleted another conversation's request");
+        check(messages(page(store, 7, -1, 48)).size() == 1, "Diagnostics polluted model/transcript history");
+        storeType.getMethod("delete", long.class).invoke(store, 7L);
+        check(MethodAccess.requestEvents(store, 7, 200).isEmpty() && MethodAccess.requestEvents(store, 8, 200).size() == 1,
+                "Conversation removal left private request logs or removed another conversation's logs");
+    }
+
+    private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
+        Object store = fresh();
+        Object db = databaseType.getConstructor().newInstance();
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 11);
+        @SuppressWarnings("unchecked")
+        List<String> sql = (List<String>) databaseType.getField("statements").get(null);
+        check(sql.size() == 2 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
+                        && sql.get(1).contains("request_events(session_id,id)"),
+                "Version 10 upgrade did not create only the diagnostic table and index");
+        MethodAccess.recordRequest(store, 7, "review", 123, "error", "权限检查失败\n服务暂不可用", 0);
+        MethodAccess.recordRequest(store, 7, "compact", 0, "cancelled", "用户停止", 1);
+        List<?> events = MethodAccess.requestEvents(store, 7, 20);
+        check("compact".equals(field(events.get(0), "purpose")) && "cancelled".equals(field(events.get(0), "outcome"))
+                        && "review".equals(field(events.get(1), "purpose"))
+                        && "权限检查失败 服务暂不可用".equals(field(events.get(1), "reason"))
+                        && number(events.get(1), "elapsedMs") == 123 && number(events.get(1), "recordedAt") > 0,
+                "Purpose, cancellation, safe reason or request duration was decoded incorrectly");
+        try { ((List) events).clear(); throw new AssertionError("Diagnostics were mutable"); }
+        catch (UnsupportedOperationException expected) { }
+    }
+
+    private static final class MethodAccess {
+        static void recordRequest(Object store, long sid, String purpose, long ms, String outcome, String reason, int retry) throws Exception {
+            storeType.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class)
+                    .invoke(store, sid, purpose, ms, outcome, reason, retry);
+        }
+        static List<?> requestEvents(Object store, long sid, int limit) throws Exception {
+            return (List<?>) storeType.getMethod("requestEvents", long.class, int.class).invoke(store, sid, limit);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static void trailingResultsFinishOnlyTheSameToolBatch() throws Exception {
         Object store = fresh();
@@ -256,7 +344,9 @@ public final class ChatStorePagingRegressionTest {
                 contextType = loader.loadClass("android.content.Context");
                 for (String name : Arrays.asList("newestPageIsBoundedAndAscending", "cursorSurvivesNewMessages",
                         "toolPageRetainsOnlyLeadingLabels", "hugeTurnStillHasHardPageLimit",
-                        "messageMetadataSurvivesPaging", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch")) {
+                        "messageMetadataSurvivesPaging", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
+                        "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
+                        "legacyDatabaseUpgradeAddsLocalRequestDiagnostics")) {
                     ChatStorePagingRegressionTest.class.getDeclaredMethod(name).invoke(null);
                     System.out.println("PASS " + name);
                     passed++;

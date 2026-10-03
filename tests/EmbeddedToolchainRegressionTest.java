@@ -172,6 +172,12 @@ public final class EmbeddedToolchainRegressionTest {
         }
         String bootstrap = objection.prefix.get(1);
         check(bootstrap.contains("version_info") && bootstrap.contains("BACKCAST_FRIDA_PORT") && bootstrap.contains("BACKCAST_FRIDA_PID"), "Objection startup is not offline or isolated per invocation");
+        String agent = new String(bytes(new File(site, "objection/agent.js")), "UTF-8");
+        check(agent.startsWith("// Backcast:") && agent.contains("globalThis.FRIDA_JAVA_BRIDGE_DISABLE_JVMTI = true;")
+                && agent.contains("function tryGetEnvJvmti(vm3, runtime4) {\n  let env3 = null;\n  if (globalThis.FRIDA_JAVA_BRIDGE_DISABLE_JVMTI === true)")
+                && agent.contains("if (art_api.class_offset_copied_methods_offset != 0)"), "The actual extracted agent lacks the guarded ART/JNI fallback");
+        check("jni-no-jvmti".equals(arm64.configuration("objection").getString("art_mode"))
+                && "7.0.13-backcast.1".equals(arm64.configuration("objection").getString("java_bridge")), "The compatibility mode was not registered with the installed payload");
         check(new File(home, "share/LICENSES/GPL-3.0.txt").length() > 30000, "GNU license texts were omitted");
     }
 
@@ -211,7 +217,11 @@ public final class EmbeddedToolchainRegressionTest {
     private static void onlyDirectBuiltInActionsAreAdvertisedToTheModel() throws Exception {
         JSONObject properties = toolkit(arm64).parameters().getJSONObject("properties");
         JSONArray actions = properties.getJSONObject("action").getJSONArray("enum");
-        check(actions.length() == 4 && !properties.has("path") && !properties.has("runtime"), "Model still asks the user to download or configure tools");
+        Set<String> allowed = new HashSet<String>();
+        for (int i = 0; i < actions.length(); i++) allowed.add(actions.getString(i));
+        check(allowed.size() == 5 && allowed.contains("list") && allowed.contains("status") && allowed.contains("diagnose")
+                && allowed.contains("run") && allowed.contains("export") && !properties.has("path") && !properties.has("runtime"),
+                "Model actions lost managed diagnostics or ask the user to download/configure tools");
         check(!toolkit(arm64).description().contains("需要设备 JVM"), "Obsolete desktop JVM instructions remain");
     }
 

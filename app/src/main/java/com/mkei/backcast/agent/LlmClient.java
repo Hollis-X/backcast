@@ -274,6 +274,7 @@ public class LlmClient {
         HttpURLConnection conn = null;
         InputStream response = null;
         OutputStream request = null;
+        boolean waitingHeaders = false;
         try {
             JSONObject body = new JSONObject();
             body.put("model", config.model);
@@ -321,8 +322,9 @@ public class LlmClient {
             }
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(20000);
-            // 切片读，空闲预算另算。保活行不能把「一直没输出」续成无限等待。
-            conn.setReadTimeout(READ_SLICE_MS);
+            // A server may wait for model output before returning headers. The stream polling slice
+            // cannot shorten this initial wait to ten seconds before the idle budget even starts.
+            conn.setReadTimeout(headerTimeout(mine));
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             conn.setRequestProperty("Authorization", "Bearer " + config.apiKey);
@@ -339,12 +341,23 @@ public class LlmClient {
             request.close();
             request = null;
 
+            waitingHeaders = true;
+            conn.setReadTimeout(headerTimeout(mine));
             int code = conn.getResponseCode();
+            waitingHeaders = false;
+            // Poll reads once the response exists; meaningful output controls the separate idle clock.
+            conn.setReadTimeout(READ_SLICE_MS);
             if (code < 200 || code >= 300) {
-                response = conn.getErrorStream();
-                String text = readAll(response);
-                reply.raw = text;
-                reply.error = "HTTP " + code + ": " + trim(text, 500);
+                // The status remains authoritative even if the optional error body times out.
+                reply.error = "HTTP " + code + ":";
+                try {
+                    response = conn.getErrorStream();
+                    String text = readAll(response);
+                    reply.raw = text;
+                    reply.error += " " + trim(text, 500);
+                } catch (Exception errorBodyFailure) {
+                    // Losing provider detail must not turn a permanent HTTP error into a network retry.
+                }
                 return reply;
             }
             if (mine.dead) {
@@ -354,7 +367,8 @@ public class LlmClient {
             readStream(response, reply, mine, sink, config.timeoutMs);
         } catch (Exception e) {
             if (!mine.dead) {
-                reply.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+                reply.error = (waitingHeaders && e instanceof java.net.SocketTimeoutException
+                        ? "响应头等待超时：" : "") + e.getClass().getSimpleName() + ": " + e.getMessage();
             }
         } finally {
             closeQuietly(request);
@@ -373,6 +387,16 @@ public class LlmClient {
             reply.reasoning = null;
         }
         return reply;
+    }
+
+    private int headerTimeout(Attempt mine) throws java.net.SocketTimeoutException {
+        long budget = Math.max(1000L, config.timeoutMs);
+        if (mine.deadline > 0) {
+            long remaining = mine.deadline - System.currentTimeMillis();
+            if (remaining <= 0) throw new java.net.SocketTimeoutException("Request deadline exceeded while waiting for response headers");
+            budget = Math.min(budget, remaining);
+        }
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, budget));
     }
 
     /** 一路工具调用的拼装。流式里名字和参数是分段到的。 */

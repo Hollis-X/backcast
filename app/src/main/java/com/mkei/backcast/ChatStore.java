@@ -26,6 +26,20 @@ public class ChatStore extends SQLiteOpenHelper {
         public String title;
     }
 
+    /** Local transport diagnostics; no request body, credentials or provider response. */
+    public static final class RequestEvent {
+        public final long id, recordedAt, elapsedMs;
+        public final String purpose, outcome, reason;
+        public final int retryCount;
+
+        RequestEvent(long id, long recordedAt, long elapsedMs, String purpose,
+                String outcome, String reason, int retryCount) {
+            this.id = id; this.recordedAt = recordedAt; this.elapsedMs = elapsedMs;
+            this.purpose = purpose; this.outcome = outcome; this.reason = reason;
+            this.retryCount = retryCount;
+        }
+    }
+
     /** A bounded transcript page; cursors stay valid while new messages are appended. */
     public static final class MessagePage {
         public final List<Message> messages;
@@ -76,7 +90,7 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public ChatStore(Context context) {
-        super(context.getApplicationContext(), "backcast.db", null, 10);
+        super(context.getApplicationContext(), "backcast.db", null, 11);
     }
 
     @Override
@@ -100,6 +114,7 @@ public class ChatStore extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX idx_messages_session ON messages(session_id, id)");
         createRuns(db);
         createContext(db);
+        createRequestEvents(db);
     }
 
     @Override
@@ -134,6 +149,54 @@ public class ChatStore extends SQLiteOpenHelper {
         if (oldVersion >= 4 && oldVersion < 10) {
             db.execSQL("ALTER TABLE runs ADD COLUMN budget_wrap_finished INTEGER");
         }
+        if (oldVersion < 11) createRequestEvents(db);
+    }
+
+    private static void createRequestEvents(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS request_events ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER NOT NULL,"
+                + "recorded_at INTEGER NOT NULL, purpose TEXT NOT NULL,"
+                + "elapsed_ms INTEGER NOT NULL,outcome TEXT NOT NULL,reason TEXT NOT NULL,"
+                + "retry_count INTEGER NOT NULL)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_request_events_session ON request_events(session_id,id)");
+    }
+
+    /** Keep at most 200 completed attempts per conversation, independently of model history. */
+    public synchronized void recordRequest(long sessionId, String purpose, long elapsedMs,
+            String outcome, String reason, int retryCount) {
+        if (sessionId < 0) return;
+        ContentValues values = new ContentValues();
+        values.put("session_id", Long.valueOf(sessionId));
+        values.put("recorded_at", Long.valueOf(System.currentTimeMillis()));
+        values.put("purpose", "compact".equals(purpose) ? "compact" : "review".equals(purpose) ? "review" : "model");
+        values.put("elapsed_ms", Long.valueOf(Math.max(0L, elapsedMs)));
+        values.put("outcome", "success".equals(outcome) ? "success" : "retryable_error".equals(outcome)
+                ? "retryable_error" : "cancelled".equals(outcome) ? "cancelled" : "error");
+        String safe = reason == null ? "" : reason.replace('\n', ' ').replace('\r', ' ').trim();
+        values.put("reason", safe.length() > 160 ? safe.substring(0, 160) : safe);
+        values.put("retry_count", Integer.valueOf(Math.max(0, retryCount)));
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            db.insert("request_events", null, values);
+            db.execSQL("DELETE FROM request_events WHERE session_id=? AND id NOT IN ("
+                    + "SELECT id FROM request_events WHERE session_id=? ORDER BY id DESC LIMIT 200)",
+                    new Object[]{Long.valueOf(sessionId), Long.valueOf(sessionId)});
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+
+    public synchronized List<RequestEvent> requestEvents(long sessionId, int limit) {
+        List<RequestEvent> events = new ArrayList<RequestEvent>();
+        Cursor cursor = getReadableDatabase().query("request_events",
+                new String[]{"id", "recorded_at", "elapsed_ms", "purpose", "outcome", "reason", "retry_count"},
+                "session_id=?", new String[]{String.valueOf(sessionId)}, null, null, "id DESC",
+                String.valueOf(Math.max(1, Math.min(200, limit))));
+        try {
+            while (cursor.moveToNext()) events.add(new RequestEvent(cursor.getLong(0), cursor.getLong(1),
+                    cursor.getLong(2), cursor.getString(3), cursor.getString(4), cursor.getString(5), cursor.getInt(6)));
+        } finally { cursor.close(); }
+        return Collections.unmodifiableList(events);
     }
 
     /** 运行状态独立于聊天记录和模型窗口。 */
@@ -529,7 +592,7 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     /**
-     * 把耗时记到本会话最后一条助手消息上，重开时还能显示。
+     * 把耗时记到本轮最后一条助手消息上，重开时还能显示。
      * 已经记下的更长耗时不被更短的盖掉：界面重进后若只用自己的几秒收尾，
      * 不能把这一轮真正等过的时间抹掉。
      */
@@ -540,14 +603,23 @@ public class ChatStore extends SQLiteOpenHelper {
         if (thinkMs < 0) {
             thinkMs = 0;
         }
-        Cursor c = getReadableDatabase().rawQuery(
-                "SELECT elapsed_ms, think_ms FROM messages WHERE session_id=? AND role=? "
-                        + "ORDER BY id DESC LIMIT 1",
-                new String[]{String.valueOf(sessionId), Message.ASSISTANT});
+        SQLiteDatabase db = getWritableDatabase();
+        Cursor user = db.query("messages", new String[]{"id"}, "session_id=? AND role=?",
+                new String[]{String.valueOf(sessionId), Message.USER}, null, null, "id DESC", "1");
+        long userId = 0;
+        try { if (user.moveToFirst()) userId = user.getLong(0); }
+        finally { user.close(); }
+        Cursor c = db.query("messages", new String[]{"id", "elapsed_ms", "think_ms"},
+                "session_id=? AND role=? AND id>?",
+                new String[]{String.valueOf(sessionId), Message.ASSISTANT, String.valueOf(userId)},
+                null, null, "id DESC", "1");
+        long assistantId;
         try {
-            if (c.moveToFirst()) {
-                long haveElapsed = c.getLong(0);
-                long haveThink = c.getLong(1);
+            if (!c.moveToFirst()) return;
+            assistantId = c.getLong(0);
+            {
+                long haveElapsed = c.getLong(1);
+                long haveThink = c.getLong(2);
                 if (haveElapsed > elapsedMs) {
                     elapsedMs = haveElapsed;
                 }
@@ -561,11 +633,10 @@ public class ChatStore extends SQLiteOpenHelper {
         if (thinkMs > elapsedMs) {
             elapsedMs = thinkMs;
         }
-        getWritableDatabase().execSQL(
-                "UPDATE messages SET elapsed_ms=?, think_ms=? WHERE id = ("
-                        + "SELECT MAX(id) FROM messages WHERE session_id=? AND role=?)",
-                new Object[]{Long.valueOf(elapsedMs), Long.valueOf(thinkMs),
-                        Long.valueOf(sessionId), Message.ASSISTANT});
+        ContentValues values = new ContentValues();
+        values.put("elapsed_ms", Long.valueOf(elapsedMs));
+        values.put("think_ms", Long.valueOf(thinkMs));
+        db.update("messages", values, "id=?", new String[]{String.valueOf(assistantId)});
     }
 
     public synchronized void delete(long sessionId) {
@@ -575,6 +646,7 @@ public class ChatStore extends SQLiteOpenHelper {
             db.delete("messages", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("runs", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("context_windows", "session_id=?", new String[]{String.valueOf(sessionId)});
+            db.delete("request_events", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("sessions", "id=?", new String[]{String.valueOf(sessionId)});
             db.setTransactionSuccessful();
         } finally {

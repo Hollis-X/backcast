@@ -1,6 +1,7 @@
 package com.mkei.backcast.tool;
 
 import com.mkei.backcast.agent.Tool;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import org.json.JSONArray;
@@ -31,6 +32,8 @@ public final class ToolkitTool implements Tool {
 
     @Override public String description() {
         return "直接调用 APK 内置逆向工具，无需用户下载或填写路径。list 查看内置工具；status 实际探测指定 tool，例如 {action:'status',tool:'apktool'}；"
+                + "diagnose 检查受管理的工具入口；Objection 会真实验证私有 Frida client/server 版本、匹配情况和 ART 兼容模式。"
+                + "私有工具路径通过 toolkit 管理，不要用 shell 访问或要求用户把 App 私有目录添加为工作文件夹。"
                 + "Apktool 使用内置 DEX JAR 和 Android aapt2，radare2/rabin2、GNU binutils、Objection/Python/Frida 均离线释放到 App 私有目录。"
                 + "支持 Android 8.0+ ARM/ARM64；Objection 自动启用本次调用的本地 Frida server，结束后清理子进程，跨应用操作需要 root。"
                 + "Objection 用 ['-n','包名','run','android hooking list classes'] 这样的单次命令；交互 start/explore 和桌面 patch/sign 工作流不适用于此入口。"
@@ -44,12 +47,12 @@ public final class ToolkitTool implements Tool {
         try {
             JSONObject properties = new JSONObject();
             properties.put("action", new JSONObject().put("type", "string").put("enum", new JSONArray()
-                    .put("list").put("status").put("run").put("export")));
+                    .put("list").put("status").put("diagnose").put("run").put("export")));
             JSONArray ids = new JSONArray();
             JSONArray catalog = ToolCatalog.list();
             for (int i = 0; i < catalog.length(); i++) ids.put(catalog.getJSONObject(i).getString("id"));
             properties.put("tool", new JSONObject().put("type", "string").put("enum", ids)
-                    .put("description", "status/run 必填：目标工具 id。不能把工具名放到 arguments；list/export 不需要此字段"));
+                    .put("description", "status/diagnose/run 必填：目标工具 id。不能把工具名放到 arguments；list/export 不需要此字段"));
             properties.put("arguments", new JSONObject().put("type", "array").put("items", new JSONObject().put("type", "string"))
                     .put("description", "程序参数数组，每个参数单独一项，不拼接 shell 语法"));
             properties.put("temporary", new JSONObject().put("type", "boolean").put("description", "默认 true；在本轮私有临时目录执行，项目输入须用绝对路径"));
@@ -80,7 +83,7 @@ public final class ToolkitTool implements Tool {
                         }).put("state", "exported").toString();
             }
             String id = args.optString("tool", "");
-            if ("status".equals(action) || "run".equals(action)) requireTool(id, action);
+            if ("status".equals(action) || "diagnose".equals(action) || "run".equals(action)) requireTool(id, action);
             if ("configure".equals(action)) {
                 checkEpoch(mine);
                 if ("binutils".equals(id)) return new JSONObject().put("configured", store.configureBinutilsDirectory(args.optString("path", ""),
@@ -96,6 +99,7 @@ public final class ToolkitTool implements Tool {
                 return new JSONObject().put("tool", id).put("state", "unconfigured").toString();
             }
             if ("status".equals(action)) return status(id, mine, shellMine).toString();
+            if ("diagnose".equals(action)) return diagnose(id, mine, shellMine).toString();
             if ("install".equals(action)) {
                 installer.install(id, abi, new ToolchainInstaller.Cancellation() {
                     @Override public void check() throws Exception {
@@ -150,11 +154,20 @@ public final class ToolkitTool implements Tool {
         for (int i = 0; i < tools.length(); i++) {
             JSONObject entry = tools.getJSONObject(i), configured = store.configuration(entry.getString("id"));
             boolean bundled = store.bundled(entry.getString("id"));
-            entry.put("bundled", bundled).put("configured", bundled || configured.optString("path", "").length() > 0).put("configuration", configured)
+            entry.put("bundled", bundled).put("configured", bundled || configured.optString("path", "").length() > 0).put("configuration", visibleConfiguration(configured))
                     .put("state", bundled ? store.bundledRemoved() ? "removed" : bundle.optBoolean("installed") ? "installed" : "bundled_not_probed" : configured.optString("path", "").length() > 0 ? "configured_not_probed"
                             : store.hasBundledAssets() ? "unsupported" : "unconfigured");
         }
-        return new JSONObject().put("storage", store.root().getPath()).put("abi", abi).put("tools", tools).put("package", bundle);
+        JSONObject visibleBundle = new JSONObject(bundle.toString()), manifest = visibleBundle.optJSONObject("manifest");
+        if (manifest != null) {
+            visibleBundle.remove("manifest");
+            JSONObject versions = new JSONObject();
+            for (String name : new String[]{"apktool", "radare2", "objection", "java_bridge", "objection_art_mode"}) {
+                if (manifest.has(name)) versions.put(name, manifest.get(name));
+            }
+            visibleBundle.put("versions", versions);
+        }
+        return new JSONObject().put("storage", store.root().getPath()).put("abi", abi).put("tools", tools).put("package", visibleBundle);
     }
 
     public JSONObject packageStatus() throws Exception { return store.packageStatus(); }
@@ -189,7 +202,7 @@ public final class ToolkitTool implements Tool {
             public void check() throws Exception { checkEpoch(mine); }
         });
         JSONObject result = ToolCatalog.get(id).json(), configured = store.configuration(id);
-        result.put("configuration", configured).put("ready", false).put("bundled", store.bundled(id))
+        result.put("configuration", visibleConfiguration(configured)).put("ready", false).put("bundled", store.bundled(id))
                 .put("probe_type", "version").put("probe_scope", "只验证程序版本入口；目标文件分析和动态附加能力以实际 run 结果为准。");
         if (configured.optString("path", "").length() == 0) return result.put("state", store.hasBundledAssets() ? "unsupported" : "unconfigured");
         if (launcher == null) return result.put("state", "needs_runtime");
@@ -203,6 +216,79 @@ public final class ToolkitTool implements Tool {
         result.put("state", ready ? "ready" : "unavailable").put("ready", ready).put("probe_output", output);
         if (!ready) describeFailure(id, output, result);
         return result;
+    }
+
+    /** Model-visible metadata must not include the bundled Python bootstrap. */
+    private static JSONObject visibleConfiguration(JSONObject configured) throws Exception {
+        JSONObject visible = new JSONObject(configured.toString());
+        if ("bundled".equals(visible.optString("origin"))) {
+            visible.remove("prefix"); visible.remove("environment");
+            visible.put("managed_private", true).put("generic_shell_access", false);
+        }
+        return visible;
+    }
+
+    private JSONObject diagnose(String id, final int mine, int shellMine) throws Exception {
+        ToolchainStore.Use use = store.beginUse(new ToolchainInstaller.Cancellation() {
+            public void check() throws Exception { checkEpoch(mine); }
+        });
+        try { synchronized (store.toolLock(id)) {
+            checkEpoch(mine);
+            if (store.bundled(id) && store.bundledRemoved()) return ToolCatalog.get(id).json()
+                    .put("ready", false).put("state", "removed").put("bundled", true);
+            JSONObject result = statusLocked(id, mine, shellMine);
+            if (!"objection".equals(id)) return result;
+            ToolchainStore.Launcher launcher = store.launcher(id, new ToolchainInstaller.Cancellation() {
+                public void check() throws Exception { checkEpoch(mine); }
+            });
+            JSONObject configured = store.configuration(id);
+            result.put("java_attach", "not_tested").put("art_mode", configured.optString("art_mode", "unmodified"))
+                    .put("java_bridge", configured.optString("java_bridge", ""))
+                    .put("probe_scope", "实际验证版本入口和 Frida client/server 配对；没有附加目标进程，也没有验证 Java hook。" );
+            if (launcher == null || !"bundled".equals(configured.optString("origin"))) return result;
+            JSONObject companion = new JSONObject().put("managed_private", true);
+            result.put("frida_server", companion);
+            File server = launcher.companion.length() == 0 ? null : store.managed(launcher.companion);
+            if (server == null || !server.isFile()) {
+                companion.put("exists", false).put("ready", false);
+                return result.put("ready", false).put("state", "unavailable").put("failure_kind", "frida_server_missing");
+            }
+            companion.put("exists", true).put("bytes", server.length()).put("executable", server.canExecute());
+            // This exact launcher comes from the private registry, never an input path.
+            ToolchainStore.Launcher serverProbe = new ToolchainStore.Launcher("objection", server.getPath());
+            java.util.Iterator<String> keys = launcher.environment.keys();
+            while (keys.hasNext()) { String key = keys.next(); serverProbe.environment.put(key, launcher.environment.get(key)); }
+            List<String> versionArguments = new ArrayList<String>(); versionArguments.add("--version");
+            checkEpoch(mine);
+            String serverOutput = shell.runProgram(serverProbe, versionArguments, true, 8, shellMine);
+            checkEpoch(mine);
+            String serverVersion = numericVersion(serverOutput);
+            companion.put("probe_output", serverOutput).put("version", serverVersion).put("ready", serverVersion.length() > 0);
+            ToolchainStore.Launcher clientProbe = new ToolchainStore.Launcher("objection", launcher.executable);
+            clientProbe.prefix.add("-c"); clientProbe.prefix.add("import frida; print(frida.__version__)");
+            keys = launcher.environment.keys();
+            while (keys.hasNext()) { String key = keys.next(); clientProbe.environment.put(key, launcher.environment.get(key)); }
+            checkEpoch(mine);
+            String clientOutput = shell.runProgram(clientProbe, versionArguments, true, 8, shellMine);
+            checkEpoch(mine);
+            String clientVersion = numericVersion(clientOutput);
+            result.put("frida_client", new JSONObject().put("probe_output", clientOutput).put("version", clientVersion)
+                    .put("ready", clientVersion.length() > 0));
+            boolean matches = serverVersion.length() > 0 && serverVersion.equals(clientVersion);
+            result.put("frida_versions_match", matches);
+            boolean ready = result.optBoolean("ready") && matches;
+            result.put("ready", ready).put("state", ready ? "diagnostic_ready" : "unavailable");
+            if (!matches) result.put("failure_kind", serverVersion.length() == 0 || clientVersion.length() == 0
+                    ? "frida_runtime_unavailable" : "frida_version_mismatch")
+                    .put("hint", "Frida client/server 必须匹配且都能启动。请在工具配置中重新安装内置工具包，再运行 diagnose；没有执行目标 Java hook。");
+            return result;
+        } } finally { use.close(); }
+    }
+
+    private static String numericVersion(String output) {
+        if (!validVersion("apktool", output)) return "";
+        java.util.regex.Matcher version = java.util.regex.Pattern.compile("(?m)^([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)\\s*$").matcher(output);
+        return version.find() ? version.group(1) : "";
     }
 
     private static void describeFailure(String id, String output, JSONObject result) throws Exception {

@@ -318,6 +318,126 @@ public final class AgentLoopRegressionTest {
             release.countDown(); worker.join(5000);
         }
     }
+
+    /** Manual compression and its goal continuation are one owning material/tool turn. */
+    private static void manualCompactionPinsRegistryAndCleansItsLease() throws Exception {
+        SystemClock.set(100000);
+        final CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
+        final AgentLoop[] box = new AgentLoop[1];
+        final int[] served = new int[1], finishes = new int[1];
+        final RegistryTool oldTool = new RegistryTool("original compaction lease"), newTool = new RegistryTool("replacement");
+        final ToolRegistry oldRegistry = new ToolRegistry(), newRegistry = new ToolRegistry();
+        oldRegistry.register(oldTool); oldRegistry.register(namedTool("old_only"));
+        newRegistry.register(newTool); newRegistry.register(namedTool("new_only"));
+        final LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray schema, Sink sink) {
+                try {
+                    int call = ++served[0];
+                    Reply reply = new Reply();
+                    if (call == 1) {
+                        check(schema == null, "Compaction exposed execution tools");
+                        check(oldTool.begins == 1 && oldTool.finishes == 0,
+                                "Manual compression did not acquire its original material lease");
+                        started.countDown();
+                        check(release.await(5, TimeUnit.SECONDS), "Manual compression was never released");
+                        reply.content = "The workspace has been inspected; continue the original goal.";
+                    } else {
+                        String tools = schema == null ? "" : schema.toString();
+                        check(tools.contains(call <= 3 ? "old_only" : "new_only"),
+                                "Manual compression continuation changed tool scope");
+                        check(!tools.contains(call <= 3 ? "new_only" : "old_only"), "Compaction mixed tool registries");
+                        if (call == 2) {
+                            reply.toolCalls = new JSONArray().put(toolCall("compacted-work", "work"));
+                        } else if (call == 3) {
+                            check(resultContains(messages, "compacted-work", oldTool.marker), "Compacted goal ran next-turn tools");
+                            check(!box[0].closeGoal(Goal.COMPLETE, "verified").startsWith("错误"), "Compacted goal failed cleanup");
+                            reply.content = "goal finished";
+                        } else {
+                            check(call == 4, "Unexpected continuation after compaction");
+                            reply.content = "next turn";
+                        }
+                    }
+                    return reply;
+                } catch (Exception error) { throw new AssertionError(error); }
+            }
+        };
+        final Recorder recorder = new Recorder();
+        final AgentLoop loop = new AgentLoop(client, oldRegistry, new AgentLoop.Quiet() {
+            @Override public void onFinish(int gen) { finishes[0]++; }
+        });
+        box[0] = loop; loop.bindSession(1); loop.reset("system"); loop.setRecorder(recorder);
+        loop.loadHistory("system", Arrays.asList(Message.user("inspect the workspace"), Message.assistant("inspection started", null)));
+        loop.setGoal("finish the original workspace");
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try { loop.compactNow(1, loop.generation(), 1); }
+                catch (Throwable error) { failure.set(error); }
+            }
+        });
+        worker.setDaemon(true); worker.start();
+        try {
+            check(started.await(5, TimeUnit.SECONDS), "Manual compression did not start");
+            int owningToken = loop.runToken();
+            loop.retarget(client, newRegistry);
+            loop.compactNow(1, loop.generation(), 2);
+            check(loop.runToken() == owningToken && loop.busy() && served[0] == 1 && finishes[0] == 0,
+                    "A second compaction replaced or finished the active turn");
+            release.countDown(); worker.join(5000);
+            check(!worker.isAlive() && failure.get() == null, "Compaction continuation failed: " + failure.get());
+            check(served[0] == 3 && Goal.COMPLETE.equals(loop.goalStatus()) && !loop.busy(), "Compacted goal did not finish once");
+            check(oldTool.begins == 1 && oldTool.runs == 1 && oldTool.cleanups == 1 && oldTool.finishes == 1,
+                    "Manual compaction begin, invoke, completion cleanup and finish used different leases");
+            check(newTool.begins == 0 && newTool.runs == 0 && newTool.cleanups == 0 && newTool.finishes == 0,
+                    "Manual compaction touched next-turn materials");
+            check(finishes[0] == 1 && "goal finished".equals(recorder.answer().content), "Compaction output or finish was duplicated");
+            loop.submit("next", 1, loop.generation(), 3);
+            check(served[0] == 4 && newTool.begins == 1 && newTool.finishes == 1, "Next turn did not acquire the new registry");
+        } finally { release.countDown(); worker.join(5000); }
+    }
+
+    private static void cancelledManualCompactionCleansOnlyItsOriginalLease() throws Exception {
+        SystemClock.set(100000);
+        final CountDownLatch started = new CountDownLatch(1), stopped = new CountDownLatch(1);
+        final int[] served = new int[1], aborts = new int[1];
+        final RegistryTool oldTool = new RegistryTool("original"), newTool = new RegistryTool("replacement");
+        ToolRegistry oldRegistry = new ToolRegistry(), newRegistry = new ToolRegistry();
+        oldRegistry.register(oldTool); newRegistry.register(newTool);
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray schema, Sink sink) {
+                served[0]++;
+                check(oldTool.begins == 1, "Manual compaction failed to begin its material lease");
+                started.countDown();
+                try { check(stopped.await(5, TimeUnit.SECONDS), "Cancel did not stop compaction"); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new AssertionError(error); }
+                Reply reply = new Reply(); reply.content = "discarded summary"; return reply;
+            }
+            @Override public void abort() { aborts[0]++; stopped.countDown(); }
+        };
+        final Recorder recorder = new Recorder();
+        final AgentLoop loop = new AgentLoop(client, oldRegistry, new AgentLoop.Quiet());
+        loop.bindSession(1); loop.reset("system"); loop.setRecorder(recorder);
+        loop.loadHistory("system", Arrays.asList(Message.user("original request"), Message.assistant("original answer", null)));
+        loop.setGoal("finish the workspace");
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try { loop.compactNow(1, loop.generation(), 1); }
+                catch (Throwable error) { failure.set(error); }
+            }
+        });
+        worker.setDaemon(true); worker.start();
+        try {
+            check(started.await(5, TimeUnit.SECONDS), "Manual compaction did not start");
+            loop.retarget(client, newRegistry); loop.cancel(); worker.join(5000);
+            check(!worker.isAlive() && failure.get() == null && !loop.busy(), "Cancelled compaction remained active: " + failure.get());
+            check(served[0] == 1 && aborts[0] == 1 && oldTool.aborts == 1 && oldTool.finishes == 1,
+                    "Cancellation did not stop and clean original compaction materials");
+            check(newTool.begins == 0 && newTool.aborts == 0 && newTool.finishes == 0, "Cancelled compaction touched replacement materials");
+            check(loop.history().get(loop.history().size() - 1).content.equals("original answer") && recorder.saved.isEmpty(),
+                    "Cancelled compaction replaced or persisted history");
+        } finally { stopped.countDown(); worker.join(5000); }
+    }
     private static void disclosureNeverReachesTransport() throws Exception {
         SystemClock.set(100000);
         Client client = new Client();
@@ -944,6 +1064,7 @@ public final class AgentLoopRegressionTest {
         for (String name : new String[]{"newClockPublishedBeforePersistence", "resumeAndRetryKeepOriginalClock",
                 "stoppedClockIsNotPublished", "retargetKeepsRunningRequestCancellable",
                 "retargetPinsToolsSchemaCleanupAndUsageUntilNextTurn",
+                "manualCompactionPinsRegistryAndCleansItsLease", "cancelledManualCompactionCleansOnlyItsOriginalLease",
                 "disclosureNeverReachesTransport", "disclosureIsRefusedAfterRecovery",
                 "disclosureGoalStopsWithoutSpinning", "promptFileTaskIsAllowed", "staleCallbacksDoNotChangeNewTurnClock",
                 "longBackgroundResumeKeepsClock", "disclosureIsRefusedBeforeCompaction",
@@ -955,6 +1076,6 @@ public final class AgentLoopRegressionTest {
                 "goalStopsWhenMarkedComplete", "bareAuditClaimDoesNotFinish",
                 "emptyContinuationsBlockTheGoal", "continuationEncouragesClosingOnce"}) run(name);
         if (failures != 0) throw new AssertionError(failures + " loop tests failed");
-        System.out.println("26 loop tests passed");
+        System.out.println("28 loop tests passed");
     }
 }

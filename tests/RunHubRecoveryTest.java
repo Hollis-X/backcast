@@ -64,6 +64,7 @@ public final class RunHubRecoveryTest {
                 + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,turnAt,turnWall,seenAt,tokensUsed,tokenBudget; public boolean running; public Boolean budgetWrapFinished; }"
                 + "private static final java.util.Map<Long,Run> runs=new java.util.HashMap<Long,Run>();"
                 + "public static long pausedRead=-1; public static java.util.concurrent.CountDownLatch readStarted,readRelease;"
+                + "public static long requestSession,requestElapsed;public static String requestPurpose,requestOutcome,requestReason;public static int requestRetry;"
                 + "public static void pauseRead(long sid) { pausedRead=sid; readStarted=new java.util.concurrent.CountDownLatch(1); readRelease=new java.util.concurrent.CountDownLatch(1); }"
                 + "public ChatStore(android.content.Context c) {}"
                 + "public static void reset() { runs.clear(); pausedRead=-1; }"
@@ -74,12 +75,14 @@ public final class RunHubRecoveryTest {
                 + "public java.util.List<com.mkei.backcast.agent.Message> contextMessages(long sid) { if(pausedRead==sid) { readStarted.countDown(); try { readRelease.await(5,java.util.concurrent.TimeUnit.SECONDS); } catch(InterruptedException e) { throw new RuntimeException(e); } } return new java.util.ArrayList<com.mkei.backcast.agent.Message>(); }"
                 + "public void append(long sid,com.mkei.backcast.agent.Message m) {}"
                 + "public void replaceAll(long sid,java.util.List<com.mkei.backcast.agent.Message> m) {}"
+                + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry){requestSession=sid;requestPurpose=purpose;requestElapsed=elapsed;requestOutcome=outcome;requestReason=reason;requestRetry=retry;}"
                 + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished) {} }");
         add(files, "com.mkei.backcast.agent.AgentLoop",
                 "public class AgentLoop {"
                 + "public static final int DEFAULT_CONTEXT_LIMIT=456000;"
                 + "public interface Listener {} public static class Quiet implements Listener {}"
                 + "public interface Recorder { void record(long sid,Message m); void replace(long sid,java.util.List<Message> m); }"
+                + "public interface RequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry);}"
                 + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished); }"
                 + "public interface UsageObserver{void onUsage(long tokens);}public UsageObserver usageObserver;"
                 + "public LlmClient client;public ToolRegistry registry;public SubAgentManager children;public String access=\"full\",environment,directory,resetPrompt;"
@@ -97,7 +100,7 @@ public final class RunHubRecoveryTest {
                 + "public void loadHistory(String s,java.util.List<Message> m) { loads++; if(pausedLoad==sid) { loadStarted.countDown(); try { loadRelease.await(5,java.util.concurrent.TimeUnit.SECONDS); } catch(InterruptedException e) { throw new RuntimeException(e); } } }"
                 + "public void restoreGoal(String g,String s,long ms) {} public void restoreGoal(String g,String s,long ms,long used,long budget,Boolean budgetWrapFinished) { restoredBudgetWrapFinished=budgetWrapFinished; } public void restoreTurnClock(long at,long wall,long seen) { clockRestores++; }"
                 + "public void resume(long id,int token) { resumes++; }"
-                + "public Durability durability;public void setRecorder(Recorder r) {} public void setDurability(Durability d) {durability=d;}"
+                + "public Recorder recorder;public Durability durability;public void setRecorder(Recorder r) {recorder=r;} public void setDurability(Durability d) {durability=d;}"
                 + "public void setContextBudget(int l,float r) {limit=l;ratio=r;}public int contextLimit(){return limit;}"
                 + "public void setAccessLevel(String level) {access=level;}public String accessLevel(){return access;}"
                 + "public void setApprovalGate(ApprovalGate g) {gate=g;}public ApprovalGate approvalGate(){return gate;}"
@@ -566,6 +569,22 @@ public final class RunHubRecoveryTest {
         recover(hub); check(count(root, "resumes") == 0, "Service recovery restarted an idle or stopped parent");
     }
 
+    private static void modelDiagnosticsUseTheConversationRecorder() throws Exception {
+        Object hub = freshHub(), root = bind(hub, 31, listener());
+        Object recorder = field(root, "recorder");
+        Class<?> contract = hubType.getClassLoader().loadClass("com.mkei.backcast.agent.AgentLoop$RequestRecorder");
+        check(contract.isInstance(recorder), "Production recorder drops optional request diagnostics");
+        contract.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class)
+                .invoke(recorder, 31L, "review", 14234L, "retryable_error", "接口返回 HTTP 503", 2);
+        check(storeType.getField("requestSession").getLong(null) == 31L
+                        && storeType.getField("requestElapsed").getLong(null) == 14234L
+                        && storeType.getField("requestRetry").getInt(null) == 2
+                        && "review".equals(storeType.getField("requestPurpose").get(null))
+                        && "retryable_error".equals(storeType.getField("requestOutcome").get(null))
+                        && "接口返回 HTTP 503".equals(storeType.getField("requestReason").get(null)),
+                "RunHub changed request diagnostics or routed them to a different session");
+    }
+
     public static void main(String[] args) throws Exception {
         if (args.length != 1) throw new IllegalArgumentException("Pass the absolute RunHub.java path");
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
@@ -586,7 +605,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

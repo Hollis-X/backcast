@@ -9,7 +9,8 @@
     "Exclude desktop aapt binaries; include Android aapt2",
     "Exclude unneeded pip and Frida tracer web UI",
     "Apktool OSDetection: tolerate missing desktop JVM properties on Android ART",
-    "Apktool Res9patchStreamDecoder: use bundled PNGJ 2.1.0 without desktop AWT/ImageIO or Android Bitmap JNI"
+    "Apktool Res9patchStreamDecoder: use bundled PNGJ 2.1.0 without desktop AWT/ImageIO or Android Bitmap JNI",
+    "Objection Java bridge: use JNI/ART fallback without optional JVMTI plugin loading; tolerate unknown copied-methods offset (upstream PR #407 backport)"
   ],
   "converter": {
     "tool": "Google R8/D8 8.3.37",
@@ -21,10 +22,10 @@
       "asset": "toolchain/common.tar.gz",
       "abi": "any",
       "min_sdk": 26,
-      "sha256": "3e2690e6c9b010c84f9c9a139a09fc36b53f4481c7996d73565972f9802c2abd",
-      "bytes": 9521826,
+      "sha256": "960352161be2af2b23d1f34d6625d6ea850c080f819c1ae7982ab225e2458ede",
+      "bytes": 9521956,
       "tar_asset": "toolchain/common.tar",
-      "tar_sha256": "403663204811a3a5248293f54a1d1746a4a0fbd114683edfce4b8c34704f6ba6",
+      "tar_sha256": "d6282a83a7f0e6fd18f593d479a1073e2c06f73db8edbc59298d10fd7d7ce127",
       "tar_bytes": 25896960
     },
     {
@@ -738,5 +739,8 @@
       "license": "Apache-2.0"
     }
   ],
-  "pngj": "2.1.0"
+  "pngj": "2.1.0",
+  "java_bridge": "7.0.13-backcast.1",
+  "objection_art_mode": "jni-no-jvmti",
+  "objection_art_patch_source": "https://github.com/frida/frida-java-bridge/pull/407"
 }

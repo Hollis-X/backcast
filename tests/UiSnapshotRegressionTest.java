@@ -214,17 +214,45 @@ public final class UiSnapshotRegressionTest {
                     };
                     f.loop.replayUiSnapshot(f.snapshot(replay), replay);
                     check(snapshotStages.contains("model:1"), "Reentry lost the current stage or retry count");
+                    assertRetryReasonAndStageSurviveReentry(f, 1);
                     f.loop.setListener(listener);
                     sink.onToolCall(0, "tool-id", "probe", "{}"); return toolReply();
                 }
                 check(executions[0] == 1, "Model retry duplicated a real tool execution");
                 check(attempts.get(attempts.size() - 1).intValue() == 1, "Normal followup erased the retry count");
+                assertRetryReasonAndStageSurviveReentry(f, 1);
+                f.loop.setListener(listener);
                 return answer("done");
             }
         };
         fixture.run();
         check(executions[0] == 1 && stages.contains("tool_ready"), "Completed tool did not enter the actual execution path");
         pass("partialToolRetriesOnlyTheModelAndPublishesItsStage");
+    }
+
+    private static void assertRetryReasonAndStageSurviveReentry(final Fixture fixture, final int expectedAttempt) throws Exception {
+        final ArrayList<String> phases = new ArrayList<String>();
+        final ArrayList<Long> sequences = new ArrayList<Long>();
+        AgentLoop.Quiet replay = new AgentLoop.Quiet() {
+            @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+                check(AgentLoop.callingUiSource() == fixture.loop && fixture.loop.callingToken() == 9
+                                && fixture.loop.isReplayingUiSnapshot() && gen == fixture.loop.generation(),
+                        "Recovered progress lost its source, token, generation or replay boundary");
+                check(attempt == expectedAttempt, "Recovered current phase lost its cumulative retry count");
+                if ("retry".equals(phase)) check("接口返回 HTTP 503".equals(detail),
+                        "Reentry lost the actual safe error reason or exposed the echoed provider payload");
+                phases.add(phase); sequences.add(fixture.loop.callingUiSequence());
+            }
+            @Override public void onToolPreview(int gen, int index, String id, String name, String args) {
+                throw new AssertionError("Stored parameter previews were replayed after committing output");
+            }
+            @Override public void onToolStart(int gen, String name, String args) {
+                throw new AssertionError("Stored completed tool start was resurrected on reentry");
+            }
+        };
+        fixture.loop.replayUiSnapshot(fixture.snapshot(replay), replay);
+        check(phases.equals(java.util.Arrays.asList("retry", "model")) && sequences.get(0) < sequences.get(1),
+                "Reentry did not retain only the last retry and current phase in order: " + phases);
     }
 
     private static void approvalAndReviewPrecedeActualToolStart() throws Exception {

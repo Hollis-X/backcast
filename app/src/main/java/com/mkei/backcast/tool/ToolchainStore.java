@@ -365,6 +365,9 @@ public final class ToolchainStore {
                 env.put("R2_PREFIX", r2.getPath()).put("LD_LIBRARY_PATH", new File(r2, "lib").getPath() + ":" + lib.getPath());
             } else if ("objection".equals(id)) {
                 path = new File(usr, "bin/python3").getPath();
+                config.put("java_bridge", manifest.optString("java_bridge", ""))
+                        .put("art_mode", manifest.optString("objection_art_mode", ""))
+                        .put("art_patch_source", manifest.optString("objection_art_patch_source", ""));
                 env.put("PYTHONHOME", usr.getPath()).put("PYTHONPATH", new File(common, "python-site").getPath())
                         .put("SSL_CERT_FILE", new File(usr, "etc/tls/cert.pem").getPath());
                 prefix.put("-c").put("import os,sys,time,json,frida\nfrom datetime import datetime\n"
