@@ -102,6 +102,10 @@ public class TurnTrace {
 
         public boolean hasDetail() {
             if (trace.requestDiagnosticsAvailable) return true;
+            return hasActivity();
+        }
+
+        public boolean hasActivity() {
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
                 if (piece.step != null || trace.showReasoning && piece.think != null) return true;
@@ -413,9 +417,15 @@ public class TurnTrace {
 
     /** Live phase plus cumulative retries; this is not a per-tool duration. */
     public String progressCaption(boolean live) {
+        return progressCaption(live, -1L);
+    }
+
+    /** quietMs is an active request's monotonic timing; -1 means no active request. */
+    public String progressCaption(boolean live, long quietMs) {
         String current = "";
         if (live) {
-            if ("preview".equals(phase)) current = "正在生成参数";
+            if (quietMs >= 10000L) current = "等待模型响应 · 已静默 " + quietMs / 1000L + "s";
+            else if ("preview".equals(phase)) current = "正在生成参数";
             else if ("tool_ready".equals(phase)) current = "等待执行";
             else if ("tool_review".equals(phase)) current = "权限检查中";
             else if ("tool_approval".equals(phase)) current = "等待授权";

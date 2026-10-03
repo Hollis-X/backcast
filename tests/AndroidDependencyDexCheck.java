@@ -8,9 +8,10 @@ import javax.tools.*;
 import javax.xml.parsers.*;
 import org.w3c.dom.*;
 
-/** Optional real Google Maven dependency/D8 check, without AndroidX type substitutes. */
+/** Optional official AndroidX AAR + Gradle SDK runtime/D8 check, without AndroidX type substitutes. */
 public final class AndroidDependencyDexCheck {
     private static final String MAVEN = "https://dl.google.com/dl/android/maven2/";
+    private static final String SDK_ROOT = "com.openai:openai-java:4.75.1";
     private static final Map<String, Path> programs = new LinkedHashMap<>();
     private static final Set<String> visited = new HashSet<>();
     private static final Map<String, String> resourceNamespaces = new TreeMap<>();
@@ -84,6 +85,36 @@ public final class AndroidDependencyDexCheck {
             }
         }
     }
+    private static void addSdkRuntime(Path root) throws Exception {
+        String classpath = System.getenv("BACKCAST_SDK_CLASSPATH");
+        if (classpath == null || classpath.isBlank()) {
+            Path exported = root.resolve("app/build/agent-test-classpath.txt");
+            if (!Files.isRegularFile(exported)) throw new AssertionError("Run Gradle :app:writeAgentTestClasspath first, or set BACKCAST_SDK_CLASSPATH");
+            classpath = Files.readString(exported).trim();
+        }
+        Set<String> digests = new HashSet<>();
+        for (Path artifact : programs.values()) digests.add(digest(artifact));
+        boolean sdk = false;
+        for (String entry : classpath.split(Pattern.quote(File.pathSeparator))) {
+            Path artifact = Paths.get(entry).toRealPath();
+            if (!Files.isRegularFile(artifact)) throw new AssertionError("Missing official runtime dependency " + artifact);
+            try (ZipFile archive = new ZipFile(artifact.toFile())) {
+                sdk |= archive.getEntry("com/openai/client/OpenAIClient.class") != null;
+            }
+            // Gradle's resolved JAR list also includes AndroidX annotations. Keep one copy
+            // of identical artifacts; a differing duplicate class remains a D8 failure.
+            if (digests.add(digest(artifact))) programs.put("Gradle runtime/" + artifact.getFileName(), artifact);
+        }
+        if (!sdk) throw new AssertionError("Runtime classpath has no official SDK core for " + SDK_ROOT);
+    }
+    private static String digest(Path artifact) throws Exception {
+        java.security.MessageDigest hash = java.security.MessageDigest.getInstance("SHA-256");
+        try (InputStream input = Files.newInputStream(artifact)) {
+            byte[] buffer = new byte[65536]; int length;
+            while ((length = input.read(buffer)) != -1) hash.update(buffer, 0, length);
+        }
+        return Base64.getEncoder().encodeToString(hash.digest());
+    }
     private static final class Source extends SimpleJavaFileObject {
         final String body;
         Source(String name, String body) { super(URI.create("string:///" + name.replace('.', '/') + ".java"), Kind.SOURCE); this.body = body; }
@@ -112,7 +143,7 @@ public final class AndroidDependencyDexCheck {
             manager.getJavaFileObjectsFromPaths(files).forEach(sources::add);
             sources.add(new Source("com.mkei.backcast.R", resource.toString()));
             String classpath = api + File.pathSeparator + String.join(File.pathSeparator, programs.values().stream().map(Path::toString).toList());
-            if (!compiler.getTask(null, manager, null, List.of("-proc:none", "-source", "7", "-target", "7", "-Xlint:-options",
+            if (!compiler.getTask(null, manager, null, List.of("-proc:none", "-source", "8", "-target", "8", "-Xlint:-options",
                     "-encoding", "UTF-8", "-classpath", classpath, "-d", output.toString()), null, sources).call()) throw new AssertionError("Real dependency application compilation failed");
         }
         Path jar = work.resolve("application.jar");
@@ -122,34 +153,13 @@ public final class AndroidDependencyDexCheck {
                 Files.copy(file, archive); archive.closeEntry();
             }
         }
-        System.out.println("Compiled " + files.size() + " production Java files against real AndroidX; only referenced application R is generated.");
+        System.out.println("Compiled " + files.size() + " Java8 production files against real AndroidX and official SDK runtime; only referenced application R is generated.");
         return jar;
     }
-    private static int dex(Path d8, Path api, Path work, String mode, Path application, boolean legacy) throws Exception {
+    private static int dex(Path d8, Path api, Path work, String mode, Path application, boolean release) throws Exception {
         Path output = work.resolve(mode); Files.createDirectory(output);
         List<String> command = new ArrayList<>(List.of(System.getProperty("java.home") + "/bin/java", "-cp", d8.toString(),
-                "com.android.tools.r8.D8", "--min-api", "16", "--debug", "--lib", api.toString(), "--output", output.toString()));
-        if (legacy) {
-            Path rules = work.resolve("main-dex-rules.pro");
-            Files.writeString(rules, "-keep public class * extends android.app.Application { *; }\n-keep public class * extends android.app.Activity { *; }\n-keep public class * extends android.app.Service { *; }\n");
-            Process help = new ProcessBuilder(System.getProperty("java.home") + "/bin/java", "-cp", d8.toString(), "com.android.tools.r8.D8", "--help").redirectErrorStream(true).start();
-            String options = new String(help.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8); help.waitFor();
-            if (options.contains("--main-dex-rules")) {
-                command.add("--main-dex-rules"); command.add(rules.toString());
-            } else {
-                Path mainDex = work.resolve("main-dex-list.txt");
-                List<String> generate = new ArrayList<>(List.of(System.getProperty("java.home") + "/bin/java", "-cp", d8.toString(),
-                        "com.android.tools.r8.GenerateMainDexList", "--lib", api.toString(), "--main-dex-rules", rules.toString(),
-                        "--main-dex-list-output", mainDex.toString()));
-                if (application != null) generate.add(application.toString());
-                for (Path program : programs.values()) generate.add(program.toString());
-                Process generator = new ProcessBuilder(generate).redirectErrorStream(true).start();
-                String generated = new String(generator.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-                if (generator.waitFor() != 0) throw new AssertionError("Legacy main-dex list generation failed:\n" + generated);
-                System.out.println("Generated legacy main-dex list: " + Files.readAllLines(mainDex).size() + " classes");
-                command.add("--main-dex-list"); command.add(mainDex.toString());
-            }
-        }
+                "com.android.tools.r8.D8", "--min-api", "26", release ? "--release" : "--debug", "--lib", api.toString(), "--output", output.toString()));
         if (application != null) command.add(application.toString());
         for (Path program : programs.values()) command.add(program.toString());
         Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
@@ -157,9 +167,14 @@ public final class AndroidDependencyDexCheck {
         int exit = process.waitFor();
         System.out.println("D8 " + mode + " exit=" + exit);
         System.out.println(diagnostics);
+        if (exit != 0) return exit;
         try (var files = Files.list(output)) {
-            for (Path file : files.filter(p -> p.toString().endsWith(".dex")).sorted().toList()) {
+            List<Path> dexFiles = files.filter(p -> p.toString().endsWith(".dex")).sorted().toList();
+            if (dexFiles.isEmpty()) throw new AssertionError("D8 produced no DEX files");
+            for (Path file : dexFiles) {
                 byte[] header = Files.readAllBytes(file);
+                if (header.length < 112 || !new String(header, 0, 4, java.nio.charset.StandardCharsets.US_ASCII).equals("dex\n"))
+                    throw new AssertionError("Invalid DEX header " + file);
                 int fields = (header[80] & 255) | (header[81] & 255) << 8 | (header[82] & 255) << 16 | (header[83] & 255) << 24;
                 int methods = (header[88] & 255) | (header[89] & 255) << 8 | (header[90] & 255) << 16 | (header[91] & 255) << 24;
                 if (fields > 65536 || methods > 65536) throw new AssertionError("DEX reference limit exceeded: " + file);
@@ -177,16 +192,17 @@ public final class AndroidDependencyDexCheck {
         // Update these roots when production dependency versions change.
         resolve("androidx.appcompat", "appcompat", "1.0.0");
         resolve("androidx.multidex", "multidex", "2.0.1");
-        System.out.println("Resolved " + programs.size() + " real compile/runtime artifacts from Google Maven:");
+        addSdkRuntime(root);
+        System.out.println("Resolved " + programs.size() + " real compile/runtime artifacts from official Google Maven and Gradle's SDK graph:");
         for (var entry : programs.entrySet()) System.out.println(entry.getKey() + " " + Files.size(entry.getValue()) + " bytes");
         System.out.println("Resolved " + resourceNamespaces.size() + " dependency resource namespaces (plus application namespace):");
         for (var entry : resourceNamespaces.entrySet()) System.out.println(entry.getKey() + " " + entry.getValue());
         Path work = Files.createTempDirectory("backcast-real-d8-");
         try {
-            if (dex(d8, api, work, "dependencies", null, false) != 0) throw new AssertionError("Real dependency single DEX compilation failed; diagnostics printed above");
+            if (dex(d8, api, work, "dependencies-debug", null, false) != 0) throw new AssertionError("Real dependency native multidex compilation failed; diagnostics printed above");
             Path application = compileApplication(root, api, work);
-            if (dex(d8, api, work, "application", application, false) != 0) throw new AssertionError("Real dependency/application single DEX compilation failed; diagnostics printed above");
-            if (dex(d8, api, work, "legacy-multidex", application, true) != 0) throw new AssertionError("Real dependency/application legacy D8 compilation failed; diagnostics printed above");
+            if (dex(d8, api, work, "application-debug", application, false) != 0) throw new AssertionError("Real dependency/application native multidex compilation failed; diagnostics printed above");
+            if (dex(d8, api, work, "application-release", application, true) != 0) throw new AssertionError("Real dependency/application release native multidex compilation failed; diagnostics printed above");
         } finally {
             try (var files = Files.walk(work)) { for (Path path : files.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); }
         }

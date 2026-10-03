@@ -77,10 +77,12 @@ public final class MultiDexConfigRegressionTest {
             System.out.println("PASS manifest selects the application that initializes legacy multidex");
             String gradle = Files.readString(root.resolve("app/build.gradle"));
             check(java.util.regex.Pattern.compile("(?m)^\\s*multiDexEnabled\\s+true\\s*$").matcher(gradle).find(), "DEX build does not enable multidex");
-            check(java.util.regex.Pattern.compile("(?m)^\\s*minSdkVersion\\s+16\\s*$").matcher(gradle).find(), "Multidex fix dropped legacy device support");
+            check(java.util.regex.Pattern.compile("(?m)^\\s*minSdkVersion\\s+26\\s*$").matcher(gradle).find(), "Official SDK needs Android 8 Java 8 runtime APIs");
             check(java.util.regex.Pattern.compile("(?m)^\\s*implementation\\s+['\"]androidx\\.multidex:multidex:2\\.0\\.1['\"]\\s*$").matcher(gradle).find(),
                     "Legacy multidex runtime dependency is missing");
-            System.out.println("PASS minSdk16 build enables multidex and includes the AndroidX runtime");
+            check(gradle.contains("sourceCompatibility JavaVersion.VERSION_1_8")
+                    && gradle.contains("targetCompatibility JavaVersion.VERSION_1_8"), "Official SDK build has not upgraded to Java 8");
+            System.out.println("PASS Android 8 / Java 8 build enables multidex and retains the startup runtime");
             System.out.println("3 multidex startup/configuration tests passed");
         } finally { try (var walk = Files.walk(temporary)) { for (Path file : walk.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(file); } }
     }

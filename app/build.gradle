@@ -1,12 +1,14 @@
 apply plugin: 'com.android.application'
 
 android {
+    namespace 'com.mkei.backcast'
     compileSdkVersion 30
-    buildToolsVersion "33.0.0"
+    buildToolsVersion "34.0.0"
 
     defaultConfig {
         applicationId "com.mkei.backcast"
-        minSdkVersion 16
+        // The official OpenAI SDK uses Java 8 APIs (time, streams, Optional and NIO).
+        minSdkVersion 26
         targetSdkVersion 26
         multiDexEnabled true
         versionCode 1
@@ -18,6 +20,17 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    packagingOptions {
+        // Preserve the upstream notices while merging dependency JAR resources.
+        resources {
+            merges += ['META-INF/LICENSE*', 'META-INF/NOTICE*']
+            excludes += ['META-INF/DEPENDENCIES', 'META-INF/versions/**']
+        }
+    }
     lintOptions {
         // This APK is sideloaded and deliberately retains targetSdk 26 behavior.
         disable 'ExpiredTargetSdkVersion'
@@ -27,5 +40,19 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.0.0'
     implementation 'androidx.multidex:multidex:2.0.1'
+    implementation 'com.openai:openai-java:4.75.1'
+    // App cancellation/deadline hooks use the SDK's public transport APIs directly.
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.okio:okio-jvm:3.6.0'
     implementation fileTree(dir: 'libs', include: ['*.jar'])
+}
+
+// JVM regressions use the same official SDK dependency graph as the packaged app.
+tasks.register('writeAgentTestClasspath') {
+    doLast {
+        def output = file("$buildDir/agent-test-classpath.txt")
+        output.parentFile.mkdirs()
+        output.text = configurations.debugRuntimeClasspath.files
+                .findAll { it.name.endsWith('.jar') }.collect { it.absolutePath }.join(File.pathSeparator)
+    }
 }

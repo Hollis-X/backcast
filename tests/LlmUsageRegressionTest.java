@@ -475,6 +475,47 @@ public final class LlmUsageRegressionTest {
         }
     }
 
+    private static void officialSdkFetchesCompatibleModelListsWithoutRetry() throws Exception {
+        for (final int status : new int[]{200, 401}) {
+            final java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+            final List<String> wireErrors = new ArrayList<String>();
+            HttpServer http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            http.createContext("/v1/models", new HttpHandler() {
+                @Override public void handle(HttpExchange exchange) throws IOException {
+                    requests.incrementAndGet();
+                    if (!"GET".equals(exchange.getRequestMethod())) wireErrors.add("Model request was not GET");
+                    if (!"Bearer fake-local-key".equals(exchange.getRequestHeaders().getFirst("Authorization")))
+                        wireErrors.add("SDK authorization was not sent");
+                    exchange.getRequestBody().close();
+                    String text = status == 200 ? new JSONObject().put("object", "list")
+                            .put("data", new JSONArray()
+                                    .put(new JSONObject().put("id", "deepseek-fixture").put("object", "model")
+                                            .put("created", 0).put("owned_by", "fixture"))
+                                    .put(new JSONObject().put("id", "provider/custom-model").put("object", "model")
+                                            .put("created", 0).put("owned_by", "fixture"))).toString()
+                            : new JSONObject().put("error", new JSONObject().put("message", "invalid fixture key")).toString();
+                    byte[] body = text.getBytes("UTF-8");
+                    exchange.getResponseHeaders().set("Content-Type", "application/json");
+                    exchange.getResponseHeaders().set("Connection", "close");
+                    exchange.sendResponseHeaders(status, body.length);
+                    try { exchange.getResponseBody().write(body); }
+                    finally { exchange.close(); }
+                }
+            });
+            http.start();
+            try {
+                LlmClient.ModelsResult result = LlmClient.fetchModels(
+                        "http://127.0.0.1:" + http.getAddress().getPort() + "/v1/chat/completions", "fake-local-key");
+                check(requests.get() == 1 && wireErrors.isEmpty(), "SDK model listing changed endpoint or retried: " + wireErrors);
+                if (status == 200) check(result.error == null
+                                && result.models.equals(Arrays.asList("deepseek-fixture", "provider/custom-model")),
+                        "SDK model listing lost provider IDs: " + result.error + " " + result.models);
+                else check(result.models.isEmpty() && result.error != null && result.error.startsWith("HTTP 401:"),
+                        "SDK model listing discarded a permanent HTTP status: " + result.error);
+            } finally { http.stop(0); }
+        }
+    }
+
     private static void run(String name) {
         try {
             LlmUsageRegressionTest.class.getDeclaredMethod(name).invoke(null);
@@ -495,7 +536,8 @@ public final class LlmUsageRegressionTest {
                 "existingPolicyIsNotDuplicated", "unsupportedVerbosityFallsBackAndCachesWithoutLosingPolicy",
                 "usageThenVerbosityFallsBackWithinThreeRequests", "verbosityThenUsageFallsBackWithinThreeRequests",
                 "rejectedVerbosityRetriesAtMostOnce", "unrelatedVerbosityErrorDoesNotRetry",
-                "cancellationBeforeAttemptDoesNotStartHttp", "maxAndUltraReachTheWireUnchanged" };
+                "cancellationBeforeAttemptDoesNotStartHttp", "maxAndUltraReachTheWireUnchanged",
+                "officialSdkFetchesCompatibleModelListsWithoutRetry" };
         for (String name : tests) run(name);
         if (failures != 0) throw new AssertionError(failures + " usage tests failed");
         System.out.println(tests.length + " usage tests passed");

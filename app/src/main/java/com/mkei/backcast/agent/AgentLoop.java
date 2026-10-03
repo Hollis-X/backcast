@@ -170,6 +170,8 @@ public class AgentLoop {
 
     private LlmClient client;
     private LlmClient requestClient;
+    private Object requestLease;
+    private int requestToken, requestGeneration;
     private ToolRegistry registry;
     private final List<Message> history = new ArrayList<Message>();
     private final List<Hook> hooks = new ArrayList<Hook>();
@@ -520,6 +522,15 @@ public class AgentLoop {
 
     public boolean busy() {
         return busy;
+    }
+
+    /** Live timing belongs to the current request, never a cancelled or replaced turn. */
+    public LlmClient.RequestActivity requestActivity() {
+        synchronized (lock) {
+            if (!busy || cancelled || requestClient == null || requestLease == null
+                    || requestToken != runToken || requestGeneration != generation) return null;
+            return requestClient.requestActivity();
+        }
     }
 
     public void clearGate(ApprovalGate target) {
@@ -1206,12 +1217,16 @@ public class AgentLoop {
     private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, LlmClient.Sink sink,
             final int token, final int gen, String purpose) {
         LlmClient current;
+        final Object lease = new Object();
         long requestSession;
         Recorder requestRecorder;
         synchronized (lock) {
             if (stale(token, gen)) return new LlmClient.Reply();
             current = client;
             requestClient = current;
+            requestLease = lease;
+            requestToken = token;
+            requestGeneration = gen;
             requestSession = sessionKey;
             requestRecorder = recorder;
         }
@@ -1243,7 +1258,10 @@ public class AgentLoop {
             return reply;
         } finally {
             synchronized (lock) {
-                if (requestClient == current) requestClient = null;
+                if (requestLease == lease) {
+                    requestClient = null;
+                    requestLease = null;
+                }
             }
         }
     }

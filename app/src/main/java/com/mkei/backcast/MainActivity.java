@@ -296,6 +296,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private WorkTimeline sheetTimeline;
     private WorkTimeline.CommandView sheetCommand;
     private TextView sheetRequestOutput;
+    private TextView sheetRequestLive;
+    private long sheetRequestSession = -1L;
+    private final Runnable requestDiagnosticsRefresh = new Runnable() {
+        @Override public void run() { refreshRequestDiagnostics(); }
+    };
     private ReasoningNotes reasoningNotes;
     private String reasoningPreference = "";
     private final Runnable sheetRefresh = new Runnable() {
@@ -599,6 +604,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         applyGate();
         refreshGoal();
         maybeContinue();
+        refreshRequestDiagnostics();
     }
 
     private void refreshReasoningPreference() {
@@ -642,12 +648,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     @Override
     protected void onPause() {
         hideKeyboard();
+        View body = findViewById(R.id.sheet_body);
+        if (body != null) body.removeCallbacks(requestDiagnosticsRefresh);
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        resetSheetDetails();
         cancelApprovals();
         resetHistoryLoading();
         historyReader.shutdownNow();
@@ -3439,7 +3448,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         boolean live = trace == currentTrace && trace.elapsedMs <= 0;
         String time = live ? "总耗时 " + seconds(ms) + "s"
                 : getString(R.string.worked, Integer.valueOf(seconds(ms)));
-        String progress = trace.progressCaption(live);
+        LlmClient.RequestActivity request = live && loop != null ? loop.requestActivity() : null;
+        String progress = trace.progressCaption(live, request == null ? -1L : request.quietMs);
         header.setText(time + (progress.length() == 0 ? "" : " · " + progress));
     }
 
@@ -4275,7 +4285,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private void resetSheetDetails() {
         View body = findViewById(R.id.sheet_body);
-        if (body != null) body.removeCallbacks(sheetRefresh);
+        if (body != null) {
+            body.removeCallbacks(sheetRefresh);
+            body.removeCallbacks(requestDiagnosticsRefresh);
+        }
         LinearLayout panel = (LinearLayout) findViewById(R.id.sheet_panel);
         if (panel != null) {
             for (int i = panel.getChildCount() - 1; i >= 0; i--)
@@ -4283,6 +4296,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         sheetCommand = null;
         sheetRequestOutput = null;
+        sheetRequestLive = null;
+        sheetRequestSession = -1L;
         sheetTrace = null;
         sheetRange = null;
         sheetTimeline = null;
@@ -4304,6 +4319,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private void showActivitySheet(final TurnTrace.Range range) {
         if (range == null || !range.hasDetail()) return;
+        // A request with no visible activity has no timeline to show: open its log directly.
+        if (!range.hasActivity()) { showRequestDiagnostics(); return; }
         LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
         if (body == null) return;
         showSheet();
@@ -4334,6 +4351,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (body == null) return;
         showSheet();
         body.removeAllViews();
+        TextView live = new TextView(this);
+        live.setTextSize(14);
+        live.setTextColor(0xFF252528);
+        live.setLineSpacing(dp(5), 1f);
+        live.setPadding(0, 0, 0, dp(14));
+        body.addView(live, fullWidth());
         final TextView output = new TextView(this);
         output.setText("本会话最近 20 次请求\n正在读取…");
         output.setTextSize(14);
@@ -4342,6 +4365,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         enableCopy(output);
         body.addView(output, fullWidth());
         sheetRequestOutput = output;
+        sheetRequestLive = live;
+        sheetRequestSession = sid;
+        refreshRequestDiagnostics();
+        fitRequestDiagnosticsSheet();
         historyReader.execute(new Runnable() {
             @Override public void run() {
                 String value;
@@ -4350,11 +4377,42 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 final String text = value;
                 ui(new Runnable() {
                     @Override public void run() {
-                        if (sessionId == sid && sheetRequestOutput == output && !isFinishing()) output.setText(text);
+                        if (sessionId == sid && sheetRequestOutput == output && !activityDestroyed && !isFinishing()) output.setText(text);
                     }
                 });
             }
         });
+    }
+
+    /** Refresh only in-memory timing; completed request history is read once when opening. */
+    private void refreshRequestDiagnostics() {
+        if (sheetRequestLive == null || sheetRequestOutput == null || sheetRequestSession != sessionId
+                || activityDestroyed || isFinishing()) return;
+        LlmClient.RequestActivity request = loop == null ? null : loop.requestActivity();
+        sheetRequestLive.setText(liveRequestDiagnosticsText(request));
+        View body = findViewById(R.id.sheet_body);
+        if (body != null) {
+            body.removeCallbacks(requestDiagnosticsRefresh);
+            body.postDelayed(requestDiagnosticsRefresh, 750);
+        }
+    }
+
+    private String liveRequestDiagnosticsText(LlmClient.RequestActivity request) {
+        if (request == null) return "当前没有正在进行的模型请求。\n重试等待、授权等待和工具执行不计入单次请求耗时。";
+        String state = request.quietMs >= 10000L ? "等待模型响应"
+                : request.hasProgress ? "正在接收输出"
+                : request.responseStarted ? "已收到响应，等待内容" : "等待首次响应";
+        return "当前单次请求 · " + state + "\n请求耗时 " + request.elapsedMs
+                + "ms · 已静默 " + request.quietMs + "ms";
+    }
+
+    /** The sheet's 0dp weighted ScrollView needs a bounded positive parent height. */
+    private void fitRequestDiagnosticsSheet() {
+        View panel = findViewById(R.id.sheet_panel);
+        if (panel == null) return;
+        ViewGroup.LayoutParams params = panel.getLayoutParams();
+        params.height = Math.max(1, (int) (getResources().getDisplayMetrics().heightPixels * .72f));
+        panel.setLayoutParams(params);
     }
 
     private String requestDiagnosticsText(List<ChatStore.RequestEvent> events) {
@@ -4381,9 +4439,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View panel = findViewById(R.id.sheet_panel);
         View scrim = findViewById(R.id.sheet_scrim);
         View body = findViewById(R.id.sheet_body);
-        if (body != null) body.removeCallbacks(sheetRefresh);
+        if (body != null) {
+            body.removeCallbacks(sheetRefresh);
+            body.removeCallbacks(requestDiagnosticsRefresh);
+        }
         sheetTrace = null; sheetTimeline = null; sheetRange = null;
         sheetRequestOutput = null;
+        sheetRequestLive = null;
+        sheetRequestSession = -1L;
         if (overlay == null || overlay.getVisibility() != View.VISIBLE) return;
         sheetToken++;
         final int token = sheetToken;

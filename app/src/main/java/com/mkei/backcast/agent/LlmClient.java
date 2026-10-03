@@ -4,26 +4,41 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Iterator;
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import com.openai.client.OpenAIClient;
+import com.openai.client.OpenAIClientImpl;
+import com.openai.core.ClientOptions;
+import com.openai.core.JsonField;
+import com.openai.core.JsonValue;
+import com.openai.core.LogLevel;
+import com.openai.core.Timeout;
+import com.openai.core.http.HttpResponseFor;
+import com.openai.core.http.StreamResponse;
+import com.openai.models.chat.completions.ChatCompletionChunk;
+import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.openai.models.models.Model;
+import okhttp3.Call;
+import okhttp3.Interceptor;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+import okio.Buffer;
+import okio.BufferedSource;
+import okio.Okio;
 
 /**
  * OpenAI 兼容的 Chat Completions 客户端。
  *
- * 不依赖任何第三方 HTTP 库：HttpURLConnection + 内置 org.json。
+ * 使用官方 OpenAI Java SDK 的 Chat Completions、模型目录与 SSE 解析。
  * 只要服务端兼容 /chat/completions，就能接。
  */
 public class LlmClient {
-    /** 单次 read 的切片。空闲是否结束看有没有思考、正文或工具，不看保活行。 */
-    private static final int READ_SLICE_MS = 10000;
     /** Finished generation may have a final usage frame, but it must not wait for another idle budget. */
     private static final long FINISHED_USAGE_GRACE_MS = 1000L;
 
@@ -182,24 +197,105 @@ public class LlmClient {
         boolean isCurrent();
     }
 
+    /** Safe live timing only; never exposes endpoint, credentials, request body, or provider text. */
+    public static final class RequestActivity {
+        public final long elapsedMs, quietMs;
+        public final boolean responseStarted, hasProgress;
+        private RequestActivity(long elapsedMs, long quietMs, boolean responseStarted, boolean hasProgress) {
+            this.elapsedMs = elapsedMs; this.quietMs = quietMs;
+            this.responseStarted = responseStarted; this.hasProgress = hasProgress;
+        }
+    }
+
     private final Config config;
-    private volatile HttpURLConnection active;
     private volatile boolean usageOptionUnsupported;
     private volatile boolean verbosityUnsupported;
     private final ThreadLocal<RequestValidity> requestValidity = new ThreadLocal<RequestValidity>();
 
     /** 这一次请求。停止时把它标死并断开，不碰到下一次请求。 */
     private static class Attempt {
-        volatile HttpURLConnection conn;
+        volatile Call call;
         volatile boolean dead;
-        long deadline;
+        volatile boolean finished, responseStarted;
+        long startedNanos;
+        volatile long lastProgressNanos;
+        volatile BufferedSource source;
+        volatile int status;
+        String errorDetail;
+        long idleDeadlineNanos, totalDeadlineNanos;
         int maxChars;
     }
 
     private volatile Attempt attempt;
 
+    /** The SDK owns request/schema/SSE handling; this hook only exposes this call's cancellation and deadlines. */
+    private final class SdkSession implements AutoCloseable {
+        final ClientOptions options;
+        final OpenAIClient client;
+        SdkSession(final Attempt mine) throws Exception {
+            long headerBudget = headerTimeout(mine);
+            OkHttpClient http = new OkHttpClient.Builder()
+                    .connectTimeout(20, TimeUnit.SECONDS).writeTimeout(20, TimeUnit.SECONDS)
+                    .readTimeout(headerBudget, TimeUnit.MILLISECONDS)
+                    .retryOnConnectionFailure(false).followRedirects(false)
+                    .addNetworkInterceptor(new Interceptor() {
+                        @Override public Response intercept(Chain chain) throws java.io.IOException {
+                            Response response = chain.proceed(chain.request());
+                            // Network interceptors run before OkHttp's Retry-After follow-up policy.
+                            return response.code() == 503
+                                    ? response.newBuilder().removeHeader("Retry-After").build() : response;
+                        }
+                    })
+                    .addInterceptor(new Interceptor() {
+                        @Override public Response intercept(Chain chain) throws java.io.IOException {
+                            mine.call = chain.call();
+                            if (mine.dead) { chain.call().cancel(); throw new java.io.IOException("Cancelled"); }
+                            Response response = chain.proceed(chain.request());
+                            mine.status = response.code(); mine.responseStarted = true;
+                            if (response.body() != null) {
+                                if (mine.status >= 200 && mine.status < 300 && mine.maxChars > 0)
+                                    response = limitBody(response, mine.maxChars);
+                                mine.source = response.body().source();
+                                mine.idleDeadlineNanos = System.nanoTime()
+                                        + TimeUnit.MILLISECONDS.toNanos(Math.max(1000L, config.timeoutMs));
+                                configureDeadline(mine, 0L);
+                                if (mine.status < 200 || mine.status >= 300) {
+                                    MediaType type = response.body().contentType();
+                                    String detail = readErrorDetail(response);
+                                    mine.errorDetail = detail;
+                                    response.close();
+                                    response = response.newBuilder().body(ResponseBody.create(type, detail)).build();
+                                }
+                            }
+                            return response;
+                        }
+                    }).build();
+            Timeout timeout = Timeout.builder().connect(Duration.ofSeconds(20)).write(Duration.ofSeconds(20))
+                    .read(Duration.ofMillis(headerBudget))
+                    .request(mine.totalDeadlineNanos == 0L ? Duration.ZERO : Duration.ofMillis(remainingTotal(mine)))
+                    .build();
+            options = ClientOptions.builder()
+                    .httpClient(new com.openai.client.okhttp.OkHttpClient(http))
+                    .baseUrl(Config.root(config.baseUrl)).apiKey(config.apiKey)
+                    .maxRetries(0).logLevel(LogLevel.OFF).responseValidation(false).timeout(timeout).build();
+            client = new OpenAIClientImpl(options);
+        }
+        @Override public void close() { client.close(); }
+    }
+
     public LlmClient(Config config) {
         this.config = config;
+    }
+
+    public RequestActivity requestActivity() {
+        Attempt current = attempt;
+        if (current == null || current.dead || current.finished) return null;
+        long now = System.nanoTime(), progress = current.lastProgressNanos;
+        RequestActivity snapshot = new RequestActivity(
+                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - current.startedNanos)),
+                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - (progress == 0L ? current.startedNanos : progress))),
+                current.responseStarted, progress != 0L);
+        return current.dead || current.finished ? null : snapshot;
     }
 
     /** 断开正在进行的请求。用户点停止时调用。 */
@@ -209,10 +305,8 @@ public class LlmClient {
             return;
         }
         current.dead = true;
-        HttpURLConnection conn = current.conn;
-        if (conn != null) {
-            conn.disconnect();
-        }
+        Call call = current.call;
+        if (call != null) call.cancel();
     }
 
     /** Register cancellation validity while preserving existing send overrides. */
@@ -228,7 +322,9 @@ public class LlmClient {
 
     public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
         Attempt mine = new Attempt();
-        mine.deadline = config.totalTimeoutMs > 0 ? System.currentTimeMillis() + config.totalTimeoutMs : 0;
+        mine.startedNanos = System.nanoTime();
+        mine.totalDeadlineNanos = config.totalTimeoutMs > 0
+                ? mine.startedNanos + TimeUnit.MILLISECONDS.toNanos(config.totalTimeoutMs) : 0L;
         mine.maxChars = config.maxResponseChars;
         attempt = mine;
         RequestValidity validity = requestValidity.get();
@@ -240,19 +336,24 @@ public class LlmClient {
         String detail = ResponsePreferences.normalizeVerbosity(config.verbosity);
         boolean includeVerbosity = !verbosityUnsupported && !"default".equals(detail);
         Reply reply;
-        while (true) {
-            reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
-            if (mine.dead) return reply;
-            if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) {
-                usageOptionUnsupported = true;
-                includeUsage = false;
-            } else if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) {
-                verbosityUnsupported = true;
-                includeVerbosity = false;
-            } else {
-                return reply;
+        try {
+            while (true) {
+                reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
+                if (mine.dead) {
+                    discardCancelledReply(reply);
+                    return reply;
+                }
+                if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) {
+                    usageOptionUnsupported = true;
+                    includeUsage = false;
+                } else if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) {
+                    verbosityUnsupported = true;
+                    includeVerbosity = false;
+                } else {
+                    return reply;
+                }
             }
-        }
+        } finally { mine.finished = true; }
     }
 
     private static boolean rejectsOption(String error, String option, String alias) {
@@ -271,9 +372,9 @@ public class LlmClient {
         if (mine.dead) {
             return reply;
         }
-        HttpURLConnection conn = null;
-        InputStream response = null;
-        OutputStream request = null;
+        SdkSession sdk = null;
+        HttpResponseFor<StreamResponse<ChatCompletionChunk>> response = null;
+        StreamResponse<ChatCompletionChunk> stream = null;
         boolean waitingHeaders = false;
         try {
             JSONObject body = new JSONObject();
@@ -313,90 +414,159 @@ public class LlmClient {
                 body.put("tool_choice", "auto");
             }
 
-            conn = (HttpURLConnection) new URL(config.baseUrl).openConnection();
-            mine.conn = conn;
-            active = conn;
-            if (mine.dead) {
-                conn.disconnect();
-                return reply;
-            }
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(20000);
-            // A server may wait for model output before returning headers. The stream polling slice
-            // cannot shorten this initial wait to ten seconds before the idle budget even starts.
-            conn.setReadTimeout(headerTimeout(mine));
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setRequestProperty("Authorization", "Bearer " + config.apiKey);
-            conn.setRequestProperty("Accept", "text/event-stream");
-            // 关掉压缩，否则整包缓冲完才吐，流式等于没开。
-            conn.setRequestProperty("Accept-Encoding", "identity");
-            conn.setRequestProperty("Connection", "close");
-
-            byte[] payload = body.toString().getBytes("UTF-8");
-            conn.setFixedLengthStreamingMode(payload.length);
-            request = conn.getOutputStream();
-            request.write(payload);
-            request.flush();
-            request.close();
-            request = null;
-
+            sdk = new SdkSession(mine);
+            Map<String, Object> fields = sdk.options.jsonMapper().readValue(body.toString(), Map.class);
+            ChatCompletionCreateParams.Builder params = ChatCompletionCreateParams.builder()
+                    .model(config.model).messages((JsonField) JsonValue.from(fields.remove("messages")));
+            fields.remove("model"); fields.remove("stream");
+            for (Map.Entry<String, Object> entry : fields.entrySet())
+                params.putAdditionalBodyProperty(entry.getKey(), JsonValue.from(entry.getValue()));
+            params.putAdditionalHeader("Accept-Encoding", "identity");
             waitingHeaders = true;
-            conn.setReadTimeout(headerTimeout(mine));
-            int code = conn.getResponseCode();
+            response = sdk.client.chat().completions().withRawResponse().createStreaming(params.build());
             waitingHeaders = false;
-            // Poll reads once the response exists; meaningful output controls the separate idle clock.
-            conn.setReadTimeout(READ_SLICE_MS);
-            if (code < 200 || code >= 300) {
-                // The status remains authoritative even if the optional error body times out.
-                reply.error = "HTTP " + code + ":";
-                try {
-                    response = conn.getErrorStream();
-                    String text = readAll(response);
-                    reply.raw = text;
-                    reply.error += " " + trim(text, 500);
-                } catch (Exception errorBodyFailure) {
-                    // Losing provider detail must not turn a permanent HTTP error into a network retry.
-                }
-                return reply;
-            }
             if (mine.dead) {
                 return reply;
             }
-            response = conn.getInputStream();
-            readStream(response, reply, mine, sink, config.timeoutMs);
+            boolean jsonResponse = false;
+            for (String value : response.headers().values("Content-Type"))
+                if (value.toLowerCase(java.util.Locale.US).contains("application/json")) jsonResponse = true;
+            if (jsonResponse) {
+                String text = sdk.options.jsonMapper().readTree(response.body()).toString();
+                reply.raw = text; parseInto(reply, text); emitFull(reply, sink);
+            } else {
+                stream = response.parse();
+                List<CallAcc> calls = new ArrayList<CallAcc>();
+                long finishedDeadline = 0L;
+                Iterator<ChatCompletionChunk> chunks = stream.stream().iterator();
+                try {
+                    while (!mine.dead && chunks.hasNext()) {
+                        String data = sdk.options.jsonMapper().writeValueAsString(chunks.next());
+                        long previous = reply.streamProgress;
+                        absorbEvent(data, reply, calls, sink);
+                        if (reply.error != null) break;
+                        if (reply.streamProgress != previous) {
+                            mine.lastProgressNanos = System.nanoTime();
+                            mine.idleDeadlineNanos = mine.lastProgressNanos
+                                    + TimeUnit.MILLISECONDS.toNanos(Math.max(1000L, config.timeoutMs));
+                        }
+                        if (reply.finishReason != null && finishedDeadline == 0L)
+                            finishedDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(FINISHED_USAGE_GRACE_MS);
+                        if (reply.finalUsage) break;
+                        configureDeadline(mine, finishedDeadline);
+                    }
+                } catch (RuntimeException streamFailure) {
+                    Throwable failure = rootCause(streamFailure);
+                    if (reply.finishReason == null) {
+                        if (failure instanceof java.io.InterruptedIOException
+                                && (mine.totalDeadlineNanos == 0L || System.nanoTime() < mine.totalDeadlineNanos)) noteIdle(reply, calls);
+                        else throw streamFailure;
+                    }
+                }
+                if (!mine.dead && reply.error == null) {
+                    reply.toolCalls = callsToJson(calls); validateToolCalls(reply);
+                }
+            }
         } catch (Exception e) {
             if (!mine.dead) {
-                reply.error = (waitingHeaders && e instanceof java.net.SocketTimeoutException
-                        ? "响应头等待超时：" : "") + e.getClass().getSimpleName() + ": " + e.getMessage();
+                Throwable failure = rootCause(e);
+                if ((mine.status > 0 && mine.status < 200) || mine.status >= 300) {
+                    String detail = mine.errorDetail == null ? "" : mine.errorDetail;
+                    try { if (detail.length() == 0 && e instanceof com.openai.errors.OpenAIServiceException)
+                        detail = sdk.options.jsonMapper().writeValueAsString(((com.openai.errors.OpenAIServiceException) e).body());
+                    } catch (Exception missingDetail) { /* HTTP status remains authoritative. */ }
+                    reply.error = "HTTP " + mine.status + ": " + trim(detail, 500);
+                } else reply.error = (waitingHeaders && failure instanceof java.io.InterruptedIOException
+                        ? "响应头等待超时：" : "") + failure.getClass().getSimpleName() + ": " + failure.getMessage();
             }
         } finally {
-            closeQuietly(request);
-            closeQuietly(response);
-            if (active == conn) {
-                active = null;
-            }
-            if (conn != null) {
-                conn.disconnect();
-            }
+            reply.finishText();
+            if (stream != null) try { stream.close(); } catch (RuntimeException closeFailure) { }
+            if (response != null) try { response.close(); } catch (RuntimeException closeFailure) { }
+            if (sdk != null) try { sdk.close(); } catch (RuntimeException closeFailure) { }
+            mine.call = null; mine.source = null; mine.status = 0; mine.errorDetail = null;
         }
         if (mine.dead) {
-            reply.error = null;
-            reply.content = "";
-            reply.toolCalls = null;
-            reply.reasoning = null;
+            discardCancelledReply(reply);
         }
         return reply;
     }
 
+    private static void discardCancelledReply(Reply reply) {
+        reply.error = null;
+        reply.content = "";
+        reply.toolCalls = null;
+        reply.reasoning = null;
+        reply.displayParts = null;
+    }
+
+    /** HTTP failure details are optional: cap both memory and time before applying request policy. */
+    private static String readErrorDetail(Response response) throws java.io.IOException {
+        if (response.body() == null) return "";
+        BufferedSource source = response.body().source();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1L);
+        if (source.timeout().hasDeadline()) deadline = Math.min(deadline, source.timeout().deadlineNanoTime());
+        source.timeout().timeout(Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+                .deadlineNanoTime(deadline);
+        Buffer detail = new Buffer();
+        try {
+            while (detail.size() < 4096L) {
+                if (source.read(detail, 4096L - detail.size()) < 0L) break;
+            }
+        } catch (java.io.IOException missingDetail) {
+            // Preserve received detail if a server stalls, without losing the known HTTP status.
+        }
+        return detail.readUtf8();
+    }
+
+    private static Response limitBody(Response response, final long limit) {
+        final ResponseBody original = response.body();
+        final BufferedSource bounded = Okio.buffer(new okio.ForwardingSource(original.source()) {
+            long received;
+            @Override public long read(Buffer sink, long byteCount) throws java.io.IOException {
+                long count = super.read(sink, Math.min(byteCount, Math.max(1L, limit - received)));
+                if (count > 0L) {
+                    received += count;
+                    if (received > limit) throw new java.io.IOException("Response size limit exceeded");
+                }
+                return count;
+            }
+        });
+        return response.newBuilder().body(new ResponseBody() {
+            @Override public MediaType contentType() { return original.contentType(); }
+            @Override public long contentLength() { return -1L; }
+            @Override public BufferedSource source() { return bounded; }
+        }).build();
+    }
+
     private int headerTimeout(Attempt mine) throws java.net.SocketTimeoutException {
         long budget = Math.max(1000L, config.timeoutMs);
-        if (mine.deadline > 0) {
-            long remaining = mine.deadline - System.currentTimeMillis();
-            if (remaining <= 0) throw new java.net.SocketTimeoutException("Request deadline exceeded while waiting for response headers");
-            budget = Math.min(budget, remaining);
-        }
+        if (mine.totalDeadlineNanos > 0L) budget = Math.min(budget, remainingTotal(mine));
         return (int) Math.min(Integer.MAX_VALUE, Math.max(1L, budget));
+    }
+
+    private static long remainingTotal(Attempt mine) throws java.net.SocketTimeoutException {
+        long remaining = TimeUnit.NANOSECONDS.toMillis(mine.totalDeadlineNanos - System.nanoTime());
+        if (remaining <= 0) throw new java.net.SocketTimeoutException("Request deadline exceeded");
+        return Math.min(Integer.MAX_VALUE, remaining);
+    }
+
+    private static Throwable rootCause(Throwable failure) {
+        // A call deadline may wrap the socket close that it caused; keep the timeout as the cause.
+        while (failure.getCause() != null && failure.getCause() != failure) {
+            if (failure instanceof java.io.InterruptedIOException) return failure;
+            failure = failure.getCause();
+        }
+        return failure;
+    }
+
+    private static void configureDeadline(Attempt mine, long finishedDeadline) {
+        BufferedSource source = mine.source;
+        if (source == null) return;
+        long deadline = finishedDeadline > 0L ? finishedDeadline : mine.idleDeadlineNanos;
+        if (mine.totalDeadlineNanos > 0L) deadline = Math.min(deadline, mine.totalDeadlineNanos);
+        source.timeout().timeout(Math.max(1L, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)
+                .deadlineNanoTime(deadline);
     }
 
     /** 一路工具调用的拼装。流式里名字和参数是分段到的。 */
@@ -405,195 +575,6 @@ public class LlmClient {
         String name = "";
         StringBuilder args = new StringBuilder();
         JSONObject displayPart;
-    }
-
-    private static void readStream(InputStream in, Reply reply, Attempt mine, Sink sink, long idleMs)
-            throws Exception {
-        if (in == null) {
-            reply.error = "响应为空。";
-            return;
-        }
-        if (idleMs < 1000L) {
-            idleMs = 1000L;
-        }
-        StreamLines reader = new StreamLines(in);
-        StringBuilder raw = new StringBuilder();
-        List<CallAcc> calls = new ArrayList<CallAcc>();
-        long[] clock = new long[] { System.currentTimeMillis() + idleMs, idleMs };
-        try {
-            Pulled first = pullLine(reader, raw, mine, clock);
-            if (first.idle) {
-                reply.raw = raw.toString();
-                noteIdle(reply, calls);
-                return;
-            }
-            if (first.text == null || mine.dead) {
-                reply.raw = raw.toString();
-                return;
-            }
-            if (first.text.charAt(0) == '{') {
-                StringBuilder json = new StringBuilder(first.text);
-                clock[0] = System.currentTimeMillis() + clock[1];
-                while (!mine.dead) {
-                    Pulled rest = pullLine(reader, raw, mine, clock);
-                    if (rest.idle) {
-                        reply.raw = raw.toString();
-                        noteIdle(reply, null);
-                        return;
-                    }
-                    if (rest.text == null) {
-                        break;
-                    }
-                    json.append('\n').append(rest.text);
-                    clock[0] = System.currentTimeMillis() + clock[1];
-                }
-                reply.raw = raw.toString();
-                if (!mine.dead && reply.error == null) {
-                    parseInto(reply, json.toString());
-                    emitFull(reply, sink);
-                }
-                return;
-            }
-            boolean more = consumeSse(first.text, reply, calls, sink, clock);
-            long finishedDeadline = finishDeadline(reply, 0L);
-            while (more && reply.error == null && !mine.dead) {
-                if (finishedDeadline > 0 && reply.finalUsage) break;
-                if (finishedDeadline > 0 && System.currentTimeMillis() >= finishedDeadline) break;
-                Pulled next;
-                try {
-                    next = pullLine(reader, raw, mine, clock, finishedDeadline);
-                } catch (java.io.IOException failure) {
-                    // Generation is already complete; a missing usage tail cannot discard valid output.
-                    if (finishedDeadline > 0) break;
-                    throw failure;
-                }
-                if (next.idle) {
-                    if (finishedDeadline > 0) break;
-                    reply.raw = raw.toString();
-                    noteIdle(reply, calls);
-                    return;
-                }
-                if (next.text == null) {
-                    break;
-                }
-                if (!consumeSse(next.text, reply, calls, sink, clock)) {
-                    break;
-                }
-                finishedDeadline = finishDeadline(reply, finishedDeadline);
-            }
-            reply.raw = raw.toString();
-            if (reply.error == null && !mine.dead) {
-                reply.toolCalls = callsToJson(calls);
-                validateToolCalls(reply);
-            }
-        } finally {
-            reply.finishText();
-            closeQuietly(reader);
-        }
-    }
-
-    private static long finishDeadline(Reply reply, long previous) {
-        if (previous > 0 || reply.finishReason == null) return previous;
-        return System.currentTimeMillis() + FINISHED_USAGE_GRACE_MS;
-    }
-
-    /** Keep incomplete bytes across socket timeouts; decode UTF-8 only after framing a whole line. */
-    private static final class StreamLines implements Closeable {
-        private final InputStream input;
-        private final byte[] buffer = new byte[8192];
-        private final ByteArrayOutputStream line = new ByteArrayOutputStream();
-        private int position, length;
-
-        StreamLines(InputStream input) { this.input = input; }
-
-        String readLine(Attempt mine, long deadline) throws Exception {
-            while (!mine.dead) {
-                while (position < length) {
-                    int value = buffer[position++] & 255;
-                    if (value == '\n') return takeLine();
-                    line.write(value);
-                    if (mine.maxChars > 0 && line.size() >= mine.maxChars)
-                        throw new java.io.IOException("Response size limit exceeded");
-                }
-                int wanted = buffer.length;
-                if (deadline > 0) {
-                    if (System.currentTimeMillis() >= deadline) return null;
-                    // A usage tail is optional. Poll bytes instead of a blocking read after finish_reason.
-                    int available = input.available();
-                    if (available <= 0) {
-                        Thread.sleep(Math.min(25L, Math.max(1L, deadline - System.currentTimeMillis())));
-                        continue;
-                    }
-                    wanted = Math.min(wanted, available);
-                }
-                int count = input.read(buffer, 0, wanted);
-                if (count < 0) return line.size() == 0 ? null : takeLine();
-                position = 0; length = count;
-            }
-            return null;
-        }
-
-        private String takeLine() throws Exception {
-            String value = line.toString("UTF-8"); line.reset();
-            return value.endsWith("\r") ? value.substring(0, value.length() - 1) : value;
-        }
-
-        @Override public void close() throws java.io.IOException { input.close(); }
-    }
-
-    /** 读到的一行。保活和空行不算，不会把空闲时钟续上。 */
-    private static final class Pulled {
-        String text;
-        boolean idle;
-    }
-
-    /**
-     * 读下一行有内容的载荷。
-     *
-     * 注释行（: ping）和空行是保活，不重置空闲预算。预算耗尽返回 idle，
-     * 调用方结束这一轮，而不是一直占着停止按钮。
-     */
-    private static Pulled pullLine(StreamLines reader, StringBuilder raw, Attempt mine,
-            long[] clock) throws Exception {
-        return pullLine(reader, raw, mine, clock, 0L);
-    }
-
-    private static Pulled pullLine(StreamLines reader, StringBuilder raw, Attempt mine,
-            long[] clock, long finishedDeadline) throws Exception {
-        Pulled out = new Pulled();
-        while (!mine.dead) {
-            if (finishedDeadline > 0 && System.currentTimeMillis() >= finishedDeadline) {
-                out.idle = true;
-                return out;
-            }
-            if (mine.deadline > 0 && System.currentTimeMillis() >= mine.deadline) {
-                throw new java.net.SocketTimeoutException("Request deadline exceeded");
-            }
-            if (mine.maxChars > 0 && raw.length() >= mine.maxChars) {
-                throw new java.io.IOException("Response size limit exceeded");
-            }
-            if (finishedDeadline == 0 && System.currentTimeMillis() >= clock[0]) {
-                out.idle = true;
-                return out;
-            }
-            String line;
-            try {
-                line = reader.readLine(mine, finishedDeadline);
-            } catch (java.net.SocketTimeoutException timed) {
-                continue;
-            }
-            if (line == null) {
-                return out;
-            }
-            raw.append(line).append('\n');
-            String trimmed = line.trim();
-            if (trimmed.length() == 0 || trimmed.charAt(0) == ':' || "data:".equals(trimmed)) {
-                continue;
-            }
-            out.text = trimmed;
-            return out;
-        }
-        return out;
     }
 
     /** 长时间没有思考、正文或工具。有正文就留下并结束；半截工具不执行。 */
@@ -607,29 +588,20 @@ public class LlmClient {
         }
     }
 
-    /** @return false 表示流结束。 */
-    private static boolean consumeSse(String line, Reply reply, List<CallAcc> calls, Sink sink,
-            long[] clock)
-            throws Exception {
-        if (!line.startsWith("data:")) {
-            return true;
-        }
-        String data = line.substring(5).trim();
-        if ("[DONE]".equals(data)) {
-            return false;
-        }
-        if (data.length() == 0) {
-            return true;
-        }
-        long progress = reply.streamProgress;
-        absorbEvent(data, reply, calls, sink);
-        if (reply.streamProgress != progress) clock[0] = System.currentTimeMillis() + clock[1];
-        return reply.error == null;
-    }
-
     private static void absorbEvent(String data, Reply reply, List<CallAcc> calls, Sink sink)
             throws Exception {
         JSONObject root = new JSONObject(data);
+        if (reply.finishReason != null) {
+            reply.applyUsage(root.optJSONObject("usage"));
+            JSONArray tailChoices = root.optJSONArray("choices");
+            if (tailChoices == null || tailChoices.length() == 0) {
+                if (root.optJSONObject("usage") != null) reply.finalUsage = true;
+            } else {
+                JSONObject tailChoice = tailChoices.optJSONObject(0);
+                if (tailChoice != null) reply.applyUsage(tailChoice.optJSONObject("usage"));
+            }
+            return;
+        }
         if (root.has("error") && !root.isNull("error")) {
             JSONObject err = root.optJSONObject("error");
             reply.error = err != null ? err.optString("message", data) : root.optString("error", data);
@@ -857,42 +829,16 @@ public class LlmClient {
     /** 请求 /v1/models，返回可用模型 id 列表。 */
     public static ModelsResult fetchModels(String baseUrl, String apiKey) {
         ModelsResult result = new ModelsResult();
-        HttpURLConnection conn = null;
-        InputStream response = null;
+        SdkSession sdk = null;
         try {
             Config cfg = new Config(baseUrl, apiKey, "");
-            String url = cfg.modelsUrl();
-
-            conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(20000);
-            conn.setReadTimeout(30000);
-            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
-            conn.setRequestProperty("Accept", "application/json");
-
-            int code = conn.getResponseCode();
-            response = (code >= 200 && code < 300)
-                    ? conn.getInputStream() : conn.getErrorStream();
-            String text = readAll(response);
-
-            if (code < 200 || code >= 300) {
-                result.error = "HTTP " + code + "（" + url + "）：" + trim(text, 300);
-                return result;
-            }
-
-            JSONObject root = new JSONObject(text);
-            JSONArray data = root.optJSONArray("data");
-            if (data == null) {
-                result.error = "响应里没有 data 数组：" + trim(text, 300);
-                return result;
-            }
-
-            for (int i = 0; i < data.length(); i++) {
-                JSONObject item = data.optJSONObject(i);
-                if (item == null) {
-                    continue;
-                }
-                String id = item.optString("id", "");
+            cfg.timeoutMs = 30000; cfg.totalTimeoutMs = 30000;
+            LlmClient owner = new LlmClient(cfg);
+            Attempt mine = new Attempt(); mine.startedNanos = System.nanoTime();
+            mine.totalDeadlineNanos = mine.startedNanos + TimeUnit.SECONDS.toNanos(30L);
+            sdk = owner.new SdkSession(mine);
+            for (Model model : sdk.client.models().list().data()) {
+                String id = model.id();
                 if (id.length() > 0) {
                     result.models.add(id);
                 }
@@ -901,36 +847,13 @@ public class LlmClient {
                 result.error = "模型列表为空。";
             }
         } catch (Exception e) {
-            result.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+            result.error = e instanceof com.openai.errors.OpenAIServiceException
+                    ? "HTTP " + ((com.openai.errors.OpenAIServiceException) e).statusCode() + ": " + trim(e.getMessage(), 300)
+                    : rootCause(e).getClass().getSimpleName() + ": " + rootCause(e).getMessage();
         } finally {
-            closeQuietly(response);
-            if (conn != null) {
-                conn.disconnect();
-            }
+            if (sdk != null) try { sdk.close(); } catch (RuntimeException closeFailure) { }
         }
         return result;
-    }
-
-    private static String readAll(InputStream in) throws Exception {
-        if (in == null) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-        try {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line).append('\n');
-            }
-            return sb.toString();
-        } finally {
-            closeQuietly(reader);
-        }
-    }
-
-    private static void closeQuietly(Closeable stream) {
-        if (stream == null) return;
-        try { stream.close(); } catch (Exception ignored) { }
     }
 
     static String trim(String s, int max) {

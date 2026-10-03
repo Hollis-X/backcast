@@ -119,6 +119,8 @@ public final class TurnUiRegressionTest {
                                     .contains(field.getName().toString())) {
                                 destination.put(field.getName().toString(), field.toString() + ";");
                             }
+                            if (field.getName().contentEquals("requestDiagnosticsRefresh"))
+                                destination.put("requestDiagnosticsRefresh", field.toString() + ";");
                         }
                     }
                     if (!tools && !timeline) new TreeScanner<Void, Void>() {
@@ -162,7 +164,7 @@ public final class TurnUiRegressionTest {
                 + "CharSequence getContentDescription(){return description;} void setContentDescription(CharSequence d){description=d;}"
                 + "void setVisibility(int v){visibility=v;} int getVisibility(){return visibility;}"
                 + "void setEnabled(boolean v){enabled=v;} int getTop(){return top;} int getBottom(){return top+getHeight();} int getHeight(){return height;}"
-                + "Object getWindowToken(){return this;} Object getLayoutParams(){return new ViewGroup.MarginLayoutParams();}"
+                + "ViewGroup.LayoutParams params=new ViewGroup.MarginLayoutParams();Object getWindowToken(){return this;} ViewGroup.LayoutParams getLayoutParams(){return params;}void setLayoutParams(ViewGroup.LayoutParams v){params=v;}"
                 + "void clearFocus(){focused=false;} void requestFocus(){focused=true;} void setPadding(int a,int b,int c,int d){}"
                 + "void setAlpha(float v){alpha=v;} void setTranslationY(float v){translationY=v;} Animator animate(){if(animator==null)animator=new Animator(this);return animator;}"
                 + "void post(Runnable r){posted.add(r);} void postOnAnimation(Runnable r){posted.add(r);}"
@@ -200,7 +202,7 @@ public final class TurnUiRegressionTest {
                 + "static class ToolBatchProbe{static class Progress{}interface Listener{void onProgress(Progress p);}"
                 + "static JSONObject run(RunHub.FixtureToolkit toolkit,ToolchainInstaller.Cancellation c,Listener l)throws Exception{c.check();return new JSONObject();}}"
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
-                + "static class MarginLayoutParams { int bottomMargin; }"
+                + "static class LayoutParams{static final int WRAP_CONTENT=-2;int height=-2;}static class MarginLayoutParams extends LayoutParams { int bottomMargin; }"
                 + "int getChildCount(){return children.size();} View getChildAt(int i){return children.get(i);}"
                 + "void addView(View v,Object p){children.add(v);v.parent=this;}"
                 + "void addView(View v){addView(v,null);}"
@@ -235,14 +237,15 @@ public final class TurnUiRegressionTest {
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
                 + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51; }"
-                + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50;} }"
+                + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50,sheet_panel=51,sheet_scroll=52;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
-                + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400;}"
+                + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400,heightPixels=1000;}"
                 + "Resources getResources(){return new Resources();} void enableCopy(TextView t){}"
                 + "static final String INPUT_METHOD_SERVICE=\"input\"; TextView prompt=new TextView();View currentFocus=prompt,mainRoot=new View();"
                 + "android.view.inputmethod.InputMethodManager keyboard=new android.view.inputmethod.InputMethodManager();"
-                + "LinearLayout diagnosticsBody=new LinearLayout();TextView sheetRequestOutput;void showSheet(){sheetRequestOutput=null;}"
-                + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return id==R.id.sheet_body?diagnosticsBody:mainRoot;}"
+                + "LinearLayout diagnosticsBody=new LinearLayout(),diagnosticsPanel=new LinearLayout();TextView sheetRequestOutput,sheetRequestLive;long sheetRequestSession=-1;"
+                + "Runnable sheetRefresh=new Runnable(){public void run(){}};void showSheet(){resetSheetDetails();diagnosticsPanel.params.height=ViewGroup.LayoutParams.WRAP_CONTENT;}"
+                + "View getCurrentFocus(){return currentFocus;} Object getSystemService(String name){return keyboard;} View findViewById(int id){return id==R.id.sheet_body?diagnosticsBody:id==R.id.sheet_panel?diagnosticsPanel:mainRoot;}"
                 + "static List<Runnable> posted=new ArrayList<Runnable>(); List<Runnable> uiTasks=Collections.synchronizedList(new ArrayList<Runnable>());"
                 + "Object approvalLock=new Object();List<ApprovalRequest> approvals=new LinkedList<ApprovalRequest>();volatile boolean activityDestroyed;"
                 + "java.util.concurrent.ExecutorService toolkitReader=java.util.concurrent.Executors.newSingleThreadExecutor();"
@@ -268,6 +271,7 @@ public final class TurnUiRegressionTest {
                 + "stream.addView(earlierRow,null);View tail=new View();tail.height=tailHeight;stream.addView(tail,null);stream.layout();return earlierRow;}"
                 + "void layout(){stream.layout();} void preDraw(){scroll.observer.fire();}"
                 + "static class WorkTimeline extends LinearLayout { int binds; TurnTrace.Range last;"
+                + "static class CommandView extends View{}"
                 + "void bind(TurnTrace.Range r,boolean live){binds++;last=r;}"
                 + TIMELINE_METHODS.get("toolState") + TIMELINE_METHODS.get("resultTitle") + TIMELINE_METHODS.get("failed") + " }"
                 + "static class Settings { String systemPrompt(){return \"Fixture instruction\";}"
@@ -275,7 +279,7 @@ public final class TurnUiRegressionTest {
                 + "Settings settings=new Settings(); TurnTrace replayTailTrace,currentTrace; LinearLayout replayTailRows,turnRows,turnBody,turnMarkBody;"
                 + "Flow turnFlow; int turnMarkBox=-1,turnMarkRows=-1,turnMarkRendered=-1,turnMarkBodyChildren,turnRendered;"
                 + "TextView liveAnswer,openThinkLabel,openCommandLabel; StringBuilder liveAnswerRaw; TurnTrace.Step openCommandStep;"
-                + "TurnTrace sheetTrace; TurnTrace.Range sheetRange; void syncSheetTools(){} void hideWorkSheet(){sheetTrace=null;sheetRange=null;}"
+                + "TurnTrace sheetTrace; TurnTrace.Range sheetRange;WorkTimeline sheetTimeline;WorkTimeline.CommandView sheetCommand;void syncSheetTools(){} void hideWorkSheet(){resetSheetDetails();}"
                 + "int renderCost; List<String> bodies=new ArrayList<String>(); List<TurnTrace> traces=new ArrayList<TurnTrace>();"
                 + "List<LinearLayout> boxes=new ArrayList<LinearLayout>();"
                 + "void closeReplayTurn(TurnTrace t,LinearLayout r){if(t!=null){t.sealThink();refreshAllFolds(flowOf(r));}} void addSteerNote(){}"
@@ -298,6 +302,7 @@ public final class TurnUiRegressionTest {
                 + "TurnTrace t=((TurnTrace.Range)r.getTag()).trace;if(t.bodyAt<0)t.bodyAt=t.order.size();SystemClock.advance(renderCost);}"
                 + "void addAgentText(String s){bodies.add(s);TextView t=new TextView();t.setText(s);host().addView(t,null);SystemClock.advance(renderCost);}");
         source.append("Runnable transcriptTouchStart=").append(METHODS.get("transcriptTouchStart")).append(';');
+        source.append(METHODS.get("requestDiagnosticsRefresh"));
         source.append(METHODS.get("Flow"));
         source.append(METHODS.get("ReplayCursor"));
         source.append(METHODS.get("ApprovalRequest"));
@@ -320,7 +325,8 @@ public final class TurnUiRegressionTest {
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
                 "refreshFoldResults", "summaryChevron", "syncWorkChevron", "applyTurnProgress",
-                "bindSummary", "displayElapsed", "seconds", "requestDiagnosticsText", "showRequestDiagnostics")) {
+                "bindSummary", "displayElapsed", "seconds", "requestDiagnosticsText", "showRequestDiagnostics", "fitRequestDiagnosticsSheet",
+                "refreshRequestDiagnostics", "liveRequestDiagnosticsText", "resetSheetDetails")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
             source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this"));
         }
@@ -611,6 +617,8 @@ public final class TurnUiRegressionTest {
         events.add(event);
         call(view, "showRequestDiagnostics");
         Object output = get(view, "sheetRequestOutput");
+        check((Integer) get(get(get(view, "diagnosticsPanel"), "params"), "height") == 720,
+                "Diagnostic sheet left its weighted ScrollView inside an unbounded wrap-content parent");
         check((Integer) get(store, "diagnosticReads") == 0, "Request log read blocked the UI thread");
         drain(get(view, "historyReader"), "tasks");
         check((Integer) get(store, "diagnosticLimit") == 20 && (Long) get(store, "diagnosticSid") == 7L,
@@ -640,7 +648,163 @@ public final class TurnUiRegressionTest {
         for (Class<?> candidate : trace.getClass().getDeclaredClasses()) if (candidate.getSimpleName().equals("Range")) rangeType = candidate;
         Object emptyRange = rangeType.getConstructor(trace.getClass(), int.class).newInstance(trace, 0);
         check((Boolean) call(emptyRange, "hasDetail"), "Empty initial work range cannot open request diagnostics");
+        check(!(Boolean) call(emptyRange, "hasActivity"), "Request diagnostics fabricated a visible tool or thought");
+        check(METHODS.get("showActivitySheet").indexOf("showRequestDiagnostics()")
+                        < METHODS.get("showActivitySheet").indexOf("new WorkTimeline"),
+                "Empty work details still require tapping a label in an otherwise blank timeline");
         pass("requestDiagnosticsKeepRealRequestDurationAndRejectStaleSheetResults");
+    }
+
+    private static LlmClient.RequestActivity requestTiming(long elapsed, long quiet, boolean response, boolean progress) throws Exception {
+        java.lang.reflect.Constructor<LlmClient.RequestActivity> constructor = LlmClient.RequestActivity.class
+                .getDeclaredConstructor(long.class, long.class, boolean.class, boolean.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(elapsed, quiet, response, progress);
+    }
+
+    private static final class ActivityClient extends LlmClient {
+        volatile RequestActivity timing;
+        ActivityClient() { super(new Config("http://localhost", "fixture", "fixture")); }
+        @Override public RequestActivity requestActivity() { return timing; }
+    }
+
+    private static AgentLoop activityLoop(ActivityClient client) throws Exception {
+        AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
+        field(loop, "busy", true); field(loop, "requestClient", client); field(loop, "requestLease", new Object());
+        field(loop, "requestToken", get(loop, "runToken")); field(loop, "requestGeneration", get(loop, "generation"));
+        return loop;
+    }
+
+    private static void liveHeadersDistinguishSilenceAndResumeWithoutResettingTotal() throws Exception {
+        Object view = progressFixture(), trace = get(view, "currentTrace"),
+                header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
+        SystemClock.set(500000L); field(view, "turnStartedAt", 100000L);
+        ActivityClient client = new ActivityClient(); AgentLoop loop = activityLoop(client); field(view, "loop", loop);
+        invoke(trace, "setProgress", "thinking", "", "", 0);
+        client.timing = requestTiming(14000L, 9999L, true, true);
+        invoke(view, "bindSummary", header, trace);
+        check(((String) get(header, "text")).contains("正在思考") && !((String) get(header, "text")).contains("静默"),
+                "Short gaps were incorrectly labelled as stalled responses");
+        invoke(trace, "setProgress", "retry", "", "接口返回 HTTP 503", 2);
+        invoke(trace, "setProgress", "thinking", "", "", 2);
+        client.timing = requestTiming(15500L, 10500L, true, true);
+        invoke(view, "bindSummary", header, trace);
+        String silent = (String) get(header, "text");
+        check(silent.contains("总耗时 400s") && silent.contains("等待模型响应 · 已静默 10s")
+                        && silent.contains("已重试 2 次") && silent.contains("上次失败：接口返回 HTTP 503"),
+                "Quiet request kept a thinking label, reset total time, or lost retries");
+        client.timing = requestTiming(16500L, 100L, true, true);
+        invoke(view, "bindSummary", header, trace);
+        check(((String) get(header, "text")).contains("正在思考") && !((String) get(header, "text")).contains("已静默"),
+                "Real output did not restore the normal live phase");
+        client.timing = null; invoke(trace, "setProgress", "running", "shell", "", 2);
+        invoke(view, "bindSummary", header, trace);
+        check(((String) get(header, "text")).contains("工具执行中") && !((String) get(header, "text")).contains("已静默"),
+                "Completed request timing leaked into tool execution");
+        client.timing = requestTiming(90000L, 80000L, true, true); field(trace, "elapsedMs", 400000L);
+        invoke(view, "bindSummary", header, trace);
+        check(((String) get(header, "text")).equals("工作了 400s · 已重试 2 次"), "Historical rows acquired active timing");
+        pass("liveHeadersUseActualRequestSilenceAndRecoverOnRealOutput");
+    }
+
+    private static void diagnosticTicksReadMemoryOnlyAndStopWithSheetOwnership() throws Exception {
+        Object view = fixture(), store = get(view, "chatStore"), body = get(view, "diagnosticsBody");
+        ActivityClient client = new ActivityClient(); AgentLoop loop = activityLoop(client); field(view, "loop", loop);
+        client.timing = requestTiming(137500L, 130100L, true, true);
+        call(view, "showRequestDiagnostics");
+        Object live = get(view, "sheetRequestLive"), refresh = get(view, "requestDiagnosticsRefresh");
+        String silent = (String) get(live, "text");
+        check(silent.contains("当前单次请求") && silent.contains("等待模型响应") && silent.contains("137500ms")
+                        && silent.contains("130100ms"), "Live diagnostics lost precise active request timing");
+        check((Integer) get(store, "diagnosticReads") == 0 && ((List<?>) get(body, "delayed")).size() == 1,
+                "Showing diagnostics blocked on DB or scheduled multiple refresh loops");
+        drain(get(view, "historyReader"), "tasks"); drain(view, "uiTasks");
+        client.timing = requestTiming(138100L, 30L, true, true);
+        SystemClock.advance(750L); invoke(body, "runDue");
+        check(((String) get(live, "text")).contains("正在接收输出") && ((String) get(live, "text")).contains("30ms")
+                        && (Integer) get(store, "diagnosticReads") == 1 && ((List<?>) get(body, "delayed")).size() == 1,
+                "Memory refresh did not recover on a delta or re-read the DB");
+        client.timing = null; SystemClock.advance(750L); invoke(body, "runDue");
+        check(((String) get(live, "text")).contains("没有正在进行") && (Integer) get(store, "diagnosticReads") == 1,
+                "Completed request was fabricated as still active");
+        call(view, "showRequestDiagnostics");
+        Object replacement = get(view, "sheetRequestLive");
+        check(replacement != live && ((List<?>) get(body, "delayed")).size() == 1,
+                "Replacing a diagnostic sheet retained a second refresh loop");
+        field(view, "sessionId", 8L); SystemClock.advance(750L); invoke(body, "runDue");
+        check(((List<?>) get(body, "delayed")).isEmpty(), "Session change rescheduled another session's diagnostic loop");
+        field(view, "sessionId", 7L); call(view, "showRequestDiagnostics");
+        call(view, "resetSheetDetails");
+        check(((List<?>) get(body, "delayed")).isEmpty() && get(view, "sheetRequestLive") == null
+                        && get(view, "sheetRequestOutput") == null && (Long) get(view, "sheetRequestSession") == -1L,
+                "Sheet reset retained live timing views or scheduled work");
+        ((Runnable) refresh).run(); check(((List<?>) get(body, "delayed")).isEmpty(), "A late callback restarted a closed sheet");
+        call(view, "showRequestDiagnostics"); field(view, "activityDestroyed", true);
+        SystemClock.advance(750L); invoke(body, "runDue");
+        check(((List<?>) get(body, "delayed")).isEmpty(), "Destroyed activity retained live diagnostic polling");
+        String hide = METHODS.get("hideWorkSheet"), destroy = METHODS.get("onDestroy");
+        check(hide.contains("removeCallbacks(requestDiagnosticsRefresh)") && hide.contains("sheetRequestLive = null")
+                        && destroy.contains("resetSheetDetails()") && METHODS.get("releaseLiveViews").contains("resetSheetDetails()")
+                        && METHODS.get("onPause").contains("removeCallbacks(requestDiagnosticsRefresh)")
+                        && METHODS.get("onResume").contains("refreshRequestDiagnostics()"),
+                "Real hide/destroy lifecycle bypassed diagnostic cleanup");
+        pass("diagnosticLiveTicksUseOneMemoryLoopAndRejectClosedOrChangedSheets");
+    }
+
+    private static void liveTimingBridgeRejectsCancelledTurnsAndOldRequestFinally() throws Exception {
+        final java.util.concurrent.CountDownLatch oldEntered = new java.util.concurrent.CountDownLatch(1),
+                newEntered = new java.util.concurrent.CountDownLatch(1), releaseOld = new java.util.concurrent.CountDownLatch(1),
+                releaseNew = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
+        final LlmClient.RequestActivity timing = requestTiming(12000L, 11000L, true, true);
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public RequestActivity requestActivity() { return timing; }
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                int index = calls.incrementAndGet();
+                (index == 1 ? oldEntered : newEntered).countDown();
+                try {
+                    check((index == 1 ? releaseOld : releaseNew).await(5, java.util.concurrent.TimeUnit.SECONDS),
+                            "Bridge fixture request was not released");
+                } catch (InterruptedException error) { throw new AssertionError(error); }
+                Reply reply = new Reply(); reply.content = "done"; return reply;
+            }
+        };
+        final AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
+        field(loop, "busy", true); field(loop, "runToken", 1); field(loop, "generation", 0);
+        final Method send = AgentLoop.class.getDeclaredMethod("sendRequest", List.class, JSONArray.class,
+                LlmClient.Sink.class, int.class, int.class, String.class); send.setAccessible(true);
+        Thread old = new Thread(() -> {
+            try { send.invoke(loop, Arrays.asList(Message.user("old")), null, null, 1, 0, "model"); }
+            catch (Throwable error) { failure.set(error); }
+        }, "bridge-old-request");
+        Thread next = new Thread(() -> {
+            try { send.invoke(loop, Arrays.asList(Message.user("new")), null, null, 2, 0, "model"); }
+            catch (Throwable error) { failure.set(error); }
+        }, "bridge-new-request");
+        try {
+            check(loop.requestActivity() == null, "Idle request bridge exposed a client's unrelated activity");
+            old.start(); check(oldEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "Old request never entered");
+            check(loop.requestActivity() == timing, "Current active request lost its metadata");
+            field(loop, "runToken", 2);
+            check(loop.requestActivity() == null, "Replaced turn exposed old request metadata");
+            next.start(); check(newEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "New request never entered");
+            releaseOld.countDown(); old.join(5000L);
+            check(!old.isAlive() && loop.requestActivity() == timing,
+                    "Old same-client finally cleared the new request ownership");
+            field(loop, "busy", false); check(loop.requestActivity() == null, "Finished turn retained active timing");
+            field(loop, "busy", true); field(loop, "generation", 1);
+            check(loop.requestActivity() == null, "Other session generation retained active timing");
+            field(loop, "generation", 0); loop.cancel();
+            check(loop.requestActivity() == null, "Cancel did not immediately clear visible request timing");
+            releaseNew.countDown(); next.join(5000L);
+            check(!next.isAlive() && get(loop, "requestLease") == null && get(loop, "requestClient") == null,
+                    "Completed request retained its client lease");
+            check(failure.get() == null, "Bridge worker failed: " + failure.get());
+        } finally {
+            releaseOld.countDown(); releaseNew.countDown(); old.join(5000L); next.join(5000L);
+        }
+        pass("liveRequestBridgeRejectsStaleCancelledAndSameClientFinallyRaces");
     }
 
     private static void restoredPendingCallUsesOneRowAndReceivesResult() throws Exception {
@@ -1454,6 +1618,9 @@ public final class TurnUiRegressionTest {
                 toolStagesDistinguishPreviewApprovalAndActualExecution();
                 retryRollbackPreservesTotalClockAndReportedCount();
                 requestDiagnosticsKeepRealDurationsAndRejectStaleSheetReads();
+                liveHeadersDistinguishSilenceAndResumeWithoutResettingTotal();
+                diagnosticTicksReadMemoryOnlyAndStopWithSheetOwnership();
+                liveTimingBridgeRejectsCancelledTurnsAndOldRequestFinally();
                 restoredPendingCallUsesOneRowAndReceivesResult();
                 currentExecutionWinsQueuedPreviewsAndChildrenHaveOwnStage();
                 slicedReplayMatchesFullReplay();

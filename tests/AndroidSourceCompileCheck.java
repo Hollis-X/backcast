@@ -42,7 +42,25 @@ public final class AndroidSourceCompileCheck {
             }
         }
     }
-    private static void dex(Path classes, Path output, Path api, Path d8, Path log, String compiler) throws Exception {
+    private static String sdkClasspath(Path root) throws Exception {
+        String value = System.getenv("BACKCAST_SDK_CLASSPATH");
+        if (value == null || value.isBlank()) {
+            Path exported = root.resolve("app/build/agent-test-classpath.txt");
+            if (!Files.isRegularFile(exported)) throw new AssertionError("Run Gradle :app:writeAgentTestClasspath first, or set BACKCAST_SDK_CLASSPATH");
+            value = Files.readString(exported).trim();
+        }
+        boolean sdk = false;
+        for (String entry : value.split(Pattern.quote(java.io.File.pathSeparator))) {
+            Path artifact = Paths.get(entry);
+            if (!Files.isRegularFile(artifact)) throw new AssertionError("Missing official SDK dependency: " + artifact);
+            try (var archive = new java.util.zip.ZipFile(artifact.toFile())) {
+                sdk |= archive.getEntry("com/openai/client/OpenAIClient.class") != null;
+            }
+        }
+        if (!sdk) throw new AssertionError("Runtime classpath does not include the official OpenAI SDK");
+        return value;
+    }
+    private static void dex(Path classes, Path output, Path api, String sdk, Path d8, Path log, String compiler) throws Exception {
         Files.createDirectories(output);
         List<Path> inputs;
         try (var walk = Files.walk(classes)) {
@@ -54,16 +72,17 @@ public final class AndroidSourceCompileCheck {
                 if (input.readInt() != 0xcafebabe) throw new AssertionError("Invalid class file: " + file);
                 input.readUnsignedShort();
                 int major = input.readUnsignedShort();
-                if (major != 51) throw new AssertionError(compiler + " did not target Java 7: " + file + " major=" + major);
+                if (major != 52) throw new AssertionError(compiler + " did not target Java 8: " + file + " major=" + major);
             }
         }
         for (String mode : List.of("debug", "release")) {
             Path destination = Files.createDirectory(output.resolve(mode));
             List<String> command = javaCommand();
-            command.addAll(List.of("-cp", d8.toString(), "com.android.tools.r8.D8", "--" + mode, "--min-api", "16",
+            command.addAll(List.of("-cp", d8.toString(), "com.android.tools.r8.D8", "--" + mode, "--min-api", "26",
                     "--lib", api.toString(), "--output", destination.toString()));
+            for (String entry : sdk.split(Pattern.quote(java.io.File.pathSeparator))) command.addAll(List.of("--classpath", entry));
             for (Path file : inputs) command.add(file.toString());
-            execute(command, log.resolveSibling(log.getFileName() + "." + mode), compiler + " bytecode to D8/" + mode + "/min-api16");
+            execute(command, log.resolveSibling(log.getFileName() + "." + mode), compiler + " bytecode to D8/" + mode + "/min-api26");
             Path primary = destination.resolve("classes.dex");
             if (!Files.isRegularFile(primary) || Files.size(primary) < 112) throw new AssertionError("D8 produced no valid primary DEX");
             byte[] magic = new byte[8];
@@ -71,15 +90,15 @@ public final class AndroidSourceCompileCheck {
                 if (input.read(magic) != magic.length || !new String(magic, java.nio.charset.StandardCharsets.US_ASCII).startsWith("dex\n"))
                     throw new AssertionError("D8 output has no DEX header");
             }
-            System.out.println("PASS " + compiler + " -> D8/" + mode + "/min-api16: " + inputs.size() + " Java7 classes; " + Files.size(primary)
+            System.out.println("PASS " + compiler + " -> D8/" + mode + "/min-api26: " + inputs.size() + " Java8 classes; " + Files.size(primary)
                     + " bytes. AppCompat type stubs; dependencies and APK packaging are not covered.");
         }
     }
-    private static void ecj(List<JavaFileObject> sources, Path workspace, Path classes, Path api, Path json, Path compiler) throws Exception {
+    private static void ecj(List<JavaFileObject> sources, Path workspace, Path classes, Path api, Path json, String sdk, Path compiler) throws Exception {
         Files.createDirectories(classes);
         List<String> command = javaCommand();
-        command.addAll(List.of("-jar", compiler.toString(), "-proc:none", "-encoding", "UTF-8", "-source", "7",
-                "-target", "7", "-nowarn", "-bootclasspath", api.toString(), "-classpath", json.toString(), "-d", classes.toString()));
+        command.addAll(List.of("-jar", compiler.toString(), "-proc:none", "-encoding", "UTF-8", "-source", "8",
+                "-target", "8", "-nowarn", "-bootclasspath", api.toString(), "-classpath", json + java.io.File.pathSeparator + sdk, "-d", classes.toString()));
         for (JavaFileObject source : sources) {
             if (source instanceof Source) {
                 Path file = workspace.resolve("generated-sources").resolve(source.toUri().getPath().substring(1));
@@ -88,10 +107,11 @@ public final class AndroidSourceCompileCheck {
                 command.add(file.toString());
             } else command.add(Paths.get(source.toUri()).toString());
         }
-        execute(command, workspace.resolve("ecj.log"), "ECJ Java7/API30 compilation");
+        execute(command, workspace.resolve("ecj.log"), "ECJ Java8/API30 compilation");
     }
     public static void main(String[] args) throws Exception {
         Path root = Paths.get(args[0]), api = Paths.get(args[1]), json = Paths.get(args[2]);
+        String sdk = sdkClasspath(root);
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
         DocumentBuilder parser = factory.newDocumentBuilder();
@@ -168,18 +188,18 @@ public final class AndroidSourceCompileCheck {
         try (StandardJavaFileManager files = compiler.getStandardFileManager(null, null, null)) {
             files.getJavaFileObjectsFromPaths(production).forEach(sources::add);
             boolean ok = compiler.getTask(null, files, null, List.of("-proc:none", "-encoding", "UTF-8",
-                    "-source", "7", "-target", "7", "-Xlint:-options", "-classpath",
-                    api + java.io.File.pathSeparator + json, "-d", output.toString()), null, sources).call();
+                    "-source", "8", "-target", "8", "-Xlint:-options", "-classpath",
+                    api + java.io.File.pathSeparator + json + java.io.File.pathSeparator + sdk, "-d", output.toString()), null, sources).call();
             if (!ok) throw new AssertionError("Android source compile failed");
-            System.out.println("PASS Java7/API30: " + production.size() + " production files; XML/resources: " + count
+            System.out.println("PASS Java8/API30 with official SDK JARs: " + production.size() + " production files; XML/resources: " + count
                     + ". AppCompat type stubs, not an APK build.");
             if (args.length >= 4) {
                 Path d8 = Paths.get(args[3]);
-                dex(output, workspace.resolve("javac-dex"), api, d8, workspace.resolve("javac-d8.log"), "javac");
+                dex(output, workspace.resolve("javac-dex"), api, sdk, d8, workspace.resolve("javac-d8.log"), "javac");
                 if (args.length >= 5) {
                     Path ecjClasses = workspace.resolve("ecj-classes");
-                    ecj(sources, workspace, ecjClasses, api, json, Paths.get(args[4]));
-                    dex(ecjClasses, workspace.resolve("ecj-dex"), api, d8, workspace.resolve("ecj-d8.log"), "ECJ");
+                    ecj(sources, workspace, ecjClasses, api, json, sdk, Paths.get(args[4]));
+                    dex(ecjClasses, workspace.resolve("ecj-dex"), api, sdk, d8, workspace.resolve("ecj-d8.log"), "ECJ");
                 }
             }
         } finally {
