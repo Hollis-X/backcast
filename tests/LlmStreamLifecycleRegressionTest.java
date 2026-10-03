@@ -1,9 +1,21 @@
 import com.mkei.backcast.agent.LlmClient;
+import com.mkei.backcast.agent.Message;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Stream ownership and SSE termination through the production parser. */
 public final class LlmStreamLifecycleRegressionTest {
@@ -11,16 +23,19 @@ public final class LlmStreamLifecycleRegressionTest {
         final byte[] body;
         int position, reads;
         boolean closed, failRead, failClose, failAtEof;
+        int timeoutAt = -1;
+        boolean timedOnce;
         Tracked(String body) throws Exception { this.body = body.getBytes("UTF-8"); }
         @Override public int read() throws IOException {
             byte[] one = new byte[1]; return read(one, 0, 1) < 0 ? -1 : one[0] & 255;
         }
         @Override public int read(byte[] buffer, int offset, int size) throws IOException {
             reads++;
+            if (!timedOnce && position == timeoutAt) { timedOnce = true; throw new java.net.SocketTimeoutException("fixture between partial UTF-8 bytes"); }
             if (failRead || (failAtEof && position == body.length)) throw new IOException("fixture read failure");
             if (position == body.length) return -1;
             int count = 0;
-            while (count < size && position < body.length) {
+            while (count < size && position < body.length && (timeoutAt < 0 || position < timeoutAt || timedOnce)) {
                 byte value = body[position++]; buffer[offset + count++] = value;
                 if (value == '\n') break;
             }
@@ -32,6 +47,78 @@ public final class LlmStreamLifecycleRegressionTest {
     }
     private static final String SSE = "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n"
             + "data: [DONE]\n";
+    private static final String TOOL = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"fixture-call\",\"function\":{\"name\":\"fixture_tool\",\"arguments\":\"{\\\"path\\\":\\\"fixture.txt\\\"}\"}}]}}]}\n\n";
+    private static final String FINISH = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+    private static final String USAGE = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":41,\"completion_tokens\":9}}\n\n";
+    private static final String EMPTY_DELTA = "data: {\"choices\":[{\"delta\":{}}]}\n\n";
+    private static final class StreamingServer implements HttpHandler, java.io.Closeable {
+        final HttpServer http;
+        final ExecutorService executor;
+        final CountDownLatch stop = new CountDownLatch(1), started = new CountDownLatch(1);
+        final AtomicInteger requests = new AtomicInteger();
+        final String first, tail;
+        final boolean payloadHeartbeat, silentTail, fragmented;
+        StreamingServer(String first, String tail, boolean payloadHeartbeat) throws IOException {
+            this(first, tail, payloadHeartbeat, false);
+        }
+        StreamingServer(String first, String tail, boolean payloadHeartbeat, boolean silentTail) throws IOException {
+            this(first, tail, payloadHeartbeat, silentTail, false);
+        }
+        StreamingServer(String first, String tail, boolean payloadHeartbeat, boolean silentTail, boolean fragmented) throws IOException {
+            this.first = first; this.tail = tail; this.payloadHeartbeat = payloadHeartbeat; this.silentTail = silentTail; this.fragmented = fragmented;
+            executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+                @Override public Thread newThread(Runnable runnable) {
+                    Thread thread = new Thread(runnable, "fixture-stream-tail"); thread.setDaemon(true); return thread;
+                }
+            });
+            http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            http.setExecutor(executor); http.createContext("/v1/chat/completions", this); http.start();
+        }
+        LlmClient client() {
+            LlmClient.Config config = new LlmClient.Config("http://127.0.0.1:" + http.getAddress().getPort(), "fixture", "fixture");
+            config.timeoutMs = 1000; config.totalTimeoutMs = 4000;
+            return new LlmClient(config);
+        }
+        @Override public void handle(HttpExchange exchange) throws IOException {
+            requests.incrementAndGet();
+            InputStream request = exchange.getRequestBody();
+            try { byte[] bytes = new byte[4096]; while (request.read(bytes) >= 0) { } }
+            finally { request.close(); }
+            if (fragmented) {
+                try { if (stop.await(350, TimeUnit.MILLISECONDS)) return; }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); exchange.close(); return; }
+            }
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            try {
+                java.io.OutputStream output = exchange.getResponseBody(); byte[] initial = first.getBytes("UTF-8");
+                if (fragmented) {
+                    int split = 0; while (split < initial.length && (initial[split] & 128) == 0) split++;
+                    check(split < initial.length, "Fragment fixture has no multi-byte character");
+                    output.write(initial, 0, split + 1); output.flush(); started.countDown();
+                    if (stop.await(300, TimeUnit.MILLISECONDS)) return;
+                    output.write(initial, split + 1, 1); output.flush();
+                    if (stop.await(300, TimeUnit.MILLISECONDS)) return;
+                    output.write(initial, split + 2, initial.length - split - 2); output.flush();
+                } else { output.write(initial); output.flush(); started.countDown(); }
+                if (tail != null) {
+                    if (stop.await(150, TimeUnit.MILLISECONDS)) return;
+                    output.write(tail.getBytes("UTF-8")); output.flush();
+                }
+                if (silentTail) { stop.await(); return; }
+                while (!stop.await(75, TimeUnit.MILLISECONDS)) {
+                    output.write((payloadHeartbeat ? EMPTY_DELTA : ": ping\n\n").getBytes("UTF-8")); output.flush();
+                }
+            } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            catch (IOException expectedClientClose) { /* A completed client intentionally closes this open fixture. */ }
+            finally { exchange.close(); }
+        }
+        @Override public void close() throws IOException {
+            stop.countDown(); http.stop(0); executor.shutdownNow();
+            try { check(executor.awaitTermination(2, TimeUnit.SECONDS), "HTTP fixture worker leaked"); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException(interrupted); }
+        }
+    }
     private static Object attempt(boolean cancelled) throws Exception {
         Class<?> type = Class.forName("com.mkei.backcast.agent.LlmClient$Attempt");
         Constructor<?> ctor = type.getDeclaredConstructor(); ctor.setAccessible(true); Object value = ctor.newInstance();
@@ -84,10 +171,86 @@ public final class LlmStreamLifecycleRegressionTest {
         Tracked input = new Tracked(SSE);
         check(stream(input, true).content.length() == 0 && input.closed && input.reads == 0, "Cancelled parser read or leaked response");
     }
+    private static LlmClient.Reply send(StreamingServer server, LlmClient client, LlmClient.Sink sink) {
+        return client.send(Arrays.asList(Message.system("fixture"), Message.user("fixture")), null, sink);
+    }
+    private static void finishedToolCallDoesNotWaitForDoneOrConnectionClose() throws Exception {
+        for (boolean fragmented : new boolean[]{false, true}) {
+        try (StreamingServer server = new StreamingServer((fragmented ? TOOL.replace("fixture.txt", "fixture你好.txt") : TOOL) + FINISH,
+                null, false, true, fragmented)) {
+            final AtomicInteger previews = new AtomicInteger();
+            long start = System.nanoTime();
+            LlmClient.Reply reply = send(server, server.client(), new LlmClient.Sink() {
+                @Override public void onReasoning(String delta) { }
+                @Override public void onContent(String delta) { }
+                @Override public void onToolCall(int index, String id, String name, String arguments) { previews.incrementAndGet(); }
+            });
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            check(reply.error == null && reply.hasToolCalls(), "Explicit tool finish lost completed call: " + reply.error);
+            check(reply.toolCalls.getJSONObject(0).getJSONObject("function").getString("arguments").contains(fragmented ? "fixture你好.txt" : "fixture.txt"), "Fragmented UTF-8 tool arguments changed");
+            check(elapsed < (fragmented ? 3500 : 2500) && previews.get() == 1 && server.requests.get() == 1, "Completed tool call waited for idle/retried: " + elapsed);
+        }
+        }
+    }
+    private static void delayedUsageTailIsRetainedWithoutDone() throws Exception {
+        try (StreamingServer server = new StreamingServer(TOOL + FINISH, USAGE, true)) {
+            LlmClient.Reply reply = send(server, server.client(), null);
+            check(reply.error == null && reply.hasToolCalls() && reply.promptTokens == 41 && reply.completionTokens == 9,
+                    "Completion discarded its delayed choices[] usage tail: " + reply.error);
+            check(server.requests.get() == 1, "Usage tail caused a second HTTP request");
+        }
+    }
+    private static void emptyPayloadsDoNotKeepUnfinishedGenerationAlive() throws Exception {
+        try (StreamingServer server = new StreamingServer(TOOL, null, true)) {
+            long start = System.nanoTime(); LlmClient.Reply reply = send(server, server.client(), null);
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            check(reply.error != null && !reply.hasToolCalls() && elapsed < 2500,
+                    "Empty deltas renewed meaningful idle or unfinished call escaped: " + elapsed + " " + reply.error);
+        }
+    }
+    private static void partialToolArgumentsNeverEscapeAtDoneFinishOrEof() throws Exception {
+        String partial = TOOL.replace("fixture.txt\\\"}", "fixture");
+        for (String ending : new String[]{"", "data: [DONE]\n", FINISH}) {
+            Tracked input = new Tracked(partial + ending); LlmClient.Reply reply = stream(input, false);
+            check(reply.error != null && !reply.hasToolCalls() && input.closed, "Truncated args accepted with ending " + ending);
+        }
+        Tracked trailing = new Tracked(TOOL.replace("fixture.txt\\\"}", "fixture.txt\\\"}garbage") + "data: [DONE]\n");
+        check(!stream(trailing, false).hasToolCalls(), "JSON arguments with trailing data were accepted");
+    }
+    private static void completeEofCallsRemainCompatibleButTruncatedFinishCannotExecute() throws Exception {
+        check(stream(new Tracked(TOOL), false).hasToolCalls(), "Provider closing complete calls without DONE was rejected");
+        Tracked fragmented = new Tracked(TOOL.replace("fixture.txt", "fixture你好.txt") + "data: [DONE]\n");
+        for (int i = 0; i < fragmented.body.length; i++) if ((fragmented.body[i] & 128) != 0) { fragmented.timeoutAt = i + 1; break; }
+        LlmClient.Reply splitReply = stream(fragmented, false);
+        check(splitReply.error == null && splitReply.hasToolCalls() && splitReply.toolCalls.toString().contains("你好"),
+                "Timeout lost partial SSE/UTF-8 bytes: " + splitReply.error);
+        Tracked failedTail = new Tracked(TOOL + FINISH); failedTail.failAtEof = true;
+        check(stream(failedTail, false).hasToolCalls() && failedTail.closed, "Network failure in usage-only tail discarded a completed call");
+        for (String finish : new String[]{"length", "content_filter"}) {
+            LlmClient.Reply reply = stream(new Tracked(TOOL + FINISH.replace("tool_calls", finish) + "data: [DONE]\n"), false);
+            check(reply.error != null && !reply.hasToolCalls(), "Truncated/filtered generation returned executable calls");
+        }
+    }
+    private static void abortDuringCompletionTailDiscardsAllOutput() throws Exception {
+        try (final StreamingServer server = new StreamingServer(TOOL + FINISH, null, false)) {
+            final LlmClient client = server.client();
+            final java.util.concurrent.atomic.AtomicReference<LlmClient.Reply> result = new java.util.concurrent.atomic.AtomicReference<LlmClient.Reply>();
+            Thread worker = new Thread(new Runnable() { @Override public void run() { result.set(send(server, client, null)); } });
+            worker.setDaemon(true); worker.start();
+            try {
+                check(server.started.await(2, TimeUnit.SECONDS), "Completion fixture never started"); client.abort(); worker.join(2500);
+                check(!worker.isAlive() && result.get() != null && !result.get().hasToolCalls() && result.get().content.length() == 0,
+                        "Cancellation leaked completed tool calls from usage grace window");
+            } finally { client.abort(); worker.join(2500); }
+        }
+    }
     public static void main(String[] args) throws Exception {
         String[] cases = {"sseDoneClosesWithoutDrainingOpenStream", "firstDoneDoesNotWaitForAnotherNetworkRead",
                 "malformedSseStillClosesStream", "networkReadFailureStillClosesStream", "ordinaryBodyReadsToEofAndCloses",
-                "ordinaryBodyFailureClosesAndPreservesCause", "closeFailureDoesNotDiscardCompleteReply", "cancelledAttemptClosesWithoutReading"};
+                "ordinaryBodyFailureClosesAndPreservesCause", "closeFailureDoesNotDiscardCompleteReply", "cancelledAttemptClosesWithoutReading",
+                "finishedToolCallDoesNotWaitForDoneOrConnectionClose", "delayedUsageTailIsRetainedWithoutDone",
+                "emptyPayloadsDoNotKeepUnfinishedGenerationAlive", "partialToolArgumentsNeverEscapeAtDoneFinishOrEof",
+                "completeEofCallsRemainCompatibleButTruncatedFinishCannotExecute", "abortDuringCompletionTailDiscardsAllOutput"};
         for (String name : cases) { LlmStreamLifecycleRegressionTest.class.getDeclaredMethod(name).invoke(null); System.out.println("PASS " + name); }
         System.out.println(cases.length + " stream lifecycle tests passed");
     }

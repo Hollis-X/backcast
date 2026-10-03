@@ -1,4 +1,5 @@
 import com.mkei.backcast.agent.AgentLoop;
+import com.mkei.backcast.agent.ApprovalGate;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.Tool;
@@ -180,6 +181,88 @@ public final class UiSnapshotRegressionTest {
         pass("retryDropsUncommittedBodyAndPreviews");
     }
 
+    private static void partialToolRetriesOnlyTheModelAndPublishesItsStage() throws Exception {
+        final Fixture fixture = new Fixture();
+        final int[] executions = {0};
+        final ArrayList<String> stages = new ArrayList<String>();
+        final ArrayList<Integer> attempts = new ArrayList<Integer>();
+        final AgentLoop.Quiet listener = new AgentLoop.Quiet() {
+            @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+                check(AgentLoop.callingUiSource() == fixture.loop && fixture.loop.callingUiSequence() > 0,
+                        "Progress bypassed the source/token/snapshot boundary");
+                stages.add(phase); attempts.add(Integer.valueOf(attempt));
+                check(!detail.contains("secret-token"), "Retry exposed provider credentials or echoed content");
+            }
+        };
+        fixture.loop.setListener(listener);
+        probe(fixture, new Runnable() { @Override public void run() { executions[0]++; } });
+        fixture.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, LlmClient.Sink sink) throws Exception {
+                if (f.calls == 1) {
+                    sink.onToolCall(0, "tool-id", "probe", "{");
+                    check(executions[0] == 0, "A parameter preview executed the tool");
+                    LlmClient.Reply failed = new LlmClient.Reply();
+                    failed.error = "HTTP 503: secret-token and echoed prompt"; return failed;
+                }
+                if (f.calls == 2) {
+                    check(stages.contains("retry") && attempts.contains(Integer.valueOf(1)), "Retry was hidden");
+                    final ArrayList<String> snapshotStages = new ArrayList<String>();
+                    AgentLoop.Quiet replay = new AgentLoop.Quiet() {
+                        @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+                            snapshotStages.add(phase + ":" + attempt);
+                        }
+                    };
+                    f.loop.replayUiSnapshot(f.snapshot(replay), replay);
+                    check(snapshotStages.contains("model:1"), "Reentry lost the current stage or retry count");
+                    f.loop.setListener(listener);
+                    sink.onToolCall(0, "tool-id", "probe", "{}"); return toolReply();
+                }
+                check(executions[0] == 1, "Model retry duplicated a real tool execution");
+                check(attempts.get(attempts.size() - 1).intValue() == 1, "Normal followup erased the retry count");
+                return answer("done");
+            }
+        };
+        fixture.run();
+        check(executions[0] == 1 && stages.contains("tool_ready"), "Completed tool did not enter the actual execution path");
+        pass("partialToolRetriesOnlyTheModelAndPublishesItsStage");
+    }
+
+    private static void approvalAndReviewPrecedeActualToolStart() throws Exception {
+        for (final boolean permit : new boolean[]{false, true}) {
+            final Fixture fixture = new Fixture();
+            final ArrayList<String> events = new ArrayList<String>();
+            probe(fixture, new Runnable() { @Override public void run() { events.add("execute"); } });
+            fixture.loop.setAccessLevel(ApprovalGate.ACCESS_GUARDED);
+            fixture.loop.setApprovalGate(new ApprovalGate() {
+                @Override public boolean approve(String name, JSONObject args) {
+                    check(!events.contains("start") && !events.contains("execute"), "Tool started before user approval");
+                    events.add("approval"); return permit;
+                }
+            });
+            fixture.loop.setListener(new AgentLoop.Quiet() {
+                @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) { events.add(phase); }
+                @Override public void onToolStart(int gen, String name, String args) { events.add("start"); }
+            });
+            fixture.script = new Script() {
+                @Override public LlmClient.Reply next(Fixture f, LlmClient.Sink sink) throws Exception {
+                    if (f.calls == 1) return toolReply();
+                    if (f.calls == 2) {
+                        check(events.contains("tool_review") && !events.contains("start"), "Security review counted as tool execution");
+                        return answer("DANGEROUS fixture");
+                    }
+                    return answer("done");
+                }
+            };
+            fixture.run();
+            check(events.indexOf("tool_ready") < events.indexOf("tool_review")
+                    && events.indexOf("tool_review") < events.indexOf("tool_approval")
+                    && events.indexOf("tool_approval") < events.indexOf("approval"), "Approval stages were out of order: " + events);
+            check(permit ? events.indexOf("approval") < events.indexOf("start") && events.indexOf("start") < events.indexOf("execute")
+                    : !events.contains("start") && !events.contains("execute"), "Denied or unapproved tool executed: " + events);
+        }
+        pass("approvalAndReviewPrecedeActualToolStart");
+    }
+
     private static void activeToolStartSurvivesButStoredPreviewDoesNot() throws Exception {
         final Fixture fixture = new Fixture();
         final Capture capture = new Capture(fixture.loop);
@@ -315,6 +398,8 @@ public final class UiSnapshotRegressionTest {
         persistedPayloadIsNotReplayed();
         previewReplacementKeepsItsOriginalPosition();
         retryDropsUncommittedBodyAndPreviews();
+        partialToolRetriesOnlyTheModelAndPublishesItsStage();
+        approvalAndReviewPrecedeActualToolStart();
         activeToolStartSurvivesButStoredPreviewDoesNot();
         toolCommitAndCompletionEventAreAtomic();
         listenerIdentityAndReadFailureArePreserved();

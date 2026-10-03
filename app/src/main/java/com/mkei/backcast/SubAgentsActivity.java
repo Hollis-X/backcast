@@ -212,7 +212,8 @@ public final class SubAgentsActivity extends AppCompatActivity {
         List<SubAgentManager.Record> ordered = AgentPanelState.ordered(records);
         for (SubAgentManager.Record row : ordered) {
             if (AgentPanelState.active(row.status)) active++;
-            signature.append(row.id).append(row.status).append(row.phase).append(row.progress).append(row.activeTool).append(row.task);
+            signature.append(row.id).append(row.status).append(row.phase).append(row.progress).append(row.activeTool).append(row.task)
+                    .append(row.retryAttempt).append(row.retryReason);
         }
         summary.setText(getString(R.string.agent_panel_count, ordered.size(), active));
         if (rendered.equals(signature.toString())) return;
@@ -226,6 +227,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
             Icons.right(name, Icons.CHEVRON_RIGHT, 0xFF8E8E93, dp(16)); item.addView(name);
             item.addView(text(status(row.status, row.phase) + " · " + phase(row.phase)
                     + (row.activeTool.length() == 0 ? "" : " · " + row.activeTool), 12, statusColor(row.status), false));
+            if (row.retryAttempt > 0) item.addView(text(getString(R.string.agent_panel_retry_count, row.retryAttempt), 12, 0xFF8E8E93, false));
             TextView task = text(AgentPanelState.shortText(row.task, 220), 13, 0xFF66666C, false);
             task.setMaxLines(3); task.setEllipsize(TextUtils.TruncateAt.END); item.addView(task);
             item.setContentDescription(row.name + ", " + status(row.status, row.phase));
@@ -262,6 +264,9 @@ public final class SubAgentsActivity extends AppCompatActivity {
         try {
             if (state.tab == AgentPanelState.TASK) {
                 pages.setVisibility(View.GONE);
+                if (row.retryAttempt > 0) section(R.string.agent_panel_retries, getString(R.string.agent_panel_retry_count, row.retryAttempt)
+                        + (row.retryReason.length() == 0 ? "" : "\n" + getString(R.string.agent_panel_retry_reason,
+                                AgentPanelState.shortText(redact(row.retryReason), 600))));
                 if (row.progress.length() > 0) section(R.string.agent_panel_progress, AgentPanelState.shortText(redact(row.progress), 600));
                 section(R.string.agent_panel_assigned, redact(row.task));
                 section(R.string.agent_panel_parent, SubAgentManager.ROOT.equals(row.parentId) ? getString(R.string.agent_panel_main) : row.parentId);
@@ -361,12 +366,18 @@ public final class SubAgentsActivity extends AppCompatActivity {
         return getString(R.string.sub_agents_closed);
     }
     private String phase(String phase) {
+        if ("generating_tool".equals(phase)) return getString(R.string.sub_agents_phase_generating);
+        if ("tool_ready".equals(phase)) return getString(R.string.sub_agents_phase_tool_ready);
+        if ("tool_review".equals(phase)) return getString(R.string.sub_agents_phase_tool_review);
+        if ("tool_approval".equals(phase)) return getString(R.string.sub_agents_phase_tool_approval);
+        if ("children".equals(phase)) return getString(R.string.sub_agents_phase_children);
+        if ("waiting".equals(phase)) return getString(R.string.sub_agents_phase_waiting);
         if ("tool".equals(phase)) return getString(R.string.sub_agents_phase_tool);
         if ("thinking".equals(phase)) return getString(R.string.sub_agents_phase_thinking);
         if ("responding".equals(phase)) return getString(R.string.sub_agents_phase_responding);
         if ("reviewing".equals(phase)) return getString(R.string.sub_agents_phase_reviewing);
         if ("compacting".equals(phase)) return getString(R.string.sub_agents_phase_compacting);
-        if ("retrying".equals(phase)) return getString(R.string.sub_agents_phase_retrying);
+        if ("retrying".equals(phase) || "retry".equals(phase)) return getString(R.string.sub_agents_phase_retrying);
         if ("completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
         if ("starting".equals(phase)) return getString(R.string.agent_panel_phase_starting);
         if ("model".equals(phase)) return getString(R.string.sub_agents_phase_model);

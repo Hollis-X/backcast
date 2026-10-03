@@ -39,6 +39,8 @@ public final class SubAgentManager {
     public static final class Record {
         public String id, parentId, name, task, status, result = "", error = "", inFlight = "";
         public String phase = QUEUED, activeTool = "", progress = "";
+        public int retryAttempt;
+        public String retryReason = "";
         public String inFlightRequest = "", inFlightReference = "";
         public long sessionId, revision, tokensUsed, collectedRevision, acknowledgedRevision;
         public long lastActivityAt, progressRevision, inboxRevision;
@@ -61,6 +63,7 @@ public final class SubAgentManager {
                     .put("acknowledgedChildren", acknowledgedChildren).put("deliveredInbox", deliveredInbox)
                     .put("managerCancelled", managerCancelled).put("phase", phase).put("activeTool", activeTool)
                     .put("progress", progress).put("lastActivityAt", lastActivityAt).put("progressRevision", progressRevision)
+                    .put("retryAttempt", retryAttempt).put("retryReason", retryReason)
                     .put("inboxRevision", inboxRevision)
                     .put("inFlightRequest", inFlightRequest).put("inFlightReference", inFlightReference);
         }
@@ -82,6 +85,8 @@ public final class SubAgentManager {
             task.managerCancelled = json.optBoolean("managerCancelled", false);
             task.phase = json.optString("phase", task.status); task.activeTool = json.optString("activeTool", "");
             task.progress = json.optString("progress", ""); task.lastActivityAt = json.optLong("lastActivityAt", 0L);
+            task.retryAttempt = Math.max(0, json.optInt("retryAttempt", 0));
+            task.retryReason = clipped(json.optString("retryReason", ""), 600);
             task.progressRevision = json.optLong("progressRevision", 0L);
             task.inboxRevision = json.optLong("inboxRevision", 0L);
             task.inFlightRequest = json.optString("inFlightRequest", "");
@@ -687,11 +692,19 @@ public final class SubAgentManager {
                     }
                     @Override public void onReasoning(int gen, String delta) { reportProgress(slot, "thinking", "", null); }
                     @Override public void onAssistantText(int gen, String delta) { reportProgress(slot, "responding", "", delta); }
-                    @Override public void onToolStart(int gen, String name, String args) { reportProgress(slot, "tool", name, null); }
+                    @Override public void onToolPreview(int gen, int index, String id, String name, String args) {
+                        reportProgress(slot, "generating_tool", name == null ? "" : name, null);
+                    }
+                    @Override public void onToolStart(int gen, String name, String args) {
+                        reportProgress(slot, "wait_agent".equals(name) || "wait_agents".equals(name) ? "waiting" : "tool", name, null);
+                    }
                     @Override public void onToolEnd(int gen, String name, String result) { reportProgress(slot, "reviewing", "", null); }
                     @Override public void onCompactStart(int gen) { reportProgress(slot, "compacting", "", null); }
                     @Override public void onCompacted(int gen, boolean followup) { reportProgress(slot, "model", "", null); }
                     @Override public void onRetry(int gen) { reportProgress(slot, "retrying", "", null); }
+                    @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+                        reportStage(slot, phase, name, detail, attempt);
+                    }
                 }, this);
                 if (loop == null) throw new IllegalStateException("Child factory returned no loop");
                 loop.bindSession(slot.task.sessionId);
@@ -727,6 +740,7 @@ public final class SubAgentManager {
                     request = mail.getString("text");
                     slot.task.task = request;
                     slot.task.progress = "";
+                    slot.task.retryAttempt = 0; slot.task.retryReason = "";
                     slot.task.activeTool = "";
                     slot.task.lastActivityAt = System.currentTimeMillis();
                     slot.task.progressRevision++;
@@ -816,6 +830,28 @@ public final class SubAgentManager {
         if (save) persistQuietly(slot.task.id);
     }
 
+    private void reportStage(Slot slot, String phase, String tool, String detail, int attempt) {
+        if (phase == null || phase.length() == 0) return;
+        String name = tool == null ? "" : tool;
+        boolean retry = "retry".equals(phase) || "retrying".equals(phase);
+        synchronized (lock) {
+            if (slot.stop || CLOSED.equals(slot.task.status)) return;
+            if (retry) {
+                int count = Math.max(0, attempt);
+                String reason = clipped(detail == null ? "" : detail, 600);
+                if (slot.task.retryAttempt != count || !slot.task.retryReason.equals(reason)) {
+                    slot.task.retryAttempt = count; slot.task.retryReason = reason;
+                    slot.task.revision++; slot.task.progressRevision++;
+                }
+            }
+            updateProgressLocked(slot, retry ? "retrying" : phase, name, null);
+            slot.lastProgressPersist = System.currentTimeMillis();
+        }
+        // Tool detail is often a complete script/JSON payload; it belongs to
+        // history, never to the compact progress or retry explanation.
+        persistQuietly(slot.task.id);
+    }
+
     private void checkpoint(Slot slot, AgentLoop loop) {
         try {
             JSONArray history = checkpoints(loop.historySnapshot());
@@ -863,6 +899,7 @@ public final class SubAgentManager {
         return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", clipped(task.name, 256))
                 .put("task", clipped(task.task, 2000)).put("status", task.status)
                 .put("phase", task.phase).put("activeTool", task.activeTool).put("progress", task.progress)
+                .put("retryAttempt", task.retryAttempt).put("retryReason", task.retryReason)
                 .put("lastActivityAt", task.lastActivityAt).put("progressRevision", task.progressRevision)
                 .put("result", slot.executing || QUEUED.equals(task.status) ? "" : clipped(task.result, 8000))
                 .put("resultTruncated", !slot.executing && !QUEUED.equals(task.status) && task.result.length() > 8000)

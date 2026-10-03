@@ -2,8 +2,10 @@ package com.mkei.backcast.agent;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -22,6 +24,8 @@ import java.util.List;
 public class LlmClient {
     /** 单次 read 的切片。空闲是否结束看有没有思考、正文或工具，不看保活行。 */
     private static final int READ_SLICE_MS = 10000;
+    /** Finished generation may have a final usage frame, but it must not wait for another idle budget. */
+    private static final long FINISHED_USAGE_GRACE_MS = 1000L;
 
     public static class Config {
         public String baseUrl;
@@ -108,6 +112,9 @@ public class LlmClient {
         public long completionTokens;
         private StringBuilder contentBuffer;
         private StringBuilder reasoningBuffer;
+        private String finishReason;
+        private long streamProgress;
+        private boolean finalUsage;
 
         /**
          * 记下服务端报的用量。
@@ -385,7 +392,7 @@ public class LlmClient {
         if (idleMs < 1000L) {
             idleMs = 1000L;
         }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
+        StreamLines reader = new StreamLines(in);
         StringBuilder raw = new StringBuilder();
         List<CallAcc> calls = new ArrayList<CallAcc>();
         long[] clock = new long[] { System.currentTimeMillis() + idleMs, idleMs };
@@ -402,6 +409,7 @@ public class LlmClient {
             }
             if (first.text.charAt(0) == '{') {
                 StringBuilder json = new StringBuilder(first.text);
+                clock[0] = System.currentTimeMillis() + clock[1];
                 while (!mine.dead) {
                     Pulled rest = pullLine(reader, raw, mine, clock);
                     if (rest.idle) {
@@ -413,6 +421,7 @@ public class LlmClient {
                         break;
                     }
                     json.append('\n').append(rest.text);
+                    clock[0] = System.currentTimeMillis() + clock[1];
                 }
                 reply.raw = raw.toString();
                 if (!mine.dead && reply.error == null) {
@@ -421,10 +430,21 @@ public class LlmClient {
                 }
                 return;
             }
-            boolean more = consumeSse(first.text, reply, calls, sink);
+            boolean more = consumeSse(first.text, reply, calls, sink, clock);
+            long finishedDeadline = finishDeadline(reply, 0L);
             while (more && reply.error == null && !mine.dead) {
-                Pulled next = pullLine(reader, raw, mine, clock);
+                if (finishedDeadline > 0 && reply.finalUsage) break;
+                if (finishedDeadline > 0 && System.currentTimeMillis() >= finishedDeadline) break;
+                Pulled next;
+                try {
+                    next = pullLine(reader, raw, mine, clock, finishedDeadline);
+                } catch (java.io.IOException failure) {
+                    // Generation is already complete; a missing usage tail cannot discard valid output.
+                    if (finishedDeadline > 0) break;
+                    throw failure;
+                }
                 if (next.idle) {
+                    if (finishedDeadline > 0) break;
                     reply.raw = raw.toString();
                     noteIdle(reply, calls);
                     return;
@@ -432,18 +452,69 @@ public class LlmClient {
                 if (next.text == null) {
                     break;
                 }
-                if (!consumeSse(next.text, reply, calls, sink)) {
+                if (!consumeSse(next.text, reply, calls, sink, clock)) {
                     break;
                 }
+                finishedDeadline = finishDeadline(reply, finishedDeadline);
             }
             reply.raw = raw.toString();
             if (reply.error == null && !mine.dead) {
                 reply.toolCalls = callsToJson(calls);
+                validateToolCalls(reply);
             }
         } finally {
             reply.finishText();
             closeQuietly(reader);
         }
+    }
+
+    private static long finishDeadline(Reply reply, long previous) {
+        if (previous > 0 || reply.finishReason == null) return previous;
+        return System.currentTimeMillis() + FINISHED_USAGE_GRACE_MS;
+    }
+
+    /** Keep incomplete bytes across socket timeouts; decode UTF-8 only after framing a whole line. */
+    private static final class StreamLines implements Closeable {
+        private final InputStream input;
+        private final byte[] buffer = new byte[8192];
+        private final ByteArrayOutputStream line = new ByteArrayOutputStream();
+        private int position, length;
+
+        StreamLines(InputStream input) { this.input = input; }
+
+        String readLine(Attempt mine, long deadline) throws Exception {
+            while (!mine.dead) {
+                while (position < length) {
+                    int value = buffer[position++] & 255;
+                    if (value == '\n') return takeLine();
+                    line.write(value);
+                    if (mine.maxChars > 0 && line.size() >= mine.maxChars)
+                        throw new java.io.IOException("Response size limit exceeded");
+                }
+                int wanted = buffer.length;
+                if (deadline > 0) {
+                    if (System.currentTimeMillis() >= deadline) return null;
+                    // A usage tail is optional. Poll bytes instead of a blocking read after finish_reason.
+                    int available = input.available();
+                    if (available <= 0) {
+                        Thread.sleep(Math.min(25L, Math.max(1L, deadline - System.currentTimeMillis())));
+                        continue;
+                    }
+                    wanted = Math.min(wanted, available);
+                }
+                int count = input.read(buffer, 0, wanted);
+                if (count < 0) return line.size() == 0 ? null : takeLine();
+                position = 0; length = count;
+            }
+            return null;
+        }
+
+        private String takeLine() throws Exception {
+            String value = line.toString("UTF-8"); line.reset();
+            return value.endsWith("\r") ? value.substring(0, value.length() - 1) : value;
+        }
+
+        @Override public void close() throws java.io.IOException { input.close(); }
     }
 
     /** 读到的一行。保活和空行不算，不会把空闲时钟续上。 */
@@ -458,23 +529,32 @@ public class LlmClient {
      * 注释行（: ping）和空行是保活，不重置空闲预算。预算耗尽返回 idle，
      * 调用方结束这一轮，而不是一直占着停止按钮。
      */
-    private static Pulled pullLine(BufferedReader reader, StringBuilder raw, Attempt mine,
+    private static Pulled pullLine(StreamLines reader, StringBuilder raw, Attempt mine,
             long[] clock) throws Exception {
+        return pullLine(reader, raw, mine, clock, 0L);
+    }
+
+    private static Pulled pullLine(StreamLines reader, StringBuilder raw, Attempt mine,
+            long[] clock, long finishedDeadline) throws Exception {
         Pulled out = new Pulled();
         while (!mine.dead) {
+            if (finishedDeadline > 0 && System.currentTimeMillis() >= finishedDeadline) {
+                out.idle = true;
+                return out;
+            }
             if (mine.deadline > 0 && System.currentTimeMillis() >= mine.deadline) {
                 throw new java.net.SocketTimeoutException("Request deadline exceeded");
             }
             if (mine.maxChars > 0 && raw.length() >= mine.maxChars) {
                 throw new java.io.IOException("Response size limit exceeded");
             }
-            if (System.currentTimeMillis() >= clock[0]) {
+            if (finishedDeadline == 0 && System.currentTimeMillis() >= clock[0]) {
                 out.idle = true;
                 return out;
             }
             String line;
             try {
-                line = reader.readLine();
+                line = reader.readLine(mine, finishedDeadline);
             } catch (java.net.SocketTimeoutException timed) {
                 continue;
             }
@@ -486,7 +566,6 @@ public class LlmClient {
             if (trimmed.length() == 0 || trimmed.charAt(0) == ':' || "data:".equals(trimmed)) {
                 continue;
             }
-            clock[0] = System.currentTimeMillis() + clock[1];
             out.text = trimmed;
             return out;
         }
@@ -505,7 +584,8 @@ public class LlmClient {
     }
 
     /** @return false 表示流结束。 */
-    private static boolean consumeSse(String line, Reply reply, List<CallAcc> calls, Sink sink)
+    private static boolean consumeSse(String line, Reply reply, List<CallAcc> calls, Sink sink,
+            long[] clock)
             throws Exception {
         if (!line.startsWith("data:")) {
             return true;
@@ -517,7 +597,9 @@ public class LlmClient {
         if (data.length() == 0) {
             return true;
         }
+        long progress = reply.streamProgress;
         absorbEvent(data, reply, calls, sink);
+        if (reply.streamProgress != progress) clock[0] = System.currentTimeMillis() + clock[1];
         return reply.error == null;
     }
 
@@ -533,6 +615,7 @@ public class LlmClient {
         reply.applyUsage(root.optJSONObject("usage"));
         JSONArray choices = root.optJSONArray("choices");
         if (choices == null || choices.length() == 0) {
+            if (reply.finishReason != null && root.optJSONObject("usage") != null) reply.finalUsage = true;
             return;
         }
         JSONObject choice = choices.optJSONObject(0);
@@ -540,6 +623,11 @@ public class LlmClient {
             return;
         }
         reply.applyUsage(choice.optJSONObject("usage"));
+        boolean alreadyFinished = reply.finishReason != null;
+        String finish = choice.optString("finish_reason", "");
+        if (finish.length() > 0 && !"null".equals(finish)) reply.finishReason = finish;
+        // Once generation is finished, later frames may update usage only.
+        if (alreadyFinished) return;
         JSONObject delta = choice.optJSONObject("delta");
         if (delta != null) {
             absorbDelta(delta, reply, calls, sink);
@@ -560,6 +648,7 @@ public class LlmClient {
             if (reply.reasoningBuffer == null) reply.reasoningBuffer = new StringBuilder();
             int from = reply.reasoningBuffer.length();
             reply.reasoningBuffer.append(reasoning);
+            reply.streamProgress++;
             reply.recordText("think", from, reply.reasoningBuffer.length());
             if (sink != null) {
                 sink.onReasoning(reasoning);
@@ -570,6 +659,7 @@ public class LlmClient {
             if (reply.contentBuffer == null) reply.contentBuffer = new StringBuilder();
             int from = reply.contentBuffer.length();
             reply.contentBuffer.append(content);
+            reply.streamProgress++;
             reply.recordText("body", from, reply.contentBuffer.length());
             if (sink != null) {
                 sink.onContent(content);
@@ -594,20 +684,25 @@ public class LlmClient {
             CallAcc acc = calls.get(index);
             String id = tc.optString("id", "");
             if (id.length() > 0) {
+                if (!id.equals(acc.id)) reply.streamProgress++;
                 acc.id = id;
             }
             JSONObject fn = tc.optJSONObject("function");
             if (fn != null) {
                 String name = fn.optString("name", "");
                 if (name.length() > 0) {
+                    String previousName = acc.name;
                     if (acc.name.length() == 0 || name.startsWith(acc.name)) {
                         acc.name = name;
                     } else if (!acc.name.endsWith(name)) {
                         acc.name = acc.name + name;
                     }
+                    if (!previousName.equals(acc.name)) reply.streamProgress++;
                 }
                 if (fn.has("arguments") && !fn.isNull("arguments")) {
-                    acc.args.append(fn.optString("arguments", ""));
+                    String arguments = fn.optString("arguments", "");
+                    acc.args.append(arguments);
+                    if (arguments.length() > 0) reply.streamProgress++;
                 }
             }
             if (acc.displayPart == null && (acc.name.length() > 0 || acc.args.length() > 0))
@@ -666,6 +761,29 @@ public class LlmClient {
         return arr.length() == 0 ? null : arr;
     }
 
+    /** EOF compatibility accepts complete calls only; malformed/truncated arguments never reach tools. */
+    private static void validateToolCalls(Reply reply) {
+        if (!reply.hasToolCalls()) return;
+        try {
+            if ("length".equals(reply.finishReason) || "content_filter".equals(reply.finishReason))
+                throw new IllegalArgumentException("generation did not complete");
+            for (int i = 0; i < reply.toolCalls.length(); i++) {
+                JSONObject call = reply.toolCalls.getJSONObject(i);
+                JSONObject function = call.getJSONObject("function");
+                if (function.optString("name", "").trim().length() == 0)
+                    throw new IllegalArgumentException("missing tool name");
+                String arguments = function.optString("arguments", "{}");
+                JSONTokener tokenizer = new JSONTokener(arguments);
+                Object value = tokenizer.nextValue();
+                if (!(value instanceof JSONObject) || tokenizer.nextClean() != 0)
+                    throw new IllegalArgumentException("incomplete tool arguments");
+            }
+        } catch (Exception invalid) {
+            reply.toolCalls = null;
+            reply.error = "模型工具调用参数不完整或无效，未执行。";
+        }
+    }
+
     private static String textField(JSONObject o, String key) {
         if (o == null || !o.has(key) || o.isNull(key)) {
             return null;
@@ -700,6 +818,9 @@ public class LlmClient {
         JSONArray calls = msg.optJSONArray("tool_calls");
         if (calls != null && calls.length() > 0) {
             reply.toolCalls = calls;
+            String finish = choices.getJSONObject(0).optString("finish_reason", "");
+            if (finish.length() > 0 && !"null".equals(finish)) reply.finishReason = finish;
+            validateToolCalls(reply);
         }
     }
 

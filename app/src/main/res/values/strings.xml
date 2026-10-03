@@ -282,4 +282,13 @@
     <string name="action_save">保存</string>
     <string name="toast_saved">已保存</string>
     <string name="toast_need_config">请先配置接口地址、密钥和模型</string>
+    <string name="sub_agents_phase_generating">生成工具参数</string>
+    <string name="sub_agents_phase_tool_ready">参数已完成，准备执行</string>
+    <string name="sub_agents_phase_tool_review">AI 审查工具调用</string>
+    <string name="sub_agents_phase_tool_approval">等待用户确认</string>
+    <string name="sub_agents_phase_children">等待子任务</string>
+    <string name="sub_agents_phase_waiting">等待子任务进度</string>
+    <string name="agent_panel_retries">请求重试</string>
+    <string name="agent_panel_retry_count">本次重试 %1$d 次</string>
+    <string name="agent_panel_retry_reason">最近失败原因：%1$s</string>
 </resources>

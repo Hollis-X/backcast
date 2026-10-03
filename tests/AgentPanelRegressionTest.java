@@ -97,6 +97,30 @@ public final class AgentPanelRegressionTest {
         check(visible(panel).contains("ONLY_RESULT_TAB") && visible(panel).contains("ONLY_ERROR_TAB") && !visible(panel).contains("ONLY_ACTIVITY_TAB"), "Result view loses evidence or mixes activity");
         pass("taskActivityResultAndErrorHaveDistinctViewsWithActualProgressAndTime");
     }
+    private static void preciseStagesDoNotClaimToolsAlreadyExecuted() throws Exception {
+        Object panel = panel();
+        String[][] stages = {{"generating_tool", "生成工具参数"}, {"tool_ready", "参数已完成"}, {"tool_review", "AI 审查"},
+                {"tool_approval", "等待用户确认"}, {"waiting", "等待子任务进度"}, {"children", "等待子任务"}};
+        for (String[] stage : stages) {
+            SubAgentManager.Record row = record("stages", SubAgentManager.RUNNING, stage[0]); row.activeTool = "shell";
+            set(panel, "selected", row); set(panel, "rendered", ""); invoke(panel, "renderDetail", false);
+            String shown = visible(panel);
+            check(shown.contains(stage[1]) && !shown.contains("执行工具"), "Preview/review/approval/wait stage falsely claims execution: " + shown);
+        }
+        pass("toolGenerationReviewApprovalAndChildWaitingHaveDistinctVisibleStages");
+    }
+    private static void retryCountAndReasonAreVisibleAndRefreshIndependentlyOfPhase() throws Exception {
+        Object panel = panel(); SubAgentManager.Record row = record("retries", SubAgentManager.RUNNING, "retrying");
+        row.retryAttempt = 2; row.retryReason = "接口返回 HTTP 503";
+        set(panel, "selected", row); invoke(panel, "renderDetail", false);
+        check(visible(panel).contains("本次重试 2 次") && visible(panel).contains("最近失败原因：接口返回 HTTP 503"), "Retry detail hides count or reason");
+        invoke(panel, "renderList", Arrays.asList(row));
+        check(visible(panel).contains("本次重试 2 次") && !visible(panel).contains("HTTP 503"), "Compact list lost retry count or exposed full detail");
+        row.retryAttempt = 3; row.retryReason = "等待模型响应超时";
+        invoke(panel, "renderList", Arrays.asList(row));
+        check(visible(panel).contains("本次重试 3 次"), "Retry change did not refresh while phase stayed the same");
+        pass("retryDetailShowsActualCountAndReasonAndCompactRowsRefreshTheirCount");
+    }
     private static void activityPagesAreStableWhileNewHistoryArrives() throws Exception {
         Object panel = panel(); SubAgentManager.Record row = record("a", SubAgentManager.RUNNING, "reviewing");
         row.history.put(Message.system("SECRET_SYSTEM_SENTINEL").toCheckpointJson());
@@ -231,6 +255,8 @@ public final class AgentPanelRegressionTest {
                 panelType = loader.loadClass("PanelHarness");
                 listShowsCompactTaskStatusWithoutResultsOrJson();
                 taskActivityAndResultRemainSeparate();
+                preciseStagesDoNotClaimToolsAlreadyExecuted();
+                retryCountAndReasonAreVisibleAndRefreshIndependentlyOfPhase();
                 activityPagesAreStableWhileNewHistoryArrives();
                 resultPagingExposesTheFullResultWithoutOneHugeView();
                 refreshKeepsScrollAndClosedTasksDisableCommands();

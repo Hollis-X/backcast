@@ -172,7 +172,12 @@ public final class WorkTimeline extends LinearLayout {
     }
 
     public static String toolState(TurnTrace.Step step, boolean live) {
-        return step.done ? (failed(step) ? "失败" : "完成") : live ? "调用中" : "未完成";
+        return step.done ? (failed(step) ? "失败" : "完成")
+                : live ? TurnTrace.stepPhaseCaption(step) : "未完成";
+    }
+
+    public static String resultTitle(TurnTrace.Step step) {
+        return step.done ? (failed(step) ? "失败" : "返回结果") : toolState(step, true);
     }
 
     public static boolean failed(TurnTrace.Step step) {
@@ -202,6 +207,7 @@ public final class WorkTimeline extends LinearLayout {
         private final List<String> chunks = new ArrayList<String>();
         private final BaseAdapter adapter;
         private String renderedArgs, renderedResult;
+        private String renderedPhase;
         private boolean renderedDone, renderedStarted;
 
         public CommandView(final Context context, TurnTrace.Step step) {
@@ -245,17 +251,19 @@ public final class WorkTimeline extends LinearLayout {
             heading.setText(toolTitle(step));
             state.setText(toolState(step, true));
             if (renderedArgs == step.args && renderedResult == step.result
-                    && renderedDone == step.done && renderedStarted == step.started) return;
+                    && renderedDone == step.done && renderedStarted == step.started
+                    && step.phase.equals(renderedPhase)) return;
             renderedArgs = step.args; renderedResult = step.result;
+            renderedPhase = step.phase;
             renderedDone = step.done; renderedStarted = step.started;
             chunks.clear();
             String arguments = step.args == null ? "" : step.args;
-            if (step.started || step.done) {
+            if (!"preview".equals(step.phase) || step.started || step.done) {
                 try { arguments = new JSONObject(arguments).toString(2); } catch (Exception ignored) { }
             }
             chunks.add("调用参数");
             split(chunks, arguments);
-            chunks.add(step.done ? (failed(step) ? "失败" : "返回结果") : "调用中");
+            chunks.add(resultTitle(step));
             String result = step.result == null ? "" : step.result;
             split(chunks, result.length() == 0 ? "尚无返回结果" : result);
             adapter.notifyDataSetChanged();

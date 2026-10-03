@@ -13,6 +13,8 @@ public class TurnTrace {
         public String result = "";
         public boolean done;
         public boolean started;
+        /** Streaming arguments are visible before a tool is dispatched. */
+        public String phase = "preview";
     }
 
     public final StringBuilder reasoning = new StringBuilder();
@@ -30,6 +32,10 @@ public class TurnTrace {
     public long elapsedMs;
     public long thinkMs;
     public boolean showReasoning = true;
+    /** These describe the whole turn and survive a failed request's preview rollback. */
+    public String phase = "model";
+    public int retryCount;
+    public String retryReason = "";
     /**
      * 正文开始时 order 的条数。
      * 这个下标之前的思考和命令留在工作时间下面，之后新来的才挂到正文下面。
@@ -75,12 +81,21 @@ public class TurnTrace {
         public String caption() {
             String text = trace.activityCaption(start, end);
             boolean pending = false;
+            String stage = "进行中";
+            int priority = 0;
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
                 if (piece.think != null ? trace.showReasoning && !piece.sealed
                         : piece.step != null && !piece.step.done) pending = true;
+                if (piece.step != null && !piece.step.done) {
+                    Step step = piece.step;
+                    int next = step.started || "children".equals(step.phase) ? 4
+                            : "tool_approval".equals(step.phase) || "tool_review".equals(step.phase) ? 3
+                            : "tool_ready".equals(step.phase) ? 2 : 1;
+                    if (next >= priority) { stage = stepPhaseCaption(step); priority = next; }
+                }
             }
-            return pending ? text + " · 进行中" : text;
+            return pending ? text + " · " + stage : text;
         }
 
         public boolean hasDetail() {
@@ -153,11 +168,14 @@ public class TurnTrace {
         if (!roundOpen) {
             return;
         }
-        while (steps.size() > roundOrigin) {
-            steps.remove(steps.size() - 1);
+        for (int i = steps.size() - 1; i >= roundOrigin; i--) {
+            Step step = steps.get(i);
+            if (!step.started && !step.done) steps.remove(i);
         }
-        while (order.size() > roundOrder) {
-            Piece removed = order.remove(order.size() - 1);
+        for (int i = order.size() - 1; i >= roundOrder; i--) {
+            Piece removed = order.get(i);
+            if (removed.step != null && (removed.step.started || removed.step.done)) continue;
+            order.remove(i);
             removed.summaryVersion++;
             removed.summaryPending = false;
         }
@@ -248,7 +266,7 @@ public class TurnTrace {
             steps.add(new Step());
         }
         Step step = steps.get(at);
-        if (step.done) {
+        if (step.done || step.started || !"preview".equals(step.phase)) {
             return;
         }
         if (id != null && id.length() > 0) {
@@ -262,6 +280,7 @@ public class TurnTrace {
         }
         if (step.name.length() > 0 || step.args.length() > 0) {
             placeStep(step);
+            phase = "preview";
         }
     }
 
@@ -310,26 +329,125 @@ public class TurnTrace {
         step.id = id == null ? "" : id;
         step.name = name == null ? "" : name;
         step.args = args == null ? "" : args;
+        // A persisted call has complete arguments; it is not a streaming preview.
+        step.phase = "tool_ready";
         steps.add(step);
         placeStep(step);
     }
 
     public void startStep(String name, String args) {
-        for (int i = roundOrigin; i < steps.size(); i++) {
-            Step step = steps.get(i);
-            if (!step.done && !step.started && step.name.equals(name)) {
-                step.started = true;
-                step.args = args == null ? "" : args;
-                return;
+        Step step = pendingStep(name, args);
+        if (step == null) {
+            addStep("", name, args);
+            step = steps.get(steps.size() - 1);
+        }
+        step.started = true;
+        step.args = args == null ? "" : args;
+        step.phase = "wait_agent".equals(name) ? "children" : "running";
+        phase = step.phase;
+    }
+
+    /** Approval updates the same row as the preview, without claiming execution. */
+    public void setProgress(String next, String name, String detail, int attempt) {
+        String value = next == null ? "" : next;
+        retryCount = Math.max(retryCount, Math.max(0, attempt));
+        if ("retry".equals(value)) {
+            retryReason = safeReason(detail);
+        }
+        if (value.length() > 0) phase = value;
+        if (!"tool_ready".equals(value) && !"tool_review".equals(value)
+                && !"tool_approval".equals(value) && !"children".equals(value)) return;
+        Step step = pendingStep(name, "tool_ready".equals(value) ? detail : null);
+        if (step == null && "children".equals(value)) {
+            for (int i = steps.size() - 1; i >= 0; i--) {
+                Step candidate = steps.get(i);
+                if (!candidate.done && candidate.started && candidate.name.equals(name)) {
+                    step = candidate; break;
+                }
             }
         }
-        addStep("", name, args);
-        steps.get(steps.size() - 1).started = true;
+        if (step == null && "tool_ready".equals(value)) {
+            addStep("", name, detail);
+            step = steps.get(steps.size() - 1);
+        }
+        if (step != null && !step.done) {
+            if ("tool_ready".equals(value) && step.started) return;
+            if ("tool_ready".equals(value)) step.args = detail == null ? "" : detail;
+            step.phase = value;
+        }
+    }
+
+    private Step pendingStep(String name, String args) {
+        String tool = name == null ? "" : name;
+        for (int i = Math.min(roundOrigin, steps.size()); i < steps.size(); i++) {
+            Step step = steps.get(i);
+            if (!step.done && !step.started && step.name.equals(tool)) return step;
+        }
+        // A re-entered UI can have a persisted, complete call before beginRound().
+        for (int i = 0; i < Math.min(roundOrigin, steps.size()); i++) {
+            Step step = steps.get(i);
+            if (!step.done && !step.started && step.name.equals(tool)
+                    && (args == null || step.args.equals(args))) return step;
+        }
+        return null;
+    }
+
+    private static String safeReason(String text) {
+        if (text == null) return "";
+        String value = text.replace('\n', ' ').replace('\r', ' ').trim();
+        return value.length() <= 160 ? value : value.substring(0, 160);
+    }
+
+    public static String stepPhaseCaption(Step step) {
+        if ("children".equals(step.phase)) return "等待子任务";
+        if (step.started) return "执行中";
+        if ("tool_ready".equals(step.phase)) return "等待执行";
+        if ("tool_review".equals(step.phase)) return "权限检查中";
+        if ("tool_approval".equals(step.phase)) return "等待授权";
+        return "正在生成参数";
+    }
+
+    /** Live phase plus cumulative retries; this is not a per-tool duration. */
+    public String progressCaption(boolean live) {
+        String current = "";
+        if (live) {
+            if ("preview".equals(phase)) current = "正在生成参数";
+            else if ("tool_ready".equals(phase)) current = "等待执行";
+            else if ("tool_review".equals(phase)) current = "权限检查中";
+            else if ("tool_approval".equals(phase)) current = "等待授权";
+            else if ("running".equals(phase)) current = "工具执行中";
+            else if ("children".equals(phase)) current = "等待子任务";
+            else if ("thinking".equals(phase)) current = "正在思考";
+            else if ("responding".equals(phase)) current = "正在输出";
+            else if ("retry".equals(phase)) current = "正在重试";
+            else current = "等待模型";
+        }
+        if (retryCount > 0) current += (current.length() == 0 ? "" : " · ") + "已重试 " + retryCount + " 次";
+        if (live && "retry".equals(phase) && retryReason.length() > 0)
+            current += " · " + (retryReason.length() > 48 ? retryReason.substring(0, 48) + "…" : retryReason);
+        return current;
     }
 
     public void fillResult(String id, String name, String result) {
         String key = id == null ? "" : id;
         String tool = name == null ? "" : name;
+        if (key.length() == 0) {
+            // The executing call may come from restored history before roundOrigin.
+            for (int i = 0; i < steps.size(); i++) {
+                Step step = steps.get(i);
+                if (!step.done && step.started && (tool.length() == 0 || tool.equals(step.name))) {
+                    step.result = result == null ? "" : result;
+                    step.done = true;
+                    return;
+                }
+            }
+            Step pending = pendingStep(tool, null);
+            if (pending != null) {
+                pending.result = result == null ? "" : result;
+                pending.done = true;
+                return;
+            }
+        }
         for (int i = key.length() == 0 ? roundOrigin : 0; i < steps.size(); i++) {
             Step step = steps.get(i);
             if (step.done) {

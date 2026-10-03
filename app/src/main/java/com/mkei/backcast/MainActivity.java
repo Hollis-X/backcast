@@ -2385,7 +2385,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         });
     }
 
-    private final AgentLoop.Listener listener = new AgentLoop.Listener() {
+    private final AgentLoop.Listener listener = new AgentLoop.Quiet() {
+        @Override
+        public void onProgress(final int gen, final String phase, final String name,
+                final String detail, final int attempt) {
+            uiLive(gen, new Runnable() {
+                @Override public void run() {
+                    applyTurnProgress(phase, name, detail, attempt);
+                }
+            });
+        }
+
         @Override
         public void onRequestStart(final int gen) {
             uiLive(gen, new Runnable() {
@@ -2399,6 +2409,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     syncTurnFold();
                     if (currentTrace != null) {
                         currentTrace.beginRound();
+                        currentTrace.phase = "model";
                         markTurn();
                     }
                 }
@@ -2483,6 +2494,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 public void run() {
                     if (currentTrace != null) {
                         currentTrace.fillResult("", name, result);
+                        currentTrace.phase = "model";
                         refreshTurnChrome();
                         refreshFoldResults(turnRows);
                         refreshAllFolds(turnFlow);
@@ -2577,6 +2589,20 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             });
         }
     };
+
+    /** Stage notifications use the same generation and snapshot gate as streamed text. */
+    private void applyTurnProgress(String phase, String name, String detail, int attempt) {
+        if (currentTrace == null) beginWorkRow();
+        if (currentTrace == null) return;
+        if ("tool_ready".equals(phase)) {
+            sealOpenThink();
+            sealLiveAnswer();
+        }
+        currentTrace.setProgress(phase, name, detail, attempt);
+        syncTurnFold();
+        refreshTurnChrome();
+        syncSheetTools();
+    }
 
     // ---------- 视图构建 ----------
 
@@ -2922,6 +2948,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (liveAnswer != null) sealLiveAnswer();
         if (currentTrace == null) beginWorkRow();
         if (currentTrace == null) return;
+        currentTrace.phase = "thinking";
         if (PromptGuard.REFUSAL.equals(text)) {
             currentTrace.reasoning.setLength(0);
             currentTrace.reasoning.append(text);
@@ -2945,6 +2972,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (text == null || text.length() == 0 || secretBlocked) {
             return;
         }
+        if (currentTrace != null) currentTrace.phase = "responding";
         if (liveAnswer == null) {
             sealOpenThink();
             syncTurnFold();
@@ -3396,7 +3424,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
     }
 
-    /** 只刷新工作时间。思考秒数在各自的折叠行上，不挂在这一行后面。 */
+    /** Whole-turn elapsed time includes model, retry, review and execution stages. */
     private void bindSummary(TextView header, TurnTrace trace) {
         if (header == null || trace == null) {
             return;
@@ -3407,7 +3435,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             header.setText(getString(R.string.thinking));
             return;
         }
-        header.setText(getString(R.string.worked, Integer.valueOf(seconds(ms))));
+        boolean live = trace == currentTrace && trace.elapsedMs <= 0;
+        String time = live ? "总耗时 " + seconds(ms) + "s"
+                : getString(R.string.worked, Integer.valueOf(seconds(ms)));
+        String progress = trace.progressCaption(live);
+        header.setText(time + (progress.length() == 0 ? "" : " · " + progress));
     }
 
     /** 这段思考结束。秒数钉在这段上，不跟后面的命令混。 */

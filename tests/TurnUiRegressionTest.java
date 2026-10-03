@@ -44,6 +44,7 @@ public final class TurnUiRegressionTest {
     private static final JavaCompiler COMPILER = ToolProvider.getSystemJavaCompiler();
     private static final Map<String, String> METHODS = new HashMap<>();
     private static final Map<String, String> TOOL_METHODS = new HashMap<>();
+    private static final Map<String, String> TIMELINE_METHODS = new HashMap<>();
     private static Class<?> viewType;
     private static int passed;
 
@@ -99,12 +100,13 @@ public final class TurnUiRegressionTest {
                     fm.getJavaFileObjectsFromFiles(sources));
             for (CompilationUnitTree unit : task.parse()) {
                 boolean tools = unit.getSourceFile().getName().endsWith("/ToolConfigActivity.java");
-                if (!tools && !unit.getSourceFile().getName().endsWith("/MainActivity.java")) continue;
-                final Map<String,String> destination = tools ? TOOL_METHODS : METHODS;
+                boolean timeline = unit.getSourceFile().getName().endsWith("/WorkTimeline.java");
+                if (!tools && !timeline && !unit.getSourceFile().getName().endsWith("/MainActivity.java")) continue;
+                final Map<String,String> destination = tools ? TOOL_METHODS : timeline ? TIMELINE_METHODS : METHODS;
                 for (Tree declaration : unit.getTypeDecls()) {
                     if (!(declaration instanceof ClassTree)) continue;
                     ClassTree type = (ClassTree) declaration;
-                    if (!type.getSimpleName().contentEquals(tools ? "ToolConfigActivity" : "MainActivity")) continue;
+                    if (!type.getSimpleName().contentEquals(tools ? "ToolConfigActivity" : timeline ? "WorkTimeline" : "MainActivity")) continue;
                     for (Tree member : type.getMembers()) {
                         if (member instanceof MethodTree) {
                             MethodTree method = (MethodTree) member;
@@ -119,7 +121,7 @@ public final class TurnUiRegressionTest {
                             }
                         }
                     }
-                    if (!tools) new TreeScanner<Void, Void>() {
+                    if (!tools && !timeline) new TreeScanner<Void, Void>() {
                         @Override
                         public Void visitMethodInvocation(MethodInvocationTree node, Void unused) {
                             if (node.getMethodSelect().toString().equals("scroll.setOnTouchStartListener")) {
@@ -231,7 +233,7 @@ public final class TurnUiRegressionTest {
                 + "toolkit_source=29,toolkit_requirements=30,toolkit_path=31,toolkit_runtime=32,toolkit_official_version=33,toolkit_probe_output=34,"
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_retrying=40,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
-                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49; }"
+                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51; }"
                 + "static class color{static final int text_primary=4;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400;}"
@@ -255,13 +257,14 @@ public final class TurnUiRegressionTest {
                 + "View composerDock,inputBar; void positionLatestButton(int footer){}"
                 + "boolean immediateUi; boolean isFinishing(){return finishing;} void ui(Runnable r){uiTasks.add(r);}"
                 + "void runOnUiThread(Runnable r){if(immediateUi)r.run();else uiTasks.add(r);} int dp(int v){return v;}"
-                + "String getString(int id,Object...args){return args.length==0?String.valueOf(id):\"Earlier \"+args[0];} void scheduleFrost(){}"
+                + "String getString(int id,Object...args){return args.length==0?String.valueOf(id):id==R.string.worked?\"工作了 \"+args[0]+\"s\":\"Earlier \"+args[0];} void scheduleFrost(){}"
                 + "LinearLayout newBlock(){return new LinearLayout();}"
                 + "TextView prepareEarlier(long before,int tailHeight){earlierBeforeId=before;earlierRow=new TextView();"
                 + "stream.addView(earlierRow,null);View tail=new View();tail.height=tailHeight;stream.addView(tail,null);stream.layout();return earlierRow;}"
                 + "void layout(){stream.layout();} void preDraw(){scroll.observer.fire();}"
                 + "static class WorkTimeline extends LinearLayout { int binds; TurnTrace.Range last;"
-                + "void bind(TurnTrace.Range r,boolean live){binds++;last=r;} }"
+                + "void bind(TurnTrace.Range r,boolean live){binds++;last=r;}"
+                + TIMELINE_METHODS.get("toolState") + TIMELINE_METHODS.get("resultTitle") + TIMELINE_METHODS.get("failed") + " }"
                 + "static class Settings { String systemPrompt(){return \"Fixture instruction\";}"
                 + "String environmentContext(){return \"Device: fixture\";} }"
                 + "Settings settings=new Settings(); TurnTrace replayTailTrace,currentTrace; LinearLayout replayTailRows,turnRows,turnBody,turnMarkBody;"
@@ -273,6 +276,8 @@ public final class TurnUiRegressionTest {
                 + "void closeReplayTurn(TurnTrace t,LinearLayout r){if(t!=null){t.sealThink();refreshAllFolds(flowOf(r));}} void addSteerNote(){}"
                 + "Object fullWidth(){return null;}"
                 + "void refreshTurnChrome(){} void showPending(){}"
+                + "void beginWorkRow(){if(currentTrace==null)currentTrace=new TurnTrace();}"
+                + "void sealOpenThink(){}void sealLiveAnswer(){}void syncTurnFold(){}"
                 + "void spinChevron(View c,boolean open,boolean animate){}"
                 + "void animateActivity(WorkTimeline t,boolean open){t.setVisibility(open?View.VISIBLE:View.GONE);}"
                 + "LinearLayout activityRow(TurnTrace.Range r){LinearLayout row=new LinearLayout(),head=new LinearLayout();"
@@ -309,7 +314,8 @@ public final class TurnUiRegressionTest {
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive",
                 "renderDisplayParts", "flowOf", "bodySlot",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
-                "refreshFoldResults", "summaryChevron", "syncWorkChevron")) {
+                "refreshFoldResults", "summaryChevron", "syncWorkChevron", "applyTurnProgress",
+                "bindSummary", "displayElapsed", "seconds")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
             source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this"));
         }
@@ -522,6 +528,115 @@ public final class TurnUiRegressionTest {
         Object step = ((List<?>) get(trace, "steps")).get(2);
         check((Boolean) get(step, "started") && (Boolean) get(step, "done"), "Tool lifecycle did not update the preview");
         pass("previewDeltasKeepOneToolAtItsOriginalPosition");
+    }
+
+    private static String toolState(Object view, Object step) throws Exception {
+        return (String) invoke(nested(view, "WorkTimeline", new Class<?>[0]), "toolState", step, true);
+    }
+
+    private static Object progressFixture() throws Exception {
+        Object view = fixture();
+        call(view, "beginWorkRow");
+        invoke(get(view, "currentTrace"), "beginRound");
+        return view;
+    }
+
+    private static void toolStagesDistinguishPreviewApprovalAndActualExecution() throws Exception {
+        Object view = progressFixture(), trace = get(view, "currentTrace");
+        invoke(trace, "previewStep", 0, "c0", "shell", "{\"command\":\"");
+        Object step = ((List<?>) get(trace, "steps")).get(0);
+        check(toolState(view, step).equals("正在生成参数") && !(Boolean) get(step, "started"),
+                "Streamed arguments were presented as an executing command");
+        String args = "{\"command\":\"echo private_argument\"}";
+        for (String phase : Arrays.asList("tool_ready", "tool_review", "tool_approval")) {
+            invoke(view, "applyTurnProgress", phase, "shell", args, 0);
+            String expected = phase.equals("tool_ready") ? "等待执行" : phase.equals("tool_review") ? "权限检查中" : "等待授权";
+            check(toolState(view, step).equals(expected) && !(Boolean) get(step, "started"),
+                    "Pre-execution stage claims a running command: " + phase);
+            check(!((String) invoke(trace, "progressCaption", true)).contains("private_argument"),
+                    "Header displayed full tool arguments");
+        }
+        invoke(trace, "startStep", "shell", args);
+        check(toolState(view, step).equals("执行中") && (Boolean) get(step, "started"), "Actual start remained a preview");
+        invoke(trace, "previewStep", 0, "c0", "shell", "stale_partial");
+        check(args.equals(get(step, "args")) && toolState(view, step).equals("执行中"), "Late preview rewound an executing tool");
+        invoke(trace, "fillResult", "", "shell", "ok");
+        check(toolState(view, step).equals("完成"), "Tool result did not finish its existing row");
+        Object timeline = nested(view, "WorkTimeline", new Class<?>[0]);
+        check(invoke(timeline, "resultTitle", step).equals("返回结果"), "Command detail disagrees with completed timeline");
+        check(TIMELINE_METHODS.get("CommandView").contains("resultTitle(step)")
+                        && TIMELINE_METHODS.get("CommandView").contains("renderedPhase"),
+                "Open command details do not refresh when only the phase changes");
+        pass("toolStagesDistinguishArgumentPreviewApprovalAndActualExecution");
+    }
+
+    private static void retryRollbackPreservesTotalClockAndReportedCount() throws Exception {
+        Object view = progressFixture(), trace = get(view, "currentTrace");
+        SystemClock.set(500000);
+        field(view, "turnStartedAt", 100000L);
+        invoke(trace, "previewStep", 0, "c0", "shell", "partial");
+        invoke(view, "applyTurnProgress", "retry", "", "连接中断，准备重新请求", 2);
+        call(view, "rewindLiveRound");
+        check(((List<?>) get(trace, "steps")).isEmpty(), "Failed request's preview survived rollback");
+        check((Integer) get(trace, "retryCount") == 2 && get(trace, "phase").equals("retry"), "Rollback lost retry metadata");
+        check((Long) get(view, "turnStartedAt") == 100000L, "Retry restarted the whole-turn clock");
+        Object header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
+        invoke(view, "bindSummary", header, trace);
+        check(get(header, "text").equals("总耗时 400s · 正在重试 · 已重试 2 次 · 连接中断，准备重新请求"),
+                "Live header does not distinguish total latency from actual tool execution: " + get(header, "text"));
+        invoke(view, "applyTurnProgress", "model", "", "", 2);
+        invoke(view, "bindSummary", header, trace);
+        check(get(header, "text").equals("总耗时 400s · 等待模型 · 已重试 2 次"),
+                "Next model request faked a new retry or retained the retry phase");
+        invoke(view, "applyTurnProgress", "model", "", "", 3);
+        check((Integer) get(trace, "retryCount") == 3, "Snapshot's cumulative count was lost outside retry phase");
+        field(trace, "elapsedMs", 400000L);
+        invoke(view, "bindSummary", header, trace);
+        check(get(header, "text").equals("工作了 400s · 已重试 3 次"), "Sealed header still claims active execution");
+        pass("retryRollbackPreservesWholeTurnClockAndCumulativeRetryMetadata");
+    }
+
+    private static void restoredPendingCallUsesOneRowAndReceivesResult() throws Exception {
+        Object view = fixture();
+        Message request = Message.assistant("", new JSONArray().put(new JSONObject().put("id", "saved")
+                .put("type", "function").put("function", new JSONObject().put("name", "shell")
+                        .put("arguments", "{\"command\":\"echo saved\"}"))));
+        replay(view, Arrays.asList(Message.user("inspect"), request), 0);
+        Object trace = ((List<?>) get(view, "traces")).get(0);
+        field(view, "currentTrace", trace);
+        invoke(trace, "beginRound");
+        Object step = ((List<?>) get(trace, "steps")).get(0);
+        check(toolState(view, step).equals("等待执行"), "Persisted complete arguments were treated as unfinished streaming");
+        invoke(view, "applyTurnProgress", "tool_ready", "shell", "{\"command\":\"echo saved\"}", 2);
+        invoke(view, "applyTurnProgress", "tool_review", "shell", "", 2);
+        invoke(trace, "startStep", "shell", "{\"command\":\"echo saved\"}");
+        invoke(trace, "fillResult", "", "shell", "restored result");
+        check(((List<?>) get(trace, "steps")).size() == 1 && (Boolean) get(step, "done")
+                        && get(step, "result").equals("restored result"),
+                "Re-entry duplicated a committed call or attached the result to a new row");
+        check(METHODS.get("onProgress").contains("uiLive(gen") && METHODS.get("onProgress").contains("applyTurnProgress"),
+                "Phase notifications bypass generation and snapshot ownership checks");
+        pass("restoredPendingCallKeepsOneRowAndReceivesItsActualResult");
+    }
+
+    private static void currentExecutionWinsQueuedPreviewsAndChildrenHaveOwnStage() throws Exception {
+        Object view = progressFixture(), trace = get(view, "currentTrace");
+        invoke(trace, "previewStep", 0, "c0", "shell", "{}");
+        invoke(trace, "previewStep", 1, "c1", "read", "{}");
+        invoke(trace, "startStep", "shell", "{}");
+        Object range = trace.getClass().getDeclaredClasses()[1];
+        for (Class<?> type : trace.getClass().getDeclaredClasses()) if (type.getSimpleName().equals("Range")) range = type;
+        Object captionRange = ((Class<?>) range).getConstructor(trace.getClass(), int.class).newInstance(trace, 0);
+        field(captionRange, "end", 2);
+        check(((String) call(captionRange, "caption")).endsWith("执行中"), "Queued preview hid the currently executing tool");
+        invoke(trace, "fillResult", "", "shell", "ok");
+        invoke(view, "applyTurnProgress", "tool_approval", "read", "{}", 0);
+        check(((String) call(captionRange, "caption")).endsWith("等待授权"), "Approval phase was hidden by another pending preview");
+        invoke(trace, "startStep", "wait_agent", "{}");
+        Object childStep = ((List<?>) get(trace, "steps")).get(2);
+        check(toolState(view, childStep).equals("等待子任务") && ((String) invoke(trace, "progressCaption", true)).equals("等待子任务"),
+                "Wait-agent work was presented as model generation or shell execution");
+        pass("currentExecutionWinsQueuedPreviewsAndChildWaitIsExplicit");
     }
 
     private static Object fixture() throws Exception {
@@ -1289,6 +1404,10 @@ public final class TurnUiRegressionTest {
                 noneHidesReplayedReasoningWithoutMovingToolsOrBody();
                 retryPreservesCommittedBlocks();
                 previewUpdatesOneStep();
+                toolStagesDistinguishPreviewApprovalAndActualExecution();
+                retryRollbackPreservesTotalClockAndReportedCount();
+                restoredPendingCallUsesOneRowAndReceivesResult();
+                currentExecutionWinsQueuedPreviewsAndChildrenHaveOwnStage();
                 slicedReplayMatchesFullReplay();
                 renderFramesAreBounded();
                 pageBoundaryRetainsToolLabelsAndGuard();

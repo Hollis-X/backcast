@@ -7,7 +7,7 @@ import java.util.List;
 final class UiEventBuffer {
     static final int REQUEST = 0, TEXT = 1, REASONING = 2, PREVIEW = 3, START = 4,
             END = 5, ERROR = 6, CONTEXT = 7, COMPACT_START = 8, COMPACTED = 9,
-            FINISH = 10, RETRY = 11, STEER = 12;
+            FINISH = 10, RETRY = 11, STEER = 12, PROGRESS = 13;
 
     static final class Event {
         final int kind, generation, token;
@@ -44,6 +44,10 @@ final class UiEventBuffer {
                 case FINISH: listener.onFinish(generation); break;
                 case RETRY: listener.onRetry(generation); break;
                 case STEER: listener.onSteer(generation); break;
+                case PROGRESS:
+                    if (listener instanceof AgentLoop.ProgressListener) ((AgentLoop.ProgressListener) listener)
+                            .onProgress(generation, name, arguments, text.toString(), first);
+                    break;
                 default: throw new IllegalStateException("Unknown UI event");
             }
         }
@@ -68,7 +72,7 @@ final class UiEventBuffer {
                 return;
             }
         }
-        if (event.kind == PREVIEW || event.kind == CONTEXT || event.kind == REQUEST || event.kind == FINISH) {
+        if (event.kind == PREVIEW || event.kind == CONTEXT || event.kind == REQUEST || event.kind == FINISH || event.kind == PROGRESS) {
             for (int i = events.size() - 1; i >= 0; i--) {
                 Event previous = events.get(i);
                 if (previous.kind == event.kind && previous.token == event.token

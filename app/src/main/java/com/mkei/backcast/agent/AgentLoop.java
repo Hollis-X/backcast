@@ -74,8 +74,13 @@ public class AgentLoop {
         void onSteer(int gen);
     }
 
+    /** Optional stage metadata; old listeners retain the same callback contract. */
+    public interface ProgressListener {
+        void onProgress(int gen, String phase, String name, String detail, int attempt);
+    }
+
     /** 没界面时用的空监听。换会话不会把事件画到另一个会话上。 */
-    public static class Quiet implements Listener {
+    public static class Quiet implements Listener, ProgressListener {
         @Override public void onRequestStart(int gen) { }
         @Override public void onAssistantText(int gen, String text) { }
         @Override public void onReasoning(int gen, String text) { }
@@ -89,6 +94,7 @@ public class AgentLoop {
         @Override public void onFinish(int gen) { }
         @Override public void onRetry(int gen) { }
         @Override public void onSteer(int gen) { }
+        @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) { }
     }
 
     /** 把已经进入历史的消息落库。由界面注入，循环本身不碰数据库。 */
@@ -165,7 +171,7 @@ public class AgentLoop {
     private final Object listenerLock = new Object();
     private volatile Listener uiListener;
     private long listenerRevision;
-    private final Listener listener = new UiForwarder();
+    private final UiForwarder listener = new UiForwarder();
     private final UiEventBuffer uiEvents = new UiEventBuffer();
     private long uiSequence;
     private final ThreadLocal<Long> callingUiSequence = new ThreadLocal<Long>();
@@ -184,6 +190,7 @@ public class AgentLoop {
     /** 界面这一轮的记号，只在跑循环的那条线程上读。 */
     private final ThreadLocal<Integer> callToken = new ThreadLocal<Integer>();
     private final ThreadLocal<ToolRegistry> turnTools = new ThreadLocal<ToolRegistry>();
+    private final ThreadLocal<Integer> requestRetries = new ThreadLocal<Integer>();
     /** UI cancellation and usage reads must refer to the same registry as the owning worker. */
     private ToolRegistry activeTurnTools;
     private int activeTurnToolsToken;
@@ -450,7 +457,10 @@ public class AgentLoop {
             }
         }
 
-        @Override public void onRequestStart(int gen) { emit(event(UiEventBuffer.REQUEST, gen, "")); }
+        @Override public void onRequestStart(int gen) {
+            emit(event(UiEventBuffer.REQUEST, gen, ""));
+            onProgress(gen, "model", "", "", 0);
+        }
         @Override public void onAssistantText(int gen, String value) { emit(event(UiEventBuffer.TEXT, gen, value)); }
         @Override public void onReasoning(int gen, String value) { emit(event(UiEventBuffer.REASONING, gen, value)); }
         @Override public void onToolPreview(int gen, int index, String id, String name, String args) {
@@ -477,6 +487,13 @@ public class AgentLoop {
         @Override public void onFinish(int gen) { emit(event(UiEventBuffer.FINISH, gen, "")); }
         @Override public void onRetry(int gen) { emit(event(UiEventBuffer.RETRY, gen, "")); }
         @Override public void onSteer(int gen) { emit(event(UiEventBuffer.STEER, gen, "")); }
+        @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+            UiEventBuffer.Event event = event(UiEventBuffer.PROGRESS, gen, detail);
+            Integer retries = requestRetries.get();
+            event.name = phase; event.arguments = name;
+            event.first = attempt > 0 ? attempt : retries == null ? 0 : retries.intValue();
+            emit(event);
+        }
     }
 
     public void setDurability(Durability durability) {
@@ -854,6 +871,7 @@ public class AgentLoop {
             ToolRegistry tools = turnTools.get();
             String cleanup = tools == null ? null : tools.cleanupTemporary(true);
             turnTools.remove();
+            requestRetries.remove();
             synchronized (lock) {
                 if (activeTurnToolsToken == token) {
                     activeTurnTools = null;
@@ -1343,6 +1361,7 @@ public class AgentLoop {
     }
 
     private void beginTemporaryTurn() {
+        requestRetries.set(Integer.valueOf(0));
         ToolRegistry tools = turnTools.get();
         if (tools != null) tools.beginTurn();
     }
@@ -1486,6 +1505,7 @@ public class AgentLoop {
                     }
                 }
                 if (isTransient(reply.error) && !stale(token, gen)) {
+                    reportRequestRetry(gen, reply.error);
                     try {
                         Thread.sleep(retryWait(1));
                     } catch (InterruptedException interrupted) {
@@ -1717,6 +1737,24 @@ public class AgentLoop {
         return wait > 8000L ? 8000L : wait;
     }
 
+    /** Show the reason without exposing a provider's echoed prompt or credentials. */
+    private static String retryReason(String error) {
+        String value = error == null ? "" : error.toLowerCase(java.util.Locale.US);
+        java.util.regex.Matcher status = java.util.regex.Pattern.compile("http (\\d{3})").matcher(value);
+        if (status.find()) return "接口返回 HTTP " + status.group(1);
+        if (value.contains("timeout") || value.contains("timed out") || value.contains("长时间没有输出")) return "等待模型响应超时";
+        if (isContextOverflow(error)) return "模型上下文超限，正在压缩后重试";
+        if (isTransient(error)) return "网络连接中断";
+        return "模型请求失败";
+    }
+
+    private void reportRequestRetry(int gen, String error) {
+        Integer previous = requestRetries.get();
+        int attempt = previous == null ? 1 : previous.intValue() + 1;
+        requestRetries.set(Integer.valueOf(attempt));
+        listener.onProgress(gen, "retry", "", retryReason(error), attempt);
+    }
+
     /** 判断错误是不是超窗。 */
     private static boolean isContextOverflow(String error) {
         if (error == null) {
@@ -1941,6 +1979,7 @@ public class AgentLoop {
             if (reply.error != null) {
                 if (isContextOverflow(reply.error)) {
                     listener.onRetry(gen);
+                    reportRequestRetry(gen, reply.error);
                     if (compactedAfterOverflow || !compact(token, gen, sessionId, true)) {
                         if (compactedAfterOverflow) listener.onError(gen, "压缩后仍超出模型上下文窗口，请检查窗口设置或缩短输入。");
                         return;
@@ -1953,6 +1992,7 @@ public class AgentLoop {
                 if (again) {
                     strikes++;
                     listener.onRetry(gen);
+                    reportRequestRetry(gen, reply.error);
                     try {
                         Thread.sleep(retryWait(strikes));
                     } catch (InterruptedException interrupted) {
@@ -1981,6 +2021,7 @@ public class AgentLoop {
             if (!reply.hasToolCalls() && !finishingGoal && children != null
                     && (children.hasPendingWork() || children.hasUncollectedResults())) {
                 // A provisional final cannot be delivered before delegated evidence is available.
+                listener.onProgress(gen, "children", "", "", 0);
                 collectDelegatedResults(children, true, token, gen);
                 if (stale(token, gen)) return;
                 continue;
@@ -2182,7 +2223,7 @@ public class AgentLoop {
                 recordToolResult(sessionId, stopped, gen, token, name);
                 return;
             }
-            listener.onToolStart(gen, name, argsRaw);
+            listener.onProgress(gen, "tool_ready", name, argsRaw, 0);
 
             // 受限 / 限制访问下先过放行；模型自查这一步也要能被打断。
             String denied = checkApproval(name, args, token, gen);
@@ -2201,6 +2242,7 @@ public class AgentLoop {
                 continue;
             }
 
+            listener.onToolStart(gen, name, argsRaw);
             String result = invoke(name, args);
             closed = goalAccounting && "update_goal".equals(name) && (Goal.isClosed(goalStatus)
                     || (Goal.BUDGET_LIMITED.equals(goalStatus) && budgetWrappedUp));
@@ -2241,6 +2283,7 @@ public class AgentLoop {
         if (ApprovalGate.ACCESS_STRICT.equals(access)) {
             askUser = true;
         } else if (ApprovalGate.ACCESS_GUARDED.equals(access)) {
+            listener.onProgress(gen, "tool_review", name, String.valueOf(args), 0);
             risk = reviewCall(name, args, token, gen);
             if (risk == null) {
                 // 这一轮已经停了或换了会话，交给上层按 stale 收场。
@@ -2256,6 +2299,7 @@ public class AgentLoop {
         }
 
         if (askUser) {
+            listener.onProgress(gen, "tool_approval", name, String.valueOf(args), 0);
             APPROVAL_SOURCE.set(this);
             try {
                 if (!g.approve(name, args)) {
