@@ -131,12 +131,16 @@ public final class RunHub {
 
     /** UI probes use their own runner so they cannot cancel a model's active command. */
     public ToolkitSession newToolkitSession() {
-        String dir = settings.workDir();
+        List<String> roots = settings.authorizedWorkDirs();
+        String dir = roots.get(0);
         boolean root = settings.useRoot();
-        uiMaterials.configure(dir, root);
-        String cleanup = uiMaterials.cleanupRecovered();
-        if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
-        uiMaterials.beginTurn();
+        synchronized (uiMaterials) {
+            uiMaterials.configure(dir, root);
+            uiMaterials.configureWorkDirs(roots);
+            String cleanup = uiMaterials.cleanupRecovered();
+            if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
+            uiMaterials.beginTurn();
+        }
         ShellTool shell = new ShellTool(root, dir, uiMaterials);
         return new ToolkitSession(new ToolkitTool(shell, toolchains, dir, uiMaterials,
                 android.os.Build.CPU_ABI), uiMaterials);
@@ -305,7 +309,7 @@ public final class RunHub {
         }
         String sig = settings.baseUrl() + "\n" + settings.apiKey() + "\n" + settings.model()
                 + "\n" + settings.effectiveReasoningEffort() + "\n" + settings.useRoot()
-                + "\n" + settings.workDir() + "\n" + settings.outputVerbosity()
+                + "\n" + settings.workDir() + "\n" + settings.authorizedWorkDirs() + "\n" + settings.outputVerbosity()
                 + "\n" + settings.outputLanguage() + "\n" + settings.agentMode()
                 + "\n" + settings.agentConcurrency();
         if (sig.equals(applied)) {
@@ -430,16 +434,18 @@ public final class RunHub {
 
     private ToolRegistry tools(AgentLoop loop) {
         ToolRegistry next = new ToolRegistry();
-        String dir = settings.workDir();
+        List<String> roots = settings.authorizedWorkDirs();
+        String dir = roots.get(0);
         boolean root = settings.useRoot();
         TemporaryWorkspace materials = temporary.get(loop);
         materials.configure(dir, root);
+        materials.configureWorkDirs(roots);
         next.register(new ReadTool(dir, root, materials));
         ShellTool shell = new ShellTool(root, dir, materials);
         next.register(shell);
         next.register(new EditTool(dir, root, materials));
         next.register(new WriteTool(dir, root, materials));
-        next.register(new TemporaryTool(materials));
+        next.register(new TemporaryTool(materials, dir, roots));
         next.register(new ToolkitTool(shell, toolchains, dir, materials, android.os.Build.CPU_ABI));
         ChildOwner owner = childOwners.get(loop);
         if (owner != null) {

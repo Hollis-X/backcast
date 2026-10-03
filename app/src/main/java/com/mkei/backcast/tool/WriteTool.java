@@ -98,7 +98,7 @@ public class WriteTool implements Tool {
                 if (temporary != null && temporary.contains(file)) {
                     return "错误：专用临时目录只能存放 purpose=temporary 的材料。";
                 }
-                if ("test".equals(purpose) && !ToolPaths.organizedTest(workDir, file)) {
+                if ("test".equals(purpose) && !ToolPaths.organizedTest(workDir, file, temporary)) {
                     return "错误：正式测试必须归类到项目已有测试目录或 tests/，不要散放在项目根目录。"
                             + "一次性验证脚本请用 purpose=temporary。";
                 }

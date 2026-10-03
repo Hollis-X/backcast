@@ -74,8 +74,10 @@ public final class ToolPackageManagementRegressionTest {
 
     private static final class BlockingShell extends ShellTool {
         final CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
-        BlockingShell() { super(false, root.getPath()); }
+        final List<String> expectedArguments;
+        BlockingShell(List<String> expectedArguments) { super(false, root.getPath()); this.expectedArguments = expectedArguments; }
         @Override String runProgram(ToolchainStore.Launcher launcher, List<String> arguments, boolean temporary, int timeout, int epoch) throws Exception {
+            check("readelf".equals(launcher.id) && expectedArguments.equals(arguments), "Package gate fixture received an invalid tool request");
             entered.countDown();
             if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("Fixture command did not finish");
             return "exit=0\nGNU readelf 2.47\n";
@@ -84,16 +86,22 @@ public final class ToolPackageManagementRegressionTest {
     private static void modelRunAndUiProbeBothBlockInstallAndDelete() throws Exception {
         for (final String action : new String[]{"run", "status"}) {
             Payload payload = new Payload(); final ToolchainStore store = payload.store("busy-" + action); store.installBundled(LIVE);
-            final BlockingShell shell = new BlockingShell(); final ToolkitTool tool = new ToolkitTool(shell, store, root.getPath(), null, "arm64-v8a");
+            final File input = new File(root, "gate-input-" + action + ".elf"); Files.write(input.toPath(), new byte[]{127, 'E', 'L', 'F'});
+            final BlockingShell shell = new BlockingShell("run".equals(action)
+                    ? java.util.Arrays.asList("-h", input.getPath()) : java.util.Arrays.asList("--version"));
+            final ToolkitTool tool = new ToolkitTool(shell, store, root.getPath(), null, "arm64-v8a");
             final Throwable[] failure = new Throwable[1];
             Thread worker = new Thread(new Runnable() { public void run() {
                 try {
-                    JSONObject result = new JSONObject(tool.run(new JSONObject().put("action", action).put("tool", "readelf")));
+                    JSONObject request = new JSONObject().put("action", action).put("tool", "readelf");
+                    if ("run".equals(action)) request.put("arguments", new JSONArray().put("-h").put(input.getPath())).put("temporary", false);
+                    JSONObject result = new JSONObject(tool.run(request));
                     check(!"error".equals(result.optString("state")), "Tool invocation failed: " + result);
                 } catch (Throwable error) { failure[0] = error; }
             } });
-            worker.start(); check(shell.entered.await(3, TimeUnit.SECONDS), "Actual invocation did not enter the shell");
+            worker.start();
             try {
+                check(shell.entered.await(3, TimeUnit.SECONDS), "Actual invocation did not enter the shell: " + failure[0]);
                 for (boolean remove : new boolean[]{false, true}) {
                     boolean busy = false;
                     try { if (remove) store.removeBundled(LIVE); else store.installBundled(LIVE); }

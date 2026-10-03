@@ -6,6 +6,7 @@ import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.Tool;
 import com.mkei.backcast.agent.ToolRegistry;
+import com.mkei.backcast.agent.TemporaryCleanup;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -175,7 +176,10 @@ public final class AgentLoopRegressionTest {
             @Override public void abort() { aborts[1]++; }
         };
         final Recorder recorder = new Recorder();
-        final AgentLoop loop = new AgentLoop(original, new ToolRegistry(), new AgentLoop.Quiet());
+        RegistryTool oldTool = new RegistryTool("original"), newTool = new RegistryTool("replacement");
+        ToolRegistry oldRegistry = new ToolRegistry(), newRegistry = new ToolRegistry();
+        oldRegistry.register(oldTool); newRegistry.register(newTool);
+        final AgentLoop loop = new AgentLoop(original, oldRegistry, new AgentLoop.Quiet());
         loop.bindSession(1);
         loop.reset("system");
         loop.setRecorder(recorder);
@@ -190,11 +194,13 @@ public final class AgentLoopRegressionTest {
         worker.start();
         try {
             check(started.await(5, TimeUnit.SECONDS), "Original request did not start");
-            loop.retarget(replacement, new ToolRegistry());
+            loop.retarget(replacement, newRegistry);
             loop.cancel();
             worker.join(5000);
             check(!worker.isAlive() && failure.get() == null, "Stopped turn did not finish: " + failure.get());
             check(aborts[0] == 1 && aborts[1] == 0, "Stop targeted the replacement client instead of the running request");
+            check(oldTool.aborts == 1 && newTool.aborts == 0, "Stop aborted the next turn registry instead of the running registry");
+            check(oldTool.finishes == 1 && newTool.finishes == 0, "Stopped turn cleaned the replacement registry");
             check(served[0] == 0 && !loop.busy(), "Retarget restarted the cancelled turn");
             for (Message message : recorder.saved) {
                 check(!Message.ASSISTANT.equals(message.role), "Cancelled output was persisted");
@@ -205,6 +211,111 @@ public final class AgentLoopRegressionTest {
         } finally {
             stopped.countDown();
             worker.join(5000);
+        }
+    }
+
+    private static final class RegistryTool implements Tool, TemporaryCleanup {
+        final String marker;
+        int runs, begins, cleanups, finishes, aborts;
+        RegistryTool(String marker) { this.marker = marker; }
+        @Override public String name() { return "work"; }
+        @Override public String description() { return marker; }
+        @Override public JSONObject parameters() { return new JSONObject(); }
+        @Override public String run(JSONObject args) { runs++; return marker; }
+        @Override public void abort() { aborts++; }
+        @Override public void beginTurn() { begins++; }
+        @Override public String cleanupTemporary() { cleanups++; return null; }
+        @Override public String finishTurn() { finishes++; return null; }
+    }
+
+    private static Tool namedTool(final String name) {
+        return new Tool() {
+            @Override public String name() { return name; }
+            @Override public String description() { return name; }
+            @Override public JSONObject parameters() { return new JSONObject(); }
+            @Override public String run(JSONObject args) { throw new AssertionError("Unrequested marker tool executed: " + name); }
+            @Override public void abort() { }
+        };
+    }
+
+    private static boolean resultContains(List<Message> messages, String id, String text) {
+        for (Message message : messages) if (Message.TOOL.equals(message.role) && id.equals(message.toolCallId))
+            return message.content != null && message.content.contains(text);
+        return false;
+    }
+
+    private static JSONObject toolCall(String id, String name) throws Exception {
+        return new JSONObject().put("id", id).put("type", "function")
+                .put("function", new JSONObject().put("name", name).put("arguments", "{}"));
+    }
+
+    /** A real transport/tool/transport cycle keeps its scope even when retargeted mid-request. */
+    private static void retargetPinsToolsSchemaCleanupAndUsageUntilNextTurn() throws Exception {
+        SystemClock.set(100000);
+        final CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
+        final AgentLoop[] box = new AgentLoop[1];
+        final int[] served = new int[1];
+        final RegistryTool oldTool = new RegistryTool("original workspace and material lease"), newTool = new RegistryTool("replacement");
+        final ToolRegistry oldRegistry = new ToolRegistry(), newRegistry = new ToolRegistry();
+        oldRegistry.register(oldTool); oldRegistry.register(namedTool("old_only"));
+        newRegistry.register(newTool); newRegistry.register(namedTool("new_only"));
+        final LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray schema, Sink sink) {
+                try {
+                    int call = ++served[0];
+                    String tools = schema == null ? "" : schema.toString();
+                    check(tools.contains(call <= 2 ? "old_only" : "new_only"), "Request schema changed in the middle of a turn");
+                    check(!tools.contains(call <= 2 ? "new_only" : "old_only"), "Request mixed two registries");
+                    Reply reply = new Reply();
+                    if (call == 1) {
+                        started.countDown();
+                        check(release.await(5, TimeUnit.SECONDS), "Retargeted request was never released");
+                        reply.toolCalls = new JSONArray().put(toolCall("first", "work")).put(toolCall("missing", "new_only"));
+                    } else if (call == 2) {
+                        check(resultContains(messages, "first", oldTool.marker), "Current turn executed replacement tool");
+                        check(resultContains(messages, "missing", "old_only"), "Unavailable tool list used replacement registry");
+                        check(!resultContains(messages, "missing", "work, new_only"), "Unavailable tool list leaked the next registry");
+                        check(!box[0].closeGoal(Goal.COMPLETE, "verified").startsWith("错误"), "Current goal could not clean its own material registry");
+                        reply.content = "first done";
+                    } else if (call == 3) {
+                        reply.toolCalls = new JSONArray().put(toolCall("next", "work"));
+                    } else {
+                        check(call == 4 && resultContains(messages, "next", newTool.marker), "Next turn did not execute replacement tool");
+                        reply.content = "next done";
+                    }
+                    return reply;
+                } catch (Exception error) { throw new AssertionError(error); }
+            }
+        };
+        final Recorder recorder = new Recorder();
+        final AgentLoop loop = new AgentLoop(client, oldRegistry, new AgentLoop.Quiet());
+        box[0] = loop; loop.bindSession(1); loop.reset("system"); loop.setRecorder(recorder); loop.setGoal("finish the current workspace");
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try { loop.submit("first", 1, loop.generation(), 1); }
+                catch (Throwable error) { failure.set(error); }
+            }
+        });
+        worker.setDaemon(true); worker.start();
+        try {
+            check(started.await(5, TimeUnit.SECONDS), "Original request did not start");
+            int usage = loop.contextUsed();
+            loop.retarget(client, newRegistry);
+            check(loop.contextUsed() == usage, "UI context usage switched to next turn schema while request remained active");
+            release.countDown(); worker.join(5000);
+            check(!worker.isAlive() && failure.get() == null, "Current turn failed after retarget: " + failure.get());
+            check(served[0] == 2 && Goal.COMPLETE.equals(loop.goalStatus()), "Retarget changed goal completion semantics");
+            check(oldTool.begins == 1 && oldTool.runs == 1 && oldTool.cleanups == 1 && oldTool.finishes == 1,
+                    "Current turn begin/invoke/goal cleanup/end did not share one registry");
+            check(newTool.begins == 0 && newTool.runs == 0 && newTool.cleanups == 0 && newTool.finishes == 0,
+                    "Replacement materials were used before next turn");
+            loop.submit("next", 1, loop.generation(), 2);
+            check(served[0] == 4 && newTool.begins == 1 && newTool.runs == 1 && newTool.finishes == 1,
+                    "Next turn did not begin, execute and clean the replacement registry");
+            check("next done".equals(recorder.answer().content), "Next turn output was not persisted");
+        } finally {
+            release.countDown(); worker.join(5000);
         }
     }
     private static void disclosureNeverReachesTransport() throws Exception {
@@ -832,6 +943,7 @@ public final class AgentLoopRegressionTest {
     public static void main(String[] args) {
         for (String name : new String[]{"newClockPublishedBeforePersistence", "resumeAndRetryKeepOriginalClock",
                 "stoppedClockIsNotPublished", "retargetKeepsRunningRequestCancellable",
+                "retargetPinsToolsSchemaCleanupAndUsageUntilNextTurn",
                 "disclosureNeverReachesTransport", "disclosureIsRefusedAfterRecovery",
                 "disclosureGoalStopsWithoutSpinning", "promptFileTaskIsAllowed", "staleCallbacksDoNotChangeNewTurnClock",
                 "longBackgroundResumeKeepsClock", "disclosureIsRefusedBeforeCompaction",
@@ -843,6 +955,6 @@ public final class AgentLoopRegressionTest {
                 "goalStopsWhenMarkedComplete", "bareAuditClaimDoesNotFinish",
                 "emptyContinuationsBlockTheGoal", "continuationEncouragesClosingOnce"}) run(name);
         if (failures != 0) throw new AssertionError(failures + " loop tests failed");
-        System.out.println("25 loop tests passed");
+        System.out.println("26 loop tests passed");
     }
 }

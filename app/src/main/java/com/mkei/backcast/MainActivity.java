@@ -974,7 +974,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return getString(R.string.access_full);
     }
 
-    /** 工作文件夹：可以新添加一个，也可以直接复用添加过的。 */
+    /** 工作文件夹：主目录和附加目录同时授权，历史候选需要明确添加。 */
     private void showWorkDirSheet() {
         LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
         View panel = findViewById(R.id.sheet_panel);
@@ -993,6 +993,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         title.setPadding(0, 0, 0, dp(4));
         body.addView(title, fullWidth());
 
+        TextView scope = new TextView(this);
+        scope.setText(R.string.workspace_scope_note);
+        scope.setTextSize(13);
+        scope.setTextColor(getResources().getColor(R.color.text_secondary));
+        scope.setPadding(0, dp(4), 0, dp(12));
+        body.addView(scope, fullWidth());
+
         body.addView(sheetRow(R.string.dir_add, Icons.PLUS, null, new Runnable() {
             @Override
             public void run() {
@@ -1000,83 +1007,75 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             }
         }), fullWidth());
 
-        // 当前目录即使不在已添加列表里也要能看见，否则用户不知道自己在哪。
-        final List<String> dirs = new ArrayList<String>();
-        String current = settings.workDir();
-        dirs.add(current);
-        for (String d : settings.workDirs()) {
-            if (!dirs.contains(d)) {
-                dirs.add(d);
-            }
-        }
-
+        final List<String> dirs = settings.authorizedWorkDirs();
+        String current = dirs.get(0);
         for (int i = 0; i < dirs.size(); i++) {
             final String dir = dirs.get(i);
-            body.addView(dirRow(dir, dir.equals(current)), fullWidth());
+            body.addView(dirRow(dir, dir.equals(current), true), fullWidth());
         }
 
-        TextView note = new TextView(this);
-        note.setText(R.string.dir_longpress_hint);
-        note.setTextSize(12);
-        note.setTextColor(getResources().getColor(R.color.text_secondary));
-        note.setPadding(0, dp(14), 0, 0);
-        body.addView(note, fullWidth());
+        boolean historyHeading = false;
+        for (String candidate : settings.workDirs()) {
+            if (dirs.contains(candidate)) continue;
+            if (!historyHeading) {
+                TextView heading = new TextView(this);
+                heading.setText(R.string.workspace_candidates);
+                heading.setTextSize(12);
+                heading.setTextColor(getResources().getColor(R.color.text_secondary));
+                heading.setPadding(0, dp(20), 0, dp(8));
+                body.addView(heading, fullWidth());
+                historyHeading = true;
+            }
+            body.addView(dirRow(candidate, false, false), fullWidth());
+        }
 
         showSheet();
     }
 
-    /** 已添加的目录行：点一下切过去，长按移除。 */
-    private View dirRow(final String dir, boolean current) {
+    /** All authorized roots remain active; the primary only selects the relative-path base. */
+    private View dirRow(final String dir, boolean current, final boolean authorized) {
         LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(52));
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(10), 0, dp(10));
 
         TextView label = new TextView(this);
-        label.setText(dir);
+        label.setText((authorized ? getString(current ? R.string.workspace_primary : R.string.workspace_additional) + "\n" : "") + dir);
         label.setTextSize(15);
         label.setTextColor(getResources().getColor(
                 current ? R.color.accent : R.color.text_primary));
-        label.setGravity(Gravity.CENTER_VERTICAL);
-        label.setMinHeight(dp(52));
-        label.setMaxLines(1);
-        label.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        row.addView(label, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        if (current) {
-            TextView mark = new TextView(this);
-            mark.setText(R.string.dir_current);
-            mark.setTextSize(12);
-            mark.setTextColor(getResources().getColor(R.color.accent));
-            mark.setGravity(Gravity.CENTER_VERTICAL);
-            row.addView(mark, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
-
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                settings.addWorkDir(dir);
+        row.addView(label, fullWidth());
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        if (!current) actions.addView(workspaceAction(authorized ? R.string.workspace_set_primary : R.string.workspace_add_authorized, new Runnable() {
+            @Override public void run() {
+                if (authorized) settings.setPrimaryWorkDir(dir);
+                else settings.addAuthorizedWorkDir(dir);
                 applyWorkDir();
             }
-        });
-        row.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                settings.removeWorkDir(dir);
+        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (authorized) actions.addView(workspaceAction(R.string.workspace_remove, new Runnable() {
+            @Override public void run() {
+                if (!settings.removeAuthorizedWorkDir(dir)) { toast(getString(R.string.workspace_keep_one)); return; }
                 applyWorkDir();
-                return true;
             }
-        });
+        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(actions, fullWidth());
         return row;
+    }
+
+    private TextView workspaceAction(int title, final Runnable action) {
+        TextView button = new TextView(this);
+        button.setText(title); button.setTextSize(13); button.setTextColor(getResources().getColor(R.color.accent));
+        button.setGravity(Gravity.CENTER); button.setMinHeight(dp(48));
+        button.setBackgroundResource(android.R.drawable.list_selector_background);
+        button.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { action.run(); } });
+        return button;
     }
 
     /** 手输或粘贴一个路径加进来。 */
     private void askWorkDir() {
         final EditText input = new EditText(this);
-        input.setText(settings.workDir());
+        input.setHint(Settings.DEFAULT_WORK_DIR + "/项目");
         input.setSingleLine(true);
         input.setTextSize(15);
         input.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_URI);
@@ -1085,16 +1084,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         new AlertDialog.Builder(this)
                 .setTitle(R.string.dir_add)
                 .setView(input)
-                .setPositiveButton(R.string.dir_use,
+                .setPositiveButton(R.string.workspace_add_authorized,
                         new android.content.DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(android.content.DialogInterface d, int w) {
-                                String dir = input.getText().toString().trim();
-                                if (dir.length() == 0) {
-                                    toast(getString(R.string.dir_empty));
+                                String dir = input.getText().toString();
+                                if (!Settings.validWorkDir(dir)) {
+                                    toast(getString(R.string.workspace_invalid_path));
                                     return;
                                 }
-                                settings.addWorkDir(dir);
+                                settings.addAuthorizedWorkDir(dir);
                                 applyWorkDir();
                             }
                         })
@@ -1916,6 +1915,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         // 卡片上行是会话名，下行是工作目录名，两者都要一眼看到。
         if (settings != null) {
             sub = settings.workDirName();
+            int count = settings.authorizedWorkDirs().size();
+            if (count > 1) sub = getString(R.string.workspace_count, sub, count);
         }
         sessionTitle.setText(title);
         if (sessionSub != null) {

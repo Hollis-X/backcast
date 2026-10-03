@@ -34,7 +34,10 @@ public final class ToolkitTool implements Tool {
                 + "Apktool 使用内置 DEX JAR 和 Android aapt2，radare2/rabin2、GNU binutils、Objection/Python/Frida 均离线释放到 App 私有目录。"
                 + "支持 Android 8.0+ ARM/ARM64；Objection 自动启用本次调用的本地 Frida server，结束后清理子进程，跨应用操作需要 root。"
                 + "Objection 用 ['-n','包名','run','android hooking list classes'] 这样的单次命令；交互 start/explore 和桌面 patch/sign 工作流不适用于此入口。"
-                + "run 使用 arguments 字符串数组，不能传 shell 命令；临时输出用 temporary=true，自动随轮次清理。";
+                + "list 返回各工具参数示例。radare2 用 ['-c','ii;is;afl;q','文件']，本入口自动非交互退出；rabin2 的 -I/-i 分别查看信息/导入。"
+                + "addr2line 用 ['-f','-C','-e','文件.so','0x1234']，-e 后是文件，符号名先用 nm 找地址。"
+                + "run 使用 arguments 字符串数组，不能传 shell 命令；临时输出用 temporary=true，自动随轮次清理。"
+                + "status 仅验证版本入口，不代表目标应用的 Frida/Java hook 兼容；failure_kind/hint 提示纠正调用，不能把失败输出当成功或重复相同失败调用。";
     }
 
     @Override public JSONObject parameters() {
@@ -112,6 +115,8 @@ public final class ToolkitTool implements Tool {
                     arguments.add((String) value);
                 }
                 if ("objection".equals(id)) checkObjectionArguments(arguments);
+                arguments = ToolPaths.prepareProgramArguments(id, arguments);
+                if (workDir != null) ToolPaths.checkProgram(workDir, id, arguments, temporary, args.optBoolean("temporary", true));
                 checkEpoch(mine);
                 String result;
                 ToolchainStore.Use use = store.beginUse(new ToolchainInstaller.Cancellation() {
@@ -127,7 +132,9 @@ public final class ToolkitTool implements Tool {
                     result = shell.runProgram(launcher, arguments, args.optBoolean("temporary", true), args.optInt("timeout_sec", 60), shellMine);
                 } } finally { use.close(); }
                 checkEpoch(mine);
-                return new JSONObject().put("tool", id).put("output", result).put("success", succeeded(result)).toString();
+                JSONObject response = new JSONObject().put("tool", id).put("output", result).put("success", succeeded(result));
+                if (!succeeded(result)) describeFailure(id, result, response);
+                return response.toString();
             }
             throw new IllegalArgumentException("未知 toolkit action：" + action);
         } catch (InterruptedException cancellation) {
@@ -182,7 +189,8 @@ public final class ToolkitTool implements Tool {
             public void check() throws Exception { checkEpoch(mine); }
         });
         JSONObject result = ToolCatalog.get(id).json(), configured = store.configuration(id);
-        result.put("configuration", configured).put("ready", false).put("bundled", store.bundled(id));
+        result.put("configuration", configured).put("ready", false).put("bundled", store.bundled(id))
+                .put("probe_type", "version").put("probe_scope", "只验证程序版本入口；目标文件分析和动态附加能力以实际 run 结果为准。");
         if (configured.optString("path", "").length() == 0) return result.put("state", store.hasBundledAssets() ? "unsupported" : "unconfigured");
         if (launcher == null) return result.put("state", "needs_runtime");
         List<String> version = new ArrayList<String>(); version.add("--version");
@@ -192,7 +200,34 @@ public final class ToolkitTool implements Tool {
         String output = shell.runProgram(launcher, version, true, 8, shellMine);
         checkEpoch(mine);
         boolean ready = validVersion(id, output);
-        return result.put("state", ready ? "ready" : "unavailable").put("ready", ready).put("probe_output", output);
+        result.put("state", ready ? "ready" : "unavailable").put("ready", ready).put("probe_output", output);
+        if (!ready) describeFailure(id, output, result);
+        return result;
+    }
+
+    private static void describeFailure(String id, String output, JSONObject result) throws Exception {
+        if ("objection".equals(id) && output.contains("Unable to find target application")) {
+            result.put("failure_kind", "target_not_running").put("hint", "目标应用没有可附加的运行进程。先确认包名和运行状态，"
+                    + "再指定实际 PID 或运行中的包名；版本探测成功不代表目标正在运行。");
+        } else if ("objection".equals(id) && output.contains("TimedOutError")) {
+            result.put("failure_kind", "attach_timeout").put("hint", "Frida 附加目标进程超时。确认目标 PID、root 授权和设备 ART 兼容性；"
+                    + "不要只增加超时或重复同一附加请求，先检查目标及系统崩溃日志。");
+        } else if ("objection".equals(id) && (output.contains("tryGetEnvJvmti") || output.contains("access violation"))) {
+            result.put("failure_kind", "frida_java_bridge_incompatible").put("hint", "Frida Java 桥接在该设备/目标的 ART 初始化时失败。"
+                    + "本次 Java hook 未完成；停止重复相同 hook，保留此错误用于兼容性诊断。版本探活不能验证 Java hook。");
+        } else if (output.startsWith("命令超时")) {
+            result.put("failure_kind", "timeout").put("hint", "命令已超时并停止；先缩小分析范围，不要把输出片段当作完整结果。");
+        } else if (output.startsWith("错误：")) {
+            result.put("failure_kind", "invalid_arguments").put("hint", output.substring(3));
+        } else if (output.contains("No such file") || output.contains("Cannot open")) {
+            result.put("failure_kind", "input_missing").put("hint", "先确认输入路径存在并仍属于本轮临时目录；"
+                    + "上一轮临时材料会清理，新的轮次须重新生成。按 list 的示例检查输入/输出顺序。");
+        } else if ("ar".equals(id) && output.contains("file format not recognized")) {
+            result.put("failure_kind", "not_an_archive").put("hint", "ar t 只读取 .a 等归档，不能把单个 .so 当作归档。"
+                    + "查看 .so 用 readelf/rabin2；创建归档用 ['rcs','临时输出.a','输入.o']。");
+        } else {
+            result.put("failure_kind", "program_failed").put("hint", "程序没有成功完成。按原始 output 和 list 参数示例纠正输入，不能仅凭已安装或版本成功判断本次成功。");
+        }
     }
 
     private static void requireTool(String id, String action) {

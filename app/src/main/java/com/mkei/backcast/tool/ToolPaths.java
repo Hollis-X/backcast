@@ -92,7 +92,9 @@ final class ToolPaths {
                 throw new IllegalArgumentException(failure.getMessage(), failure);
             }
         }
-        File file = resolve(workDir, path);
+        File file;
+        try { file = temporary == null ? resolve(workDir, path) : temporary.projectRoots(workDir).resolve(path); }
+        catch (IOException failure) { throw new IllegalArgumentException("无法确认路径：" + path, failure); }
         try {
             if (temporary != null && temporary.isPrivateStorage(file)) {
                 throw new IllegalArgumentException("App 私有临时存储只允许访问本轮登记目录，不能访问其他会话或登记文件。");
@@ -113,6 +115,16 @@ final class ToolPaths {
 
     static boolean organizedTest(String workDir, File file) throws Exception {
         File root = workDir == null ? null : new File(workDir).getCanonicalFile();
+        return organizedTest(root, file);
+    }
+
+    static boolean organizedTest(String workDir, File file, TemporaryWorkspace temporary) throws Exception {
+        File root = temporary == null ? workDir == null ? null : new File(workDir).getCanonicalFile()
+                : temporary.projectRoots(workDir).rootFor(file);
+        return organizedTest(root, file);
+    }
+
+    private static boolean organizedTest(File root, File file) {
         File directory = file.getParentFile();
         while (directory != null && !directory.equals(root)) {
             String name = directory.getName().toLowerCase(java.util.Locale.US);
@@ -123,6 +135,11 @@ final class ToolPaths {
             directory = directory.getParentFile();
         }
         return false;
+    }
+
+    static boolean projectRoot(String workDir, File file, TemporaryWorkspace temporary) throws Exception {
+        return temporary == null ? workDir != null && file.equals(new File(workDir).getCanonicalFile())
+                : temporary.projectRoots(workDir).isRoot(file);
     }
 
     /**
@@ -153,6 +170,39 @@ final class ToolPaths {
         }
     }
 
+    static List<String> prepareProgramArguments(String id, List<String> arguments) {
+        List<String> prepared = new ArrayList<String>(arguments);
+        if (!"radare2".equals(id) || arguments.size() == 1 && ("-v".equals(arguments.get(0))
+                || "--version".equals(arguments.get(0)) || "-h".equals(arguments.get(0)) || "--help".equals(arguments.get(0)))) return prepared;
+        int lastCommand = -1;
+        boolean attached = false;
+        for (int i = 0; i < prepared.size(); i++) {
+            String arg = prepared.get(i);
+            if (arg == null) continue;
+            if ("--".equals(arg)) break;
+            if ("-c".equals(arg)) {
+                if (++i < prepared.size()) {
+                    lastCommand = i; attached = false;
+                }
+            } else if (arg.startsWith("-c") && arg.length() > 2) {
+                lastCommand = i; attached = true;
+            }
+        }
+        // -q alone still waits for input when no command/script is provided.
+        // Provide an explicit read command and exit; each toolkit call is finite.
+        if (lastCommand < 0) { prepared.add(0, "i;q"); prepared.add(0, "-c"); }
+        else {
+            String arg = prepared.get(lastCommand);
+            if (arg != null) {
+                String command = attached ? arg.substring(2) : arg;
+                String[] parts = command.split(";", -1);
+                if (!"q".equals(parts[parts.length - 1].trim())) prepared.set(lastCommand, arg + ";q");
+            }
+        }
+        if (prepared.isEmpty() || !"-q".equals(prepared.get(0))) prepared.add(0, "-q");
+        return prepared;
+    }
+
     static void checkProgram(String workDir, String id, List<String> arguments,
             TemporaryWorkspace temporary, boolean temporaryCommand) throws Exception {
         ToolCatalog.get(id);
@@ -167,17 +217,36 @@ final class ToolPaths {
             if ("binutils".equals(ToolCatalog.get(id).group) && value.startsWith("@")) {
                 throw new IllegalArgumentException("当前入口不接受 GNU @响应文件，请把每个参数明确列在 arguments 中。");
             }
-            if (("radare2".equals(id) || "rabin2".equals(id)) && ("-w".equals(value) || value.startsWith("-i")
-                    || value.startsWith("-I") || value.startsWith("-p") || value.startsWith("-P")
-                    || value.startsWith("-e"))) {
-                throw new IllegalArgumentException("当前入口只允许二进制读取与分析，不能原地写入、加载命令脚本或保存项目。");
+            if ("rabin2".equals(id) && value.startsWith("-") && !"--".equals(value)
+                    && !"--version".equals(value) && !"--help".equals(value)) {
+                // rabin2 -i/-I/-e are imports/info/entrypoints, unlike r2 script/config options.
+                if (!value.matches("-[AcdeEghHiIjJlMqrRsStuVvwzZ]+") && !"-P".equals(value)) {
+                    throw new IllegalArgumentException("rabin2 读取选项示例：['-I','文件']、['-i','文件']、['-s','文件']。"
+                            + "当前入口不开放 -x/-o/-O/-C/-X 写入、下载和额外脚本操作。");
+                }
+            }
+            if ("radare2".equals(id) && value.startsWith("-") && !"--".equals(value)) {
+                if ("-e".equals(value) || value.startsWith("-e") && value.length() > 2) {
+                    String setting = value.length() > 2 ? value.substring(2) : ++i < arguments.size() ? arguments.get(i) : "";
+                    if (!(setting.matches("(?:scr\\.interactive|scr\\.color|bin\\.relocs\\.apply|bin\\.cache)=(?:true|false|0|1)")
+                            || setting.matches("asm\\.syntax=(?:intel|att)"))) {
+                        throw new IllegalArgumentException("radare2 -e 只接受 scr.interactive/scr.color/bin.relocs.apply/bin.cache 布尔配置或 asm.syntax=intel/att；"
+                                + "分析命令请用 ['-c','ii;is;pdf @ sym.main;q','文件']，文件路径不能放到 -e 后。");
+                    }
+                    continue;
+                }
+                if (!value.startsWith("-c") && !"--version".equals(value) && !"--help".equals(value)
+                        && !value.matches("-[qQAvhnN2]+")) {
+                    throw new IllegalArgumentException("radare2 当前只开放非交互读取/分析；请用 ['-c','ii;is;afl;q','文件']。"
+                            + "不能原地写入、调试进程、加载命令脚本或保存项目。");
+                }
             }
             if ("radare2".equals(id) && value.startsWith("-c")) {
                 String program = value.length() > 2 ? value.substring(2) : ++i < arguments.size() ? arguments.get(i) : "";
-                if (program.length() == 0 || !program.matches("[A-Za-z0-9 _.,:;?@/+=*\\[\\]()-]+")) throw new IllegalArgumentException("radare2 命令包含不允许的执行或写入语法。");
+                if (program.length() == 0 || !program.matches("[A-Za-z0-9 _.,:;?@/+=*~\\[\\]()-]+")) throw new IllegalArgumentException("radare2 命令包含不允许的执行或写入语法。");
                 for (String part : program.split(";")) {
                     String text = part.trim();
-                    String operation = text.split("\\s+")[0];
+                    String operation = text.split("\\s+")[0].split("~", 2)[0];
                     if (text.length() > 0 && !(operation.matches("a[a-zA-Z?]*") || operation.matches("i[a-zA-Z?]*")
                             || operation.matches("p[a-zA-Z?]*") || operation.equals("s") || operation.equals("q")
                             || operation.equals("?") || operation.equals("f") || operation.equals("fj"))) {
@@ -193,13 +262,15 @@ final class ToolPaths {
             }
         }
         boolean probe = arguments.size() == 1 && ("--version".equals(arguments.get(0)) || "--help".equals(arguments.get(0)));
+        if ("addr2line".equals(id) && !probe) checkAddr2line(workDir, cwd, arguments, temporary);
         if (!probe && ("objcopy".equals(id) || "ar".equals(id) || "strip".equals(id))) {
-            if (!temporaryCommand) throw new IllegalArgumentException("二进制修改须在 temporary=true 的本轮临时目录中完成，再用 toolkit export 交付。");
+            boolean readArchive = "ar".equals(id) && !arguments.isEmpty() && arguments.get(0).matches("-?[tp][a-z]*");
+            if (!temporaryCommand && !readArchive) throw new IllegalArgumentException("二进制修改须在 temporary=true 的本轮临时目录中完成，再用 toolkit export 交付。");
             String output = null;
             if ("objcopy".equals(id)) {
                 List<String> operands = new ArrayList<String>();
                 boolean options = true;
-                String flags = "|--strip-all|--strip-debug|--strip-unneeded|--only-keep-debug|--weaken|--localize-hidden|--preserve-dates|--verbose|-S|-g|-p|-v|";
+                String flags = "|--strip-all|--strip-debug|--strip-unneeded|--only-keep-debug|--weaken|--localize-hidden|--discard-all|--discard-locals|--preserve-dates|--verbose|-S|-g|-x|-X|-p|-v|";
                 String values = "|--input-target|--output-target|--target|--binary-architecture|--only-section|--remove-section|--strip-symbol|--keep-symbol|--localize-symbol|--weaken-symbol|-I|-O|-F|-B|-j|-R|-N|-K|-L|-W|";
                 for (int i = 0; i < arguments.size(); i++) {
                     String arg = arguments.get(i);
@@ -230,12 +301,12 @@ final class ToolPaths {
                         || arguments.get(0).indexOf('i') >= 0) {
                     throw new IllegalArgumentException("ar 请先给完整操作标志，再给临时归档路径；不支持会改变归档参数位置的 a/b/i 或前置选项。");
                 }
-                output = arguments.get(1);
+                output = readArchive ? null : arguments.get(1);
                 for (int i = 2; i < arguments.size(); i++) {
                     if (arguments.get(i).startsWith("-")) throw new IllegalArgumentException("ar 成员路径不能夹带额外选项，请把修饰符合并到第一项操作标志。");
                 }
             }
-            temporaryOutput(temporary.directory().getPath(), new ShellLocation(cwd), output);
+            if (output != null) temporaryOutput(temporary.directory().getPath(), new ShellLocation(cwd), output);
         }
         if (("objdump".equals(id) || "objcopy".equals(id)) && !probe) {
             for (String arg : arguments) {
@@ -268,6 +339,38 @@ final class ToolPaths {
                 }
             }
             if (!output) throw new IllegalArgumentException("Apktool 必须用 -o 指定本轮临时目录内的输出路径。");
+        }
+    }
+
+    private static void checkAddr2line(String workDir, String cwd, List<String> arguments, TemporaryWorkspace temporary) {
+        String executable = null;
+        boolean address = false, options = true;
+        for (int i = 0; i < arguments.size(); i++) {
+            String arg = arguments.get(i);
+            if (options && "--".equals(arg)) { options = false; continue; }
+            if (options && ("-e".equals(arg) || "--exe".equals(arg))) {
+                if (++i >= arguments.size()) throw new IllegalArgumentException("addr2line -e 缺少输入文件。示例：['-f','-C','-e','文件.so','0x1234']。");
+                executable = arguments.get(i);
+            } else if (options && (arg.startsWith("--exe=") || arg.startsWith("-e") && arg.length() > 2)) {
+                executable = arg.startsWith("--exe=") ? arg.substring(6) : arg.substring(2);
+            } else if (options && ("-j".equals(arg) || "--section".equals(arg))) {
+                if (++i >= arguments.size()) throw new IllegalArgumentException("addr2line section 选项缺少名称。");
+            } else if (!options || !arg.startsWith("-")) {
+                if (!arg.matches("(?:0[xX])?[0-9A-Fa-f]+")) throw new IllegalArgumentException("addr2line 地址应是十六进制数；"
+                        + "输入文件放在 -e 后。示例：['-f','-C','-e','文件.so','0x1234']。符号名先用 nm 查询地址。");
+                address = true;
+            }
+        }
+        if (executable == null || executable.length() == 0 || !address) {
+            throw new IllegalArgumentException("addr2line 必须明确给出 -e 输入文件和至少一个地址，不能等待标准输入。"
+                    + "示例：['-f','-C','-e','文件.so','0x1234']。");
+        }
+        File input = absolute(cwd, executable);
+        resolve(workDir, input.getPath(), temporary);
+        if (executable.matches("(?:0[xX])?[0-9A-Fa-f]+") || executable.indexOf('/') < 0
+                && executable.indexOf('.') < 0 && !input.isFile()) {
+            throw new IllegalArgumentException("addr2line 的 -e 后必须是输入文件，不能是符号名或地址；"
+                    + "示例：['-f','-C','-e','文件.so','0x1234']。");
         }
     }
 

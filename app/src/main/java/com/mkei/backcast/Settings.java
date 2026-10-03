@@ -45,6 +45,9 @@ public class Settings {
     public static final String DEFAULT_WORK_DIR = "/storage/emulated/0";
 
     private static final String KEY_WORK_DIRS = "work_dirs";
+    /** Separate from historical candidates: only these roots are simultaneously authorized. */
+    private static final String KEY_AUTHORIZED_WORK_DIRS = "authorized_work_dirs";
+    private static final Object WORKSPACE_LOCK = new Object();
 
     /**
      * 思考强度。取值直接透传给接口的 reasoning_effort 字段。
@@ -188,11 +191,11 @@ public class Settings {
 
     /** 工作目录。工具的相对路径与它拼在一起。 */
     public String workDir() {
-        String s = prefs.getString(KEY_WORK_DIR, "");
-        if (s == null || s.trim().length() == 0) {
-            return DEFAULT_WORK_DIR;
+        synchronized (WORKSPACE_LOCK) {
+            String s = prefs.getString(KEY_WORK_DIR, "");
+            if (!validWorkDir(s)) return DEFAULT_WORK_DIR;
+            return normalizeDir(s);
         }
-        return normalizeDir(s);
     }
 
     /** 工作目录的显示名：取最后一段，根目录兜底。 */
@@ -207,8 +210,17 @@ public class Settings {
     }
 
     public void setWorkDir(String dir) {
-        prefs.edit().putString(KEY_WORK_DIR,
-                dir == null ? "" : dir.trim()).apply();
+        String input = dir == null ? "" : dir;
+        if (input.trim().length() == 0 && input.indexOf('\n') < 0 && input.indexOf('\r') < 0 && input.indexOf('\0') < 0)
+            input = DEFAULT_WORK_DIR;
+        String value = directoryValue(input);
+        synchronized (WORKSPACE_LOCK) {
+            List<String> directories = authorizedWorkDirs(), history = workDirs();
+            directories.remove(workDir()); directories.remove(value); directories.add(0, value);
+            if (!history.contains(value)) history.add(value);
+            prefs.edit().putString(KEY_WORK_DIR, value).putString(KEY_AUTHORIZED_WORK_DIRS, encodeDirectories(directories))
+                    .putString(KEY_WORK_DIRS, encodeDirectories(history)).apply();
+        }
     }
 
     /** 规范化目录：去掉首尾空白和结尾斜杠，避免拼路径时出现双斜杠。 */
@@ -220,60 +232,107 @@ public class Settings {
         return t;
     }
 
-    /** 已添加过的目录，按添加顺序，自动去掉重复。 */
-    public List<String> workDirs() {
-        String raw = prefs.getString(KEY_WORK_DIRS, "");
+    public static boolean validWorkDir(String dir) {
+        if (dir == null) return false;
+        String value = dir.trim();
+        return value.startsWith("/") && dir.indexOf('\n') < 0 && dir.indexOf('\r') < 0 && dir.indexOf('\0') < 0;
+    }
+
+    private static String directoryValue(String raw) {
+        if (!validWorkDir(raw)) throw new IllegalArgumentException("工作目录必须是不含换行的绝对路径。");
+        return normalizeDir(raw);
+    }
+
+    private static List<String> directoryList(String raw) {
         List<String> list = new ArrayList<String>();
-        if (raw == null || raw.length() == 0) {
-            return list;
-        }
-        for (String s : raw.split("\n")) {
-            String t = normalizeDir(s);
-            if (t.length() > 0 && !list.contains(t)) {
-                list.add(t);
-            }
+        if (raw != null) for (String item : raw.split("\n")) {
+            if (!validWorkDir(item)) continue;
+            String value = normalizeDir(item);
+            if (!list.contains(value)) list.add(value);
         }
         return list;
     }
 
-    /** 添加一个目录并立刻切过去；已存在则只切过去，不重复记录。 */
-    public void addWorkDir(String dir) {
-        String t = normalizeDir(dir);
-        if (t.length() == 0) {
-            return;
+    private static String encodeDirectories(List<String> directories) {
+        StringBuilder encoded = new StringBuilder();
+        for (String directory : directories) {
+            if (encoded.length() > 0) encoded.append('\n');
+            encoded.append(directory);
         }
-        List<String> list = workDirs();
-        if (!list.contains(t)) {
-            list.add(t);
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < list.size(); i++) {
-                if (sb.length() > 0) {
-                    sb.append('\n');
-                }
-                sb.append(list.get(i));
-            }
-            prefs.edit().putString(KEY_WORK_DIRS, sb.toString()).apply();
-        }
-        setWorkDir(t);
+        return encoded.toString();
     }
 
-    /** 从列表里移除一个目录；移除的是当前目录就退回默认目录。 */
+    /** Primary first; old work_dirs candidates do not grant additional access on migration. */
+    public List<String> authorizedWorkDirs() {
+        synchronized (WORKSPACE_LOCK) {
+            String primary = workDir();
+            String saved = prefs.getString(KEY_AUTHORIZED_WORK_DIRS, "");
+            List<String> directories = directoryList(saved);
+            directories.remove(primary); directories.add(0, primary);
+            if (saved == null || saved.length() == 0)
+                prefs.edit().putString(KEY_AUTHORIZED_WORK_DIRS, encodeDirectories(directories)).apply();
+            return directories;
+        }
+    }
+
+    /** Add simultaneous authorization while retaining the current relative-path base. */
+    public void addAuthorizedWorkDir(String dir) {
+        String value = directoryValue(dir);
+        synchronized (WORKSPACE_LOCK) {
+            List<String> directories = authorizedWorkDirs(), history = workDirs();
+            if (!directories.contains(value)) directories.add(value);
+            if (!history.contains(value)) history.add(value);
+            prefs.edit().putString(KEY_AUTHORIZED_WORK_DIRS, encodeDirectories(directories))
+                    .putString(KEY_WORK_DIRS, encodeDirectories(history)).apply();
+        }
+    }
+
+    /** An explicit primary selection also authorizes that directory. */
+    public void setPrimaryWorkDir(String dir) {
+        String value = directoryValue(dir);
+        synchronized (WORKSPACE_LOCK) {
+            List<String> directories = authorizedWorkDirs(), history = workDirs();
+            directories.remove(value); directories.add(0, value);
+            if (!history.contains(value)) history.add(value);
+            prefs.edit().putString(KEY_WORK_DIR, value).putString(KEY_AUTHORIZED_WORK_DIRS, encodeDirectories(directories))
+                    .putString(KEY_WORK_DIRS, encodeDirectories(history)).apply();
+        }
+    }
+
+    /** Retain at least one root; removing the primary selects the next already-authorized root. */
+    public boolean removeAuthorizedWorkDir(String dir) {
+        String value = directoryValue(dir);
+        synchronized (WORKSPACE_LOCK) {
+            List<String> directories = authorizedWorkDirs();
+            if (!directories.contains(value)) return true;
+            if (directories.size() == 1) return false;
+            directories.remove(value);
+            String primary = value.equals(workDir()) ? directories.get(0) : workDir();
+            prefs.edit().putString(KEY_WORK_DIR, primary).putString(KEY_AUTHORIZED_WORK_DIRS, encodeDirectories(directories)).apply();
+            return true;
+        }
+    }
+
+    /** 已添加过的目录，按添加顺序，自动去掉重复。 */
+    public List<String> workDirs() {
+        synchronized (WORKSPACE_LOCK) { return directoryList(prefs.getString(KEY_WORK_DIRS, "")); }
+    }
+
+    /** 添加一个目录并立刻切过去；已存在则只切过去，不重复记录。 */
+    public void addWorkDir(String dir) {
+        if (dir == null || dir.trim().length() == 0) return;
+        setPrimaryWorkDir(dir);
+    }
+
+    /** Legacy candidate removal also revokes authorization, retaining at least one selected root. */
     public void removeWorkDir(String dir) {
+        if (!validWorkDir(dir)) return;
         String t = normalizeDir(dir);
-        List<String> list = workDirs();
-        if (!list.remove(t)) {
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < list.size(); i++) {
-            if (sb.length() > 0) {
-                sb.append('\n');
-            }
-            sb.append(list.get(i));
-        }
-        prefs.edit().putString(KEY_WORK_DIRS, sb.toString()).apply();
-        if (t.equals(workDir())) {
-            setWorkDir(DEFAULT_WORK_DIR);
+        synchronized (WORKSPACE_LOCK) {
+            if (!removeAuthorizedWorkDir(t)) return;
+            List<String> list = workDirs();
+            if (!list.remove(t)) return;
+            prefs.edit().putString(KEY_WORK_DIRS, encodeDirectories(list)).apply();
         }
     }
 
@@ -334,21 +393,24 @@ public class Settings {
     /** Unsaved settings preview shares the same mode rules as a real request. */
     public String environmentContext(boolean root, String mode, int concurrency) {
         StringBuilder sb = new StringBuilder();
+        List<String> directories = authorizedWorkDirs();
         sb.append("- 设备：Android ").append(android.os.Build.VERSION.RELEASE).append('\n');
-        sb.append("- 工作目录：").append(workDir()).append('\n');
+        sb.append("- 主工作目录（相对路径基准）：").append(directories.get(0)).append('\n');
+        sb.append("- 同时授权的项目目录（绝对路径可跨目录访问）：\n");
+        for (String directory : directories) sb.append("  ").append(directory).append('\n');
         sb.append("- 临时材料：App 私有路径 ").append(temporaryStorage.getPath())
                 .append("，按会话和轮次登记隔离；用 temporary directory 获取本轮目录。\n");
         sb.append("- sdcard 路径：").append(DEFAULT_WORK_DIR).append('\n');
         sb.append("- 命令执行：").append(root
                 ? "尝试 root，拿不到时退回普通权限" : "普通权限").append('\n');
         sb.append("- Shell 环境：Android 的 sh 和设备自带工具，不假定 GNU、Bash 或桌面 Linux 功能可用。"
-                + "先用 command -v 查询所需命令，不要到工作目录外列系统目录来探测。"
+                + "先用 command -v 查询所需命令，不要到授权项目目录外列系统目录来探测。"
                 + "使用 POSIX 兼容语法，不用 <(...) 或 >(...) 进程替换。"
                 + "grep 多选匹配使用 -E 的 | 或多个 -e，不假定基本正则支持 \\|；"
                 + "awk 不假定有 strtonum 等 GNU 扩展，close 等内置函数名不能用作变量。"
                 + "grep 返回 1 可能只是没有匹配，先结合输出判断，不把它当作执行器故障。\n");
         sb.append("- 工具：read 读文件；edit 按原文替换；write 整文件覆盖；shell 执行命令。"
-                + "项目文件、正式测试和交付物留在工作目录内。相对项目路径按工作目录解析。"
+                + "项目文件、正式测试和交付物留在上面同时授权的项目目录内。相对项目路径始终按主工作目录解析。"
                 + "临时材料只放 App 私有的本轮专用临时目录，不在项目或设备根目录创建临时沙箱。"
                 + "read/edit/shell 只额外允许本轮登记临时目录的绝对路径，不开放其它 App 私有数据或其他会话目录。"
                 + "读文件不要用 cat，改项目文件不要用重定向。"

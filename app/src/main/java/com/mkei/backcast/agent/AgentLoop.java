@@ -184,6 +184,9 @@ public class AgentLoop {
     /** 界面这一轮的记号，只在跑循环的那条线程上读。 */
     private final ThreadLocal<Integer> callToken = new ThreadLocal<Integer>();
     private final ThreadLocal<ToolRegistry> turnTools = new ThreadLocal<ToolRegistry>();
+    /** UI cancellation and usage reads must refer to the same registry as the owning worker. */
+    private ToolRegistry activeTurnTools;
+    private int activeTurnToolsToken;
     private volatile Tool runningTool;
     private volatile UsageObserver usageObserver;
     private volatile SubAgentManager subAgents;
@@ -291,7 +294,7 @@ public class AgentLoop {
      * 在锁内取快照：界面线程读的时候循环线程可能正在往里追加消息。
      */
     public int contextUsed() {
-        ToolRegistry reg = registry;
+        ToolRegistry reg = currentTools();
         JSONArray schema = reg == null || reg.isEmpty() ? null : reg.toSchema();
         synchronized (lock) {
             return contextUsedLocked(schema);
@@ -851,6 +854,12 @@ public class AgentLoop {
             ToolRegistry tools = turnTools.get();
             String cleanup = tools == null ? null : tools.cleanupTemporary(true);
             turnTools.remove();
+            synchronized (lock) {
+                if (activeTurnToolsToken == token) {
+                    activeTurnTools = null;
+                    activeTurnToolsToken = 0;
+                }
+            }
             if (cleanup != null && !stale(token, gen)) {
                 listener.onError(gen, "临时材料清理失败：" + cleanup);
             }
@@ -892,8 +901,7 @@ public class AgentLoop {
                     return "错误：当前没有进行中的目标。";
                 }
             }
-            ToolRegistry tools = turnTools.get();
-            if (tools == null) tools = registry;
+            ToolRegistry tools = currentTools();
             String cleanup = tools == null ? null : tools.cleanupTemporary(false);
             if (cleanup != null) {
                 return "错误：临时材料尚未清理，目标不能结束：" + cleanup;
@@ -1068,7 +1076,7 @@ public class AgentLoop {
         return compactRatio;
     }
 
-    /** 改了接口或工具后换掉依赖，不新建循环，避免把进行中的回调代际打乱。 */
+    /** 更新后续请求的客户端和下一轮工具；当前轮的工具快照保持不变。 */
     public void retarget(LlmClient client, ToolRegistry registry) {
         synchronized (lock) {
             this.client = client;
@@ -1157,7 +1165,7 @@ public class AgentLoop {
             runToken++;
             resumeAfter = false;
             current = requestClient;
-            tools = registry;
+            tools = currentTools();
             active = runningTool;
         }
         if (current != null) {
@@ -1234,6 +1242,7 @@ public class AgentLoop {
                 cancelled = false;
                 refused = false;
                 busy = true;
+                pinTurnToolsLocked(token);
                 goalAccounting = goalActive() || budgetPromptDue();
                 resumeAfter = false;
                 armTurnClock();
@@ -1294,6 +1303,7 @@ public class AgentLoop {
                     cancelled = false;
                     refused = false;
                     busy = true;
+                    pinTurnToolsLocked(token);
                     goalAccounting = goalActive() || budgetPromptDue();
                     resumeAfter = false;
                     if (Goal.ACTIVE.equals(goalStatus) && goalSegmentStart == 0
@@ -1333,9 +1343,24 @@ public class AgentLoop {
     }
 
     private void beginTemporaryTurn() {
-        ToolRegistry tools = registry;
-        turnTools.set(tools);
+        ToolRegistry tools = turnTools.get();
         if (tools != null) tools.beginTurn();
+    }
+
+    /** Called while claiming a turn under lock, before retarget can replace its registry. */
+    private void pinTurnToolsLocked(int token) {
+        turnTools.set(registry);
+        activeTurnTools = registry;
+        activeTurnToolsToken = token;
+    }
+
+    /** Worker calls use their own snapshot; UI calls use the currently owning turn. */
+    private ToolRegistry currentTools() {
+        ToolRegistry tools = turnTools.get();
+        if (tools != null) return tools;
+        synchronized (lock) {
+            return busy && activeTurnToolsToken == busyToken ? activeTurnTools : registry;
+        }
     }
 
     /** 还没答完。已经答完或正在跑的，回到界面时不要再开一轮。 */
@@ -2440,7 +2465,8 @@ public class AgentLoop {
             }
         }
 
-        Tool tool = registry.get(name);
+        ToolRegistry tools = currentTools();
+        Tool tool = tools == null ? null : tools.get(name);
         if (tool == null) {
             return "错误：没有名为 " + name + " 的工具。可用工具：" + availableNames();
         }
@@ -2467,7 +2493,9 @@ public class AgentLoop {
 
     private String availableNames() {
         StringBuilder sb = new StringBuilder();
-        for (Tool t : registry.all()) {
+        ToolRegistry tools = currentTools();
+        if (tools == null) return "（无）";
+        for (Tool t : tools.all()) {
             if (sb.length() > 0) {
                 sb.append(", ");
             }
@@ -2477,8 +2505,9 @@ public class AgentLoop {
     }
 
     private JSONArray requestSchema() {
-        if (registry.isEmpty()) return null;
-        JSONArray all = registry.toSchema();
+        ToolRegistry tools = currentTools();
+        if (tools == null || tools.isEmpty()) return null;
+        JSONArray all = tools.toSchema();
         if (delegationAllowed()) return all;
         JSONArray allowed = new JSONArray();
         for (int i = 0; i < all.length(); i++) {

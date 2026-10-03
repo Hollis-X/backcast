@@ -15,9 +15,13 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.tool.EmbeddedToolchain;
 import com.mkei.backcast.tool.ToolCatalog;
+import com.mkei.backcast.tool.ToolBatchProbe;
+import com.mkei.backcast.tool.ToolchainInstaller;
 import com.mkei.backcast.ui.Icons;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONArray;
@@ -26,6 +30,8 @@ import org.json.JSONObject;
 /** Offline package management and one tool's detail are separate navigation pages. */
 public final class ToolConfigActivity extends AppCompatActivity {
     public static final String EXTRA_TOOL_ID = "tool_id";
+    public static final String EXTRA_PROBE_RESULT = "probe_result";
+    public static final String EXTRA_PROBE_CONTEXT = "probe_context";
     private final ExecutorService toolkitReader = Executors.newSingleThreadExecutor();
     private final ExecutorService toolkitCancellation = Executors.newSingleThreadExecutor();
     private final List<ToolkitOperation> toolkitOperations = new ArrayList<ToolkitOperation>();
@@ -40,6 +46,14 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private View installProgressContainer;
     private ProgressBar installProgress;
     private boolean progressTerminal;
+    private boolean batchTerminal;
+    private String probeContext = "";
+    private View batchProgressContainer;
+    private ProgressBar batchProgress;
+    private TextView batchProgressText;
+    private Button batchProbe;
+    private final Map<String, JSONObject> probeResults = new LinkedHashMap<String, JSONObject>();
+    private final Map<String, TextView> toolRows = new LinkedHashMap<String, TextView>();
     private LinearLayout toolList;
     private Button install, remove, probe, cancel;
     private JSONObject selected = new JSONObject();
@@ -50,7 +64,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
         volatile boolean cancelled;
         volatile java.util.concurrent.Future<?> future;
         RunHub.ToolkitSession session;
-        boolean installing, progressQueued;
+        boolean installing, probingAll, progressQueued;
         EmbeddedToolchain.Progress pendingProgress;
     }
 
@@ -83,12 +97,17 @@ public final class ToolConfigActivity extends AppCompatActivity {
         remove = (Button) findViewById(R.id.tool_package_remove);
         probe = (Button) findViewById(R.id.tool_detail_probe);
         cancel = (Button) findViewById(R.id.tool_operation_cancel);
+        batchProbe = (Button) findViewById(R.id.tool_batch_probe);
+        batchProgressContainer = findViewById(R.id.tool_batch_progress_container);
+        batchProgress = (ProgressBar) findViewById(R.id.tool_batch_progress);
+        batchProgressText = (TextView) findViewById(R.id.tool_batch_progress_text);
         Button save = (Button) findViewById(R.id.tool_save_permissions);
         Icons.left(save, Icons.SHIELD, 0xFF0D0D0D, dp(18));
         Icons.left(install, Icons.FOLDER, 0xFF0D0D0D, dp(18));
         Icons.left(remove, Icons.STOP, 0xFF0D0D0D, dp(18));
         Icons.left(probe, Icons.PLAY, 0xFF0D0D0D, dp(18));
         Icons.left(cancel, Icons.STOP, 0xFF0D0D0D, dp(18));
+        Icons.left(batchProbe, Icons.PLAY, 0xFF0D0D0D, dp(18));
         useRoot.setChecked(savedInstanceState == null ? settings.useRoot()
                 : savedInstanceState.getBoolean("draft_root", settings.useRoot()));
         permission.check(permissionId(savedInstanceState == null ? settings.accessLevel()
@@ -99,9 +118,15 @@ public final class ToolConfigActivity extends AppCompatActivity {
         });
         save.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
+                boolean changed = settings.useRoot() != useRoot.isChecked() || !settings.accessLevel().equals(permissionValue());
+                if (changed) {
+                    if (active != null) cancelActiveToolkit();
+                    probeResults.clear(); probeContext = "";
+                }
                 settings.setUseRoot(useRoot.isChecked());
                 settings.setAccessLevel(permissionValue());
                 RunHub.get(ToolConfigActivity.this).retargetTools();
+                if (changed) loadTools(false);
                 Toast.makeText(ToolConfigActivity.this, R.string.toolkit_permission_saved, Toast.LENGTH_SHORT).show();
             }
         });
@@ -122,7 +147,12 @@ public final class ToolConfigActivity extends AppCompatActivity {
         cancel.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { cancelActiveToolkit(); }
         });
+        batchProbe.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { probeAllTools(); }
+        });
+        restoreProbeResults(savedInstanceState);
         if (toolId.length() > 0) {
+            batchProbe.setVisibility(View.GONE);
             findViewById(R.id.tool_config_controls).setVisibility(View.GONE);
             toolList.setVisibility(View.GONE);
             findViewById(R.id.tool_detail_content).setVisibility(View.VISIBLE);
@@ -130,19 +160,25 @@ public final class ToolConfigActivity extends AppCompatActivity {
         }
     }
 
-    @Override protected void onResume() { super.onResume(); if (active == null) loadTools(progressTerminal); }
+    @Override protected void onResume() { super.onResume(); if (active == null) loadTools(progressTerminal || batchTerminal); }
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("draft_root", useRoot.isChecked());
         state.putString("draft_permission", permissionValue());
+        JSONArray results = new JSONArray();
+        for (JSONObject result : probeResults.values()) results.put(result);
+        state.putString("probe_results", results.toString());
+        state.putString("probe_context", probeContext);
         super.onSaveInstanceState(state);
     }
 
     @Override protected void onStop() {
         boolean installing = active != null && active.installing;
+        boolean probingAll = active != null && active.probingAll;
         for (ToolkitOperation operation : pendingOperations()) cancelToolkitOperation(operation);
         active = null;
         if (installing) finishInstallProgress(null);
+        if (probingAll) finishBatchProbe(null);
         super.onStop();
     }
 
@@ -174,6 +210,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
     }
 
     private void manage(String action, int status) {
+        probeResults.clear(); probeContext = "";
         begin(getString(status));
         if ("package_install".equals(action)) beginInstallProgress();
         active = requestToolkit(toolkitArguments(action, ""), new ToolkitResult() {
@@ -187,14 +224,18 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private void begin(String text) {
         if (active != null) cancelToolkitOperation(active);
         progressTerminal = false;
+        batchTerminal = false;
         installProgressContainer.setVisibility(View.GONE);
+        batchProgressContainer.setVisibility(View.GONE);
         operationStatus.setText(text); operationStatus.setVisibility(View.VISIBLE); setBusy(true);
     }
 
     private void finishOperation(JSONObject result) {
         boolean installing = active != null && active.installing;
+        boolean probingAll = active != null && active.probingAll;
         active = null; setBusy(false);
         if (installing) { finishInstallProgress(result); return; }
+        if (probingAll) { finishBatchProbe(result); return; }
         String error = result.optString("error");
         operationStatus.setText(error.length() > 0 ? error : toolkitState(result.optString("state")));
         operationStatus.setVisibility(error.length() > 0 || "cancelled".equals(result.optString("state")) ? View.VISIBLE : View.GONE);
@@ -267,19 +308,127 @@ public final class ToolConfigActivity extends AppCompatActivity {
         operationStatus.setVisibility(View.VISIBLE);
     }
 
+    private void restoreProbeResults(Bundle state) {
+        try {
+            String saved = state == null ? "" : state.getString("probe_results", "");
+            probeContext = state == null ? "" : state.getString("probe_context", "");
+            JSONArray results = saved.length() == 0 ? new JSONArray() : new JSONArray(saved);
+            for (int i = 0; i < results.length(); i++) {
+                JSONObject result = results.getJSONObject(i); String id = result.optString("id");
+                ToolCatalog.get(id); probeResults.put(id, result);
+            }
+            String selectedResult = getIntent().getStringExtra(EXTRA_PROBE_RESULT);
+            if (toolId.length() > 0 && selectedResult != null && !probeResults.containsKey(toolId)) {
+                JSONObject result = new JSONObject(selectedResult);
+                if (toolId.equals(result.optString("id"))) {
+                    probeResults.put(toolId, result);
+                    probeContext = getIntent().getStringExtra(EXTRA_PROBE_CONTEXT);
+                    if (probeContext == null) probeContext = "";
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void probeAllTools() {
+        begin(getString(R.string.toolkit_batch_preparing));
+        probeResults.clear();
+        probeContext = currentProbeContext();
+        try { batchProgress.setMax(ToolCatalog.list().length()); }
+        catch (Exception failure) { active = null; setBusy(false); operationStatus.setText(String.valueOf(failure.getMessage())); return; }
+        batchProgress.setProgress(0); batchProgress.setIndeterminate(false);
+        batchProgressText.setText(getString(R.string.toolkit_batch_preparing));
+        batchProgressContainer.setVisibility(View.VISIBLE);
+        active = requestToolkit(toolkitArguments("batch_status", ""), new ToolkitResult() {
+            @Override public void apply(JSONObject result) { finishOperation(result); }
+        });
+        resetProbeRows();
+    }
+
+    private void resetProbeRows() {
+        for (Map.Entry<String, TextView> row : toolRows.entrySet()) row.getValue().setText(ToolCatalog.get(row.getKey()).name
+                + "\n" + getString(R.string.toolkit_batch_pending));
+    }
+
+    private void queueBatchProgress(final ToolkitOperation operation, final ToolBatchProbe.Progress progress) {
+        ui(new Runnable() { @Override public void run() {
+            if (!operation.cancelled && !activityDestroyed && !isFinishing() && active == operation) applyBatchProgress(progress);
+        } });
+    }
+
+    private void applyBatchProgress(ToolBatchProbe.Progress progress) {
+        batchProgress.setMax(progress.total); batchProgress.setProgress(progress.completed);
+        batchProgressText.setText(getString(R.string.toolkit_batch_progress, progress.completed, progress.total)
+                + "\n" + getString("running".equals(progress.stage) ? R.string.toolkit_batch_current : R.string.toolkit_batch_checked, progress.name));
+        TextView row = toolRows.get(progress.id);
+        if ("running".equals(progress.stage)) {
+            if (row != null) row.setText(progress.name + "\n" + getString(R.string.toolkit_batch_current, progress.name));
+            return;
+        }
+        try {
+            JSONObject result = progress.result();
+            if (result != null) {
+                probeResults.put(progress.id, result);
+                if (row != null) row.setText(progress.name + "\n" + probeRowStatus(result));
+            }
+        } catch (Exception failure) { operationStatus.setText(String.valueOf(failure.getMessage())); }
+    }
+
+    private String probeRowStatus(JSONObject result) {
+        String state = toolkitState(result.optString("state"));
+        String error = result.optString("error");
+        if (error.length() == 0 && "unavailable".equals(result.optString("state"))) error = result.optString("probe_output");
+        return error.length() == 0 ? state : state + "\n" + shortText(error.replace('\n', ' ').replace('\r', ' '), 180);
+    }
+
+    private String currentProbeContext() {
+        JSONObject manifest = bundle.optJSONObject("manifest");
+        return String.valueOf(settings.useRoot()) + "|" + settings.accessLevel() + "|"
+                + new JSONArray(settings.authorizedWorkDirs()).toString() + "|" + bundle.optString("version") + "|"
+                + (manifest == null ? "" : String.valueOf(manifest.optJSONArray("artifacts")));
+    }
+
+    private void invalidateProbeContext() {
+        if (!probeResults.isEmpty() && (!bundle.optBoolean("installed") || !currentProbeContext().equals(probeContext))) {
+            probeResults.clear(); probeContext = "";
+            detailOutput.setText(""); detailOutput.setVisibility(View.GONE);
+        }
+    }
+
+    private void finishBatchProbe(JSONObject result) {
+        batchTerminal = true;
+        boolean finished = result != null && "batch_complete".equals(result.optString("state")) && result.optString("error").length() == 0;
+        if (finished) {
+            batchProgress.setMax(result.optInt("total")); batchProgress.setProgress(result.optInt("completed"));
+            batchProgressText.setText(getString(R.string.toolkit_batch_summary, result.optInt("completed"), result.optInt("total"),
+                    result.optInt("ready_count"), result.optInt("failed_count")));
+        } else {
+            int label = result == null || "cancelled".equals(result.optString("state")) ? R.string.toolkit_cancelled : R.string.toolkit_failed;
+            batchProgressText.setText(getString(R.string.toolkit_batch_progress, batchProgress.getProgress(), batchProgress.getMax())
+                    + "\n" + getString(label));
+            for (Map.Entry<String, TextView> row : toolRows.entrySet()) if (!probeResults.containsKey(row.getKey()))
+                row.getValue().setText(ToolCatalog.get(row.getKey()).name + "\n" + getString(R.string.toolkit_batch_not_checked));
+        }
+        String error = result == null ? "" : result.optString("error");
+        operationStatus.setText(error.length() > 0 ? error : batchProgressText.getText());
+        operationStatus.setVisibility(View.VISIBLE);
+    }
+
     private void cancelActiveToolkit() {
         boolean installing = active != null && active.installing;
+        boolean probingAll = active != null && active.probingAll;
         if (active != null) cancelToolkitOperation(active);
         active = null; setBusy(false);
         operationStatus.setText(R.string.toolkit_cancelled);
         operationStatus.setVisibility(View.VISIBLE);
         if (installing) finishInstallProgress(null);
+        if (probingAll) finishBatchProbe(null);
     }
 
     private void setBusy(boolean busy) {
         install.setEnabled(!busy && !"unsupported".equals(bundle.optString("state")));
         remove.setEnabled(!busy && (bundle.optBoolean("installed") || "removed".equals(bundle.optString("state"))));
         probe.setEnabled(!busy && bundle.optBoolean("installed"));
+        batchProbe.setEnabled(!busy && bundle.optBoolean("installed"));
         cancel.setVisibility(busy ? View.VISIBLE : View.GONE);
     }
 
@@ -287,6 +436,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
         JSONObject packageInfo = result.optJSONObject("package");
         if (packageInfo != null) {
             bundle = packageInfo;
+            invalidateProbeContext();
             String state = bundle.optString("state");
             String storage = getString(R.string.toolkit_storage, result.optString("storage"), result.optString("abi"));
             long bytes = bundle.optLong("installed_bytes");
@@ -296,10 +446,12 @@ public final class ToolConfigActivity extends AppCompatActivity {
             install.setEnabled(!"unsupported".equals(state));
             remove.setEnabled(bundle.optBoolean("installed") || "removed".equals(state));
             probe.setEnabled(bundle.optBoolean("installed"));
+            batchProbe.setEnabled(bundle.optBoolean("installed"));
         }
         JSONArray tools = result.optJSONArray("tools");
         if (tools == null) return;
         toolList.removeAllViews();
+        toolRows.clear();
         for (int i = 0; i < tools.length(); i++) {
             final JSONObject entry = tools.optJSONObject(i);
             if (entry == null) continue;
@@ -307,11 +459,15 @@ public final class ToolConfigActivity extends AppCompatActivity {
             try { entry.put("version", toolVersion(entry.optString("id"), manifest)); }
             catch (Exception ignored) { }
             if (entry.optString("id").equals(toolId)) {
-                selected = entry; detailInfo.setText(toolkitDetails(entry)); continue;
+                selected = entry; detailInfo.setText(toolkitDetails(entry));
+                JSONObject cached = probeResults.get(toolId); if (cached != null) showProbe(cached);
+                continue;
             }
             if (toolId.length() > 0) continue;
             TextView row = new TextView(this);
-            row.setText(entry.optString("name") + "\n" + toolkitState(entry.optString("state")));
+            toolRows.put(entry.optString("id"), row);
+            JSONObject cached = probeResults.get(entry.optString("id"));
+            row.setText(entry.optString("name") + "\n" + probeRowStatus(cached == null ? entry : cached));
             row.setTextColor(getResources().getColor(R.color.text_primary)); row.setTextSize(14);
             row.setPadding(dp(8), dp(12), dp(8), dp(12)); row.setMinHeight(dp(64));
             row.setBackgroundResource(android.R.drawable.list_selector_background);
@@ -319,7 +475,13 @@ public final class ToolConfigActivity extends AppCompatActivity {
             row.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View view) {
                     Intent intent = new Intent(ToolConfigActivity.this, ToolConfigActivity.class);
-                    intent.putExtra(EXTRA_TOOL_ID, entry.optString("id")); startActivity(intent);
+                    String id = entry.optString("id"); intent.putExtra(EXTRA_TOOL_ID, id);
+                    JSONObject result = probeResults.get(id);
+                    if (result != null) {
+                        intent.putExtra(EXTRA_PROBE_RESULT, result.toString());
+                        intent.putExtra(EXTRA_PROBE_CONTEXT, probeContext);
+                    }
+                    startActivity(intent);
                 }
             });
             toolList.addView(row, new LinearLayout.LayoutParams(-1, -2));
@@ -329,6 +491,8 @@ public final class ToolConfigActivity extends AppCompatActivity {
     }
 
     private void showProbe(JSONObject result) {
+        try { if (toolId.length() > 0) { probeResults.put(toolId, new JSONObject(result.toString())); probeContext = currentProbeContext(); } }
+        catch (Exception ignored) { }
         try {
             selected.put("state", result.optString("state"));
             if (result.has("configuration")) selected.put("configuration", result.getJSONObject("configuration"));
@@ -395,6 +559,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private ToolkitOperation requestToolkit(final JSONObject args, final ToolkitResult callback) {
         final ToolkitOperation operation = new ToolkitOperation();
         operation.installing = "package_install".equals(args.optString("action"));
+        operation.probingAll = "batch_status".equals(args.optString("action"));
         synchronized (toolkitOperations) { toolkitOperations.add(operation); }
         operation.future = toolkitReader.submit(new Runnable() {
             @Override public void run() {
@@ -409,6 +574,12 @@ public final class ToolConfigActivity extends AppCompatActivity {
                         @Override public void onProgress(EmbeddedToolchain.Progress progress) { queueInstallProgress(operation, progress); }
                     });
                     else if ("package_remove".equals(action)) result = session.toolkit.removeBundled();
+                    else if ("batch_status".equals(action)) result = ToolBatchProbe.run(session.toolkit,
+                            new ToolchainInstaller.Cancellation() { public void check() throws Exception {
+                                if (operation.cancelled || Thread.currentThread().isInterrupted()) throw new InterruptedException("批量检测已取消。");
+                            } }, new ToolBatchProbe.Listener() {
+                                @Override public void onProgress(ToolBatchProbe.Progress progress) { queueBatchProgress(operation, progress); }
+                            });
                     else result = new JSONObject(session.toolkit.run(args));
                 } catch (InterruptedException cancellation) {
                     Thread.currentThread().interrupt();

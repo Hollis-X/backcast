@@ -28,9 +28,9 @@ final class ToolkitExport {
         if (!absoluteTarget.isAbsolute() && base != null) absoluteTarget = new File(base, targetPath);
         if (!absoluteTarget.getAbsolutePath().equals(absoluteTarget.getCanonicalPath())) throw new IllegalArgumentException("导出不能跟随目标符号链接。");
         if (temporary.contains(target) || temporary.isPrivateStorage(target) || ToolchainStore.within(store.root(), target)
-                || target.equals(base)) throw new IllegalArgumentException("导出目标不能是临时、私有工具目录或整个项目根目录。");
+                || ToolPaths.projectRoot(workDir, target, temporary)) throw new IllegalArgumentException("导出目标不能是临时、私有工具目录或整个项目根目录。");
         if (!"deliverable".equals(purpose) && !"test".equals(purpose)) throw new IllegalArgumentException("导出必须明确 purpose=deliverable 或 test。");
-        if ("test".equals(purpose) && !ToolPaths.organizedTest(workDir, target)) {
+        if ("test".equals(purpose) && !ToolPaths.organizedTest(workDir, target, temporary)) {
             throw new IllegalArgumentException("正式测试请导出到项目已有测试目录或 tests/。");
         }
         List<File> created = new ArrayList<File>(); long[] size = new long[]{0, 0};

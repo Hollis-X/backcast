@@ -34,6 +34,8 @@ public final class TemporaryWorkspace {
     }
 
     private String workDir;
+    private volatile WorkspaceRoots projectRoots;
+    private final ThreadLocal<WorkspaceRoots> turnRoots = new ThreadLocal<WorkspaceRoots>();
     private boolean useRoot;
     private final File stateDir;
     private final File materialsDir;
@@ -68,11 +70,27 @@ public final class TemporaryWorkspace {
 
     public synchronized void configure(String directory, boolean root) {
         workDir = directory;
+        projectRoots = new WorkspaceRoots(directory, null);
         useRoot = root;
     }
 
+    public synchronized void configureWorkDirs(java.util.List<String> directories) {
+        projectRoots = new WorkspaceRoots(workDir, directories);
+    }
+
+    WorkspaceRoots projectRoots(String directory) {
+        WorkspaceRoots active = turnRoots.get();
+        WorkspaceRoots roots = active == null ? projectRoots : active;
+        return roots != null && roots.matches(directory) ? roots : new WorkspaceRoots(directory, null);
+    }
+
     public void beginTurn() {
+        beginTurn(projectRoots);
+    }
+
+    void beginTurn(WorkspaceRoots roots) {
         turn.set(UUID.randomUUID().toString());
+        turnRoots.set(roots);
     }
 
     private String lease() {
@@ -218,7 +236,7 @@ public final class TemporaryWorkspace {
 
     public String finishTurn() {
         try { return cleanup(); }
-        finally { turn.remove(); }
+        finally { turn.remove(); turnRoots.remove(); }
     }
 
     private void verify(Allocation allocation) throws Exception {

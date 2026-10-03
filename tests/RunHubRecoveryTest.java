@@ -10,6 +10,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import javax.tools.JavaCompiler;
@@ -47,7 +48,8 @@ public final class RunHubRecoveryTest {
         add(files, "android.os.Build", "public class Build {public static final String CPU_ABI=\"arm64-v8a\";public static class VERSION {public static final int SDK_INT=30;}}");
         add(files, "com.mkei.backcast.Settings", "public class Settings {"
                 + "public static final String AGENT_OFF=\"off\",EFFORT_ULTRA=\"ultra\";public static String mode=\"manual\",effort=\"off\",directory=\".\";"
-                + "public static int concurrency=3;public static boolean root;public static void reset(){mode=\"manual\";effort=\"off\";directory=\".\";concurrency=3;root=false;}"
+                + "public static java.util.List<String> additional=new java.util.ArrayList<String>();"
+                + "public static int concurrency=3;public static boolean root;public static void reset(){mode=\"manual\";effort=\"off\";directory=\".\";additional.clear();concurrency=3;root=false;}"
                 + "public Settings(android.content.Context c) {} public boolean isConfigured() { return true; }"
                 + "public String fullSystemPrompt() { return \"system/\"+mode; } public String baseUrl() { return \"http://localhost\"; }"
                 + "public String apiKey() { return \"fixture\"; } public String model() { return \"fixture\"; }"
@@ -55,7 +57,7 @@ public final class RunHubRecoveryTest {
                 + "public String agentMode(){return mode;}public int agentConcurrency(){return concurrency;}"
                 + "public String outputVerbosity() { return \"default\"; } public String outputLanguage() { return \"zh-CN\"; }"
                 + "public String responseInstructions() { return \"language fixture\"; } public boolean useRoot() { return root; }"
-                + "public String workDir() { return directory; } public float compactRatio() { return .9f; } public String accessLevel() { return \"full\"; } }");
+                + "public String workDir() { return directory; }public java.util.List<String> authorizedWorkDirs(){java.util.List<String> result=new java.util.ArrayList<String>();result.add(directory);result.addAll(additional);return result;} public float compactRatio() { return .9f; } public String accessLevel() { return \"full\"; } }");
         add(files, "com.mkei.backcast.AgentService", "public class AgentService {public static int starts;public static void start(android.content.Context c) {starts++;} }");
         add(files, "com.mkei.backcast.ChatStore",
                 "public class ChatStore {"
@@ -138,8 +140,10 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.tool.ToolchainStore", "public class ToolchainStore {public java.io.File directory;public EmbeddedToolchain.Assets assets;public String abi;public int sdk;public ToolchainStore(java.io.File d,EmbeddedToolchain.Assets a,String b,int s){directory=d;assets=a;abi=b;sdk=s;}}");
         add(files, "com.mkei.backcast.tool.TemporaryWorkspace", "public class TemporaryWorkspace {public Object[] args;public long sessionId;public String directory;public boolean root;"
                 + "public TemporaryWorkspace(Object... args) {this.args=args;sessionId=((Number)args[3]).longValue();}"
-                + "public int begins,finishes;public void beginTurn(){begins++;}public String finishTurn(){finishes++;return null;}"
-                + "public void configure(String dir,boolean r) {directory=dir;root=r;}public void bindSession(long sid) {sessionId=sid;}public String cleanupRecovered() { return null; } }");
+                + "public boolean requireTransaction;private void checkTransaction(){if(requireTransaction&&!Thread.holdsLock(this))throw new AssertionError(\"UI workspace configuration was not atomic\");}"
+                + "public int begins,finishes;public void beginTurn(){checkTransaction();begins++;}public String finishTurn(){finishes++;return null;}"
+                + "public java.util.List<String> roots;public void configureWorkDirs(java.util.List<String> dirs){checkTransaction();roots=new java.util.ArrayList<String>(dirs);}"
+                + "public void configure(String dir,boolean r) {checkTransaction();directory=dir;root=r;}public void bindSession(long sid) {sessionId=sid;}public String cleanupRecovered() {checkTransaction(); return null; } }");
     }
 
     private static Object call(Object target, String name, Class<?>[] types, Object... args) throws Exception {
@@ -478,6 +482,7 @@ public final class RunHubRecoveryTest {
     }
     private static void toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup() throws Exception {
         Object hub=freshHub(),root=bind(hub,27L,listener());
+        field(hub,"uiMaterials").getClass().getField("requireTransaction").setBoolean(field(hub,"uiMaterials"),true);
         final Object session=call(hub,"newToolkitSession",new Class[0]);
         Object toolkit=field(session,"toolkit"),materials=field(hub,"uiMaterials");
         Object[] args=(Object[])field(toolkit,"args"),materialArgs=(Object[])field(materials,"args");
@@ -515,6 +520,27 @@ public final class RunHubRecoveryTest {
         check("toolchain/manifest.json".equals(hubType.getClassLoader()
                 .loadClass("android.content.res.AssetManager").getField("lastName").get(null)),
                 "Embedded tool asset name was rewritten");
+    }
+
+    private static void multipleRootsRetargetParentChildAndIndependentUiTools() throws Exception {
+        Object hub = freshHub(), root = bind(hub, 31L, listener()), manager = children(hub, root), child = child(manager, "scope", 995L);
+        call(hub, "retargetIfNeeded", new Class[0]);
+        Class<?> settings = hubType.getClassLoader().loadClass("com.mkei.backcast.Settings");
+        @SuppressWarnings("unchecked") List<String> extra = (List<String>) settings.getField("additional").get(null);
+        int previous = count(root, "retargets"); extra.add("/project/additional");
+        call(hub, "retargetIfNeeded", new Class[0]);
+        check(count(root, "retargets") == previous + 1, "Additional directory change did not retarget without changing primary");
+        Map<?, ?> temporary = (Map<?, ?>) field(hub, "temporary");
+        for (Object loop : new Object[]{root, child}) {
+            @SuppressWarnings("unchecked") List<String> roots = (List<String>) field(temporary.get(loop), "roots");
+            check(roots.equals(Arrays.asList(".", "/project/additional")), "Parent/child tools lost the complete authorized snapshot");
+        }
+        Object session = call(hub, "newToolkitSession", new Class[0]);
+        @SuppressWarnings("unchecked") List<String> roots = (List<String>) field(field(hub, "uiMaterials"), "roots");
+        check(roots.equals(Arrays.asList(".", "/project/additional")), "Independent UI tool session lost additional directories");
+        call(session, "close", new Class[0]);
+        extra.clear(); call(hub, "retargetIfNeeded", new Class[0]);
+        check(((List<?>) field(temporary.get(root), "roots")).equals(Collections.singletonList(".")), "Revoked directory remained in next tool configuration");
     }
 
     private static void childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle() throws Exception {
@@ -560,7 +586,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

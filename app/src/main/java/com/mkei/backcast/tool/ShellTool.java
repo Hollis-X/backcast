@@ -164,7 +164,10 @@ public class ShellTool implements Tool {
             boolean temporaryCommand, int timeoutSec, final int mine) throws Exception {
         if (mine != epoch || Thread.currentThread().isInterrupted()) return "已停止。";
         cleanupFailed = false;
-        try { ToolPaths.checkProgram(workDir, launcher.id, arguments, temporary, temporaryCommand); }
+        try {
+            arguments = ToolPaths.prepareProgramArguments(launcher.id, arguments);
+            ToolPaths.checkProgram(workDir, launcher.id, arguments, temporary, temporaryCommand);
+        }
         catch (IllegalArgumentException failure) { return "错误：" + failure.getMessage(); }
         StringBuilder command = new StringBuilder();
         java.util.Iterator<String> keys = launcher.environment.keys();

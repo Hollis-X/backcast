@@ -76,6 +76,21 @@
                 <Button android:id="@+id/tool_package_remove" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:minHeight="48dp"
                     android:text="@string/toolkit_remove_package" android:textAllCaps="false" />
+                <Button android:id="@+id/tool_batch_probe" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:text="@string/toolkit_batch_probe" android:textAllCaps="false" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/tool_batch_progress_container"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="vertical" android:visibility="gone" android:layout_marginTop="12dp">
+                <ProgressBar android:id="@+id/tool_batch_progress" style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent" android:layout_height="8dp" android:max="13" android:indeterminate="false" />
+                <TextView android:id="@+id/tool_batch_progress_text" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:paddingTop="8dp" android:textColor="@color/text_primary"
+                    android:textSize="13sp" android:accessibilityLiveRegion="polite" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:paddingTop="4dp" android:textColor="@color/text_secondary" android:textSize="12sp"
+                    android:text="@string/toolkit_batch_note" />
             </LinearLayout>
             <LinearLayout android:id="@+id/tool_config_list" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:orientation="vertical"
