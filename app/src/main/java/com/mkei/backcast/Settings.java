@@ -84,7 +84,6 @@ public class Settings {
     public static final String EFFORT_MAX = "max";
     public static final String EFFORT_ULTRA = "ultra";
 
-    public static final String AGENT_OFF = "off";
     public static final String AGENT_MANUAL = "manual";
     public static final String AGENT_ULTRA = "ultra";
     public static final int DEFAULT_AGENT_CONCURRENCY = 3;
@@ -176,18 +175,6 @@ public class Settings {
                 .getString(R.string.default_system_prompt);
     }
 
-    public String baseUrl() {
-        return activeAiProfile().baseUrl;
-    }
-
-    public String apiKey() {
-        return activeAiProfile().apiKey;
-    }
-
-    public String model() {
-        return activeAiProfile().model;
-    }
-
     private static String clean(String value) { return value == null ? "" : value.trim(); }
     private static void requireProvider(String id) {
         if (!Arrays.asList(PROVIDER_IDS).contains(id)) throw new IllegalArgumentException("未知 AI 供应商。");
@@ -244,10 +231,6 @@ public class Settings {
     }
     public String activeProviderId() { synchronized (AI_LOCK) { return activeProviderLocked(); } }
     public AiProfile activeAiProfile() { synchronized (AI_LOCK) { return profileLocked(activeProviderLocked()); } }
-    public void setActiveProvider(String id) {
-        requireProvider(id);
-        synchronized (AI_LOCK) { migrateAiProfilesLocked(); prefs.edit().putString(KEY_ACTIVE_PROVIDER, id).apply(); }
-    }
     private static SharedPreferences.Editor writeProfile(SharedPreferences.Editor editor, AiProfile profile) {
         List<String> models = new ArrayList<String>(profile.modelList);
         if (profile.model.length() > 0 && !models.contains(profile.model)) models.add(profile.model);
@@ -255,10 +238,6 @@ public class Settings {
                 .putString(profileKey(profile.id, "key"), profile.apiKey)
                 .putString(profileKey(profile.id, "model"), profile.model)
                 .putString(profileKey(profile.id, "models"), encodeModels(models));
-    }
-    public void saveAiProfile(String id, String url, String key, String model, List<String> models) {
-        AiProfile profile = new AiProfile(id, url, key, model, models);
-        synchronized (AI_LOCK) { migrateAiProfilesLocked(); writeProfile(prefs.edit(), profile).apply(); }
     }
     /** Commit only edited drafts, then activate the selection in the same transaction. */
     public void saveAiProfiles(List<AiProfile> edited, String activeId) {
@@ -323,20 +302,6 @@ public class Settings {
         }
         String name = dir.substring(cut + 1);
         return name.length() == 0 ? dir : name;
-    }
-
-    public void setWorkDir(String dir) {
-        String input = dir == null ? "" : dir;
-        if (input.trim().length() == 0 && input.indexOf('\n') < 0 && input.indexOf('\r') < 0 && input.indexOf('\0') < 0)
-            input = DEFAULT_WORK_DIR;
-        String value = directoryValue(input);
-        synchronized (WORKSPACE_LOCK) {
-            List<String> directories = authorizedWorkDirs(), history = workDirs();
-            directories.remove(workDir()); directories.remove(value); directories.add(0, value);
-            if (!history.contains(value)) history.add(value);
-            prefs.edit().putString(KEY_WORK_DIR, value).putString(KEY_AUTHORIZED_WORK_DIRS, encodeDirectories(directories))
-                    .putString(KEY_WORK_DIRS, encodeDirectories(history)).apply();
-        }
     }
 
     /** 规范化目录：去掉首尾空白和结尾斜杠，避免拼路径时出现双斜杠。 */
@@ -434,24 +399,6 @@ public class Settings {
         synchronized (WORKSPACE_LOCK) { return directoryList(prefs.getString(KEY_WORK_DIRS, "")); }
     }
 
-    /** 添加一个目录并立刻切过去；已存在则只切过去，不重复记录。 */
-    public void addWorkDir(String dir) {
-        if (dir == null || dir.trim().length() == 0) return;
-        setPrimaryWorkDir(dir);
-    }
-
-    /** Legacy candidate removal also revokes authorization, retaining at least one selected root. */
-    public void removeWorkDir(String dir) {
-        if (!validWorkDir(dir)) return;
-        String t = normalizeDir(dir);
-        synchronized (WORKSPACE_LOCK) {
-            if (!removeAuthorizedWorkDir(t)) return;
-            List<String> list = workDirs();
-            if (!list.remove(t)) return;
-            prefs.edit().putString(KEY_WORK_DIRS, encodeDirectories(list)).apply();
-        }
-    }
-
     /**
      * 静态指令：角色、做事方式、操作分寸、工具用法、回答风格。
      *
@@ -484,12 +431,6 @@ public class Settings {
         }
         // 更早的版本断言过 root 一定可用，会让模型反复重试，一并摘掉。
         return s.replace("设备已 root，su 可用。", "").trim();
-    }
-
-    /** 用户是否改过静态指令。改过就用他的，没改过设置页给的是默认原文。 */
-    public boolean hasCustomPrompt() {
-        String s = prefs.getString(KEY_SYSTEM_PROMPT, "");
-        return s != null && s.trim().length() > 0;
     }
 
     /**
@@ -559,8 +500,7 @@ public class Settings {
     }
 
     private static String normalizeAgentMode(String mode) {
-        if (AGENT_OFF.equals(mode) || AGENT_ULTRA.equals(mode)) return mode;
-        return AGENT_MANUAL;
+        return AGENT_ULTRA.equals(mode) ? AGENT_ULTRA : AGENT_MANUAL;
     }
 
     private static int normalizeAgentConcurrency(int concurrency) {
@@ -571,11 +511,6 @@ public class Settings {
         return EFFORT_ULTRA.equals(reasoningEffort()) ? AGENT_ULTRA : AGENT_MANUAL;
     }
 
-    public void setAgentMode(String mode) {
-        if (AGENT_ULTRA.equals(mode)) setReasoningEffort(EFFORT_ULTRA);
-        else if (EFFORT_ULTRA.equals(reasoningEffort())) setReasoningEffort(DEFAULT_REASONING_EFFORT);
-    }
-
     public int agentConcurrency() {
         try {
             return normalizeAgentConcurrency(Integer.parseInt(prefs.getString(KEY_AGENT_CONCURRENCY, "3")));
@@ -584,18 +519,9 @@ public class Settings {
         }
     }
 
-    public void setAgentConcurrency(int concurrency) {
-        prefs.edit().putString(KEY_AGENT_CONCURRENCY,
-                Integer.toString(normalizeAgentConcurrency(concurrency))).apply();
-    }
-
     private static String agentInstructions(String rawMode, int rawConcurrency) {
         String mode = normalizeAgentMode(rawMode);
         int concurrency = normalizeAgentConcurrency(rawConcurrency);
-        if (AGENT_OFF.equals(mode)) {
-            return "Subagent mode: off. Coordination tools are disabled. Complete the task in the parent agent; "
-                    + "do not invent or call subagent tools from earlier history.";
-        }
         String policy = "Subagent mode: " + mode + ". At most " + concurrency
                 + " child agents may run concurrently. Use only coordination tools registered for this request. "
                 + "Reuse an existing child when its task and context remain suitable. Give each child a concrete, "
@@ -632,24 +558,12 @@ public class Settings {
         return ResponsePreferences.normalizeVerbosity(prefs.getString(KEY_OUTPUT_VERBOSITY, "default"));
     }
 
-    public void setOutputVerbosity(String value) {
-        prefs.edit().putString(KEY_OUTPUT_VERBOSITY, ResponsePreferences.normalizeVerbosity(value)).apply();
-    }
-
     public String reasoningSummary() {
         return ResponsePreferences.normalizeSummary(prefs.getString(KEY_REASONING_SUMMARY, "auto"));
     }
 
-    public void setReasoningSummary(String value) {
-        prefs.edit().putString(KEY_REASONING_SUMMARY, ResponsePreferences.normalizeSummary(value)).apply();
-    }
-
     public String outputLanguage() {
         return ResponsePreferences.normalizeLanguage(prefs.getString(KEY_OUTPUT_LANGUAGE, "zh-CN"));
-    }
-
-    public void setOutputLanguage(String value) {
-        prefs.edit().putString(KEY_OUTPUT_LANGUAGE, ResponsePreferences.normalizeLanguage(value)).apply();
     }
 
     public String responseInstructions() {
@@ -688,19 +602,6 @@ public class Settings {
         return 0.9f;
     }
 
-    public void save(String baseUrl, String apiKey, String model,
-                     boolean useRoot, String systemPrompt) {
-        synchronized (AI_LOCK) {
-            saveAiConfiguration(baseUrl, apiKey, model, modelList());
-            prefs.edit().putBoolean(KEY_USE_ROOT, useRoot)
-                    .putString(KEY_SYSTEM_PROMPT, systemPrompt == null ? "" : systemPrompt).apply();
-        }
-    }
-
-    public void saveAiConfiguration(String baseUrl, String apiKey, String model, List<String> models) {
-        synchronized (AI_LOCK) { saveAiProfile(activeProviderLocked(), baseUrl, apiKey, model, models); }
-    }
-
     public void saveUserPreferences(String verbosity, String summary, String language, String effort,
                                     int concurrency, String prompt) {
         prefs.edit()
@@ -720,11 +621,6 @@ public class Settings {
         return profile.baseUrl.length() > 0 && profile.apiKey.length() > 0 && profile.model.length() > 0;
     }
 
-    /** 已保存的模型列表，用换行分隔。 */
-    public List<String> modelList() {
-        return new ArrayList<String>(activeAiProfile().modelList);
-    }
-
     private static List<String> decodeModels(String raw) {
         List<String> list = new ArrayList<String>();
         if (raw == null || raw.length() == 0) {
@@ -737,13 +633,6 @@ public class Settings {
             }
         }
         return list;
-    }
-
-    public void saveModelList(List<String> models) {
-        synchronized (AI_LOCK) {
-            String id = activeProviderLocked();
-            prefs.edit().putString(profileKey(id, "models"), encodeModels(models)).apply();
-        }
     }
 
     private static String encodeModels(List<String> models) {
@@ -761,18 +650,6 @@ public class Settings {
             }
         }
         return sb.toString();
-    }
-
-    public void setModel(String model) {
-        synchronized (AI_LOCK) {
-            String id = activeProviderLocked(); AiProfile profile = profileLocked(id);
-            writeProfile(prefs.edit(), new AiProfile(id, profile.baseUrl, profile.apiKey, model, profile.modelList)).apply();
-        }
-    }
-
-    /** off 表示请求里不带 reasoning_effort 参数。 */
-    public boolean reasoningEnabled() {
-        return !EFFORT_OFF.equals(effectiveReasoningEffort());
     }
 
     public void setReasoningEffort(String effort) {

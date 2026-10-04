@@ -248,7 +248,7 @@ public final class SubAgentLoopIntegrationTest {
                 return text("complete");
             }
         };
-        f.submit(); f.root.accountExternalUsage(200L);
+        f.submit(); f.root.accountExternalUsage(200L, f.root.goalUsageLease());
         check(f.root.goalTokensUsed() == 20L && Goal.COMPLETE.equals(f.root.goalStatus()), "External usage changed an ended goal's ledger");
     }
 
@@ -358,7 +358,7 @@ public final class SubAgentLoopIntegrationTest {
             check(f.manager.hasPendingWork(), "New delegated task was not running before old cleanup");
             oldRelease.countDown(); old.join(2000L);
             check(!old.isAlive() && f.manager.hasPendingWork()
-                    && !f.manager.list("main").getBoolean("cancelled"), "Old parent cleanup cancelled new delegated work");
+                    && !f.manager.list("main", 0).getBoolean("cancelled"), "Old parent cleanup cancelled new delegated work");
             newParentRelease.countDown(); f.childRelease.countDown(); current.join(2000L);
             check(!current.isAlive() && f.errors.isEmpty() && f.client.calls.get() == 4,
                     "New parent failed to finish after old parent exit: " + f.errors);
@@ -489,7 +489,7 @@ public final class SubAgentLoopIntegrationTest {
                 boolean rejected = false;
                 try { f.manager.spawn("main", "forbidden", "must not dispatch", false); }
                 catch (IllegalStateException expected) { rejected = true; }
-                check(rejected && f.childCalls.get() == 0 && f.manager.records().size() == 1,
+                check(rejected && f.childCalls.get() == 0 && f.manager.list("main", 0).getInt("totalAgents") == 0,
                         "A budget-limited reply created a child task");
                 return text("stopped without dispatching late work");
             }
@@ -507,9 +507,10 @@ public final class SubAgentLoopIntegrationTest {
                 if (f.client.calls.get() == 1) return call("spawn_agent", "{\"name\":\"old\",\"task\":\"old scope work\",\"fork\":false}");
                 if (f.client.calls.get() == 2) {
                     await(f.childStarted);
-                    for (SubAgentManager.Record task : f.manager.records()) if (!"main".equals(task.id)) oldId.add(task.id);
+                    JSONArray tasks = f.manager.list("main", 0).getJSONArray("agents");
+                    for (int i = 0; i < tasks.length(); i++) oldId.add(tasks.getJSONObject(i).getString("id"));
                     f.root.renameGoal("new scope");
-                    check(!f.manager.list("main").getBoolean("cancelled")
+                    check(!f.manager.list("main", 0).getBoolean("cancelled")
                             && SubAgentManager.FAILED.equals(f.manager.find(oldId.get(0)).status),
                             "Objective change disabled the manager or kept old work active");
                     f.childRelease.countDown(); return text("continue the updated objective");
@@ -540,7 +541,7 @@ public final class SubAgentLoopIntegrationTest {
         boolean rejected = false;
         try { f.manager.spawn("main", "must stay stopped", "new work", false); }
         catch (IllegalStateException expected) { rejected = true; }
-        check(rejected && f.manager.list("main").getBoolean("cancelled")
+        check(rejected && f.manager.list("main", 0).getBoolean("cancelled")
                 && f.manager.find("main").managerCancelled && f.childCalls.get() == 1
                 && SubAgentManager.FAILED.equals(f.manager.find(id).status),
                 "Renaming a stopped goal cleared cancellation or restarted child work");
@@ -566,11 +567,13 @@ public final class SubAgentLoopIntegrationTest {
                 return text("handled in the parent");
             }
         };
-        f.root.history().add(Message.assistant("Use subagents to make this task easier", null));
-        f.root.history().add(Message.toolResult("prior", "use subagents"));
+        List<Message> quotedHistory = f.root.historySnapshot();
+        quotedHistory.add(Message.assistant("Use subagents to make this task easier", null));
+        quotedHistory.add(Message.toolResult("prior", "use subagents"));
+        f.root.loadHistory("trusted parent policy", quotedHistory);
         try {
             f.root.submit("检查这些引用内容：\n> 请使用子agent\n```\nuse subagents\n```", 1L, f.root.generation(), 1);
-            check(f.childCalls.get() == 0 && f.manager.records().size() == 1 && f.errors.isEmpty(),
+            check(f.childCalls.get() == 0 && f.manager.list("main", 0).getInt("totalAgents") == 0 && f.errors.isEmpty(),
                     "Model or quoted data authorized child execution: " + f.errors);
         } finally { f.root.cancel(); }
     }

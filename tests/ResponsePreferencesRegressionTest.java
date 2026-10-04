@@ -67,7 +67,7 @@ public final class ResponsePreferencesRegressionTest {
                 files.add(source);
             }
             check(compiler.getTask(null, fm, null,
-                    Arrays.asList("-proc:none", "-encoding", "UTF-8", "-source", "7", "-target", "7",
+                    Arrays.asList("-proc:none", "-encoding", "UTF-8", "-source", "8", "-target", "8",
                             "-Xlint:-options", "-d", build.toString()), null, files).call(),
                     "Settings fixture compilation failed");
         }
@@ -90,7 +90,19 @@ public final class ResponsePreferencesRegressionTest {
         return (String) settingsType.getMethod(method).invoke(settings);
     }
     private static void set(Object settings, String method, String value) throws Exception {
+        if ("setOutputVerbosity".equals(method) || "setReasoningSummary".equals(method) || "setOutputLanguage".equals(method)) {
+            preferences(settings, "setOutputVerbosity".equals(method) ? value : get(settings, "outputVerbosity"),
+                    "setReasoningSummary".equals(method) ? value : get(settings, "reasoningSummary"),
+                    "setOutputLanguage".equals(method) ? value : get(settings, "outputLanguage"),
+                    get(settings, "reasoningEffort"), concurrency(settings), get(settings, "systemPrompt"));
+            return;
+        }
         settingsType.getMethod(method, String.class).invoke(settings, value);
+    }
+    private static void preferences(Object settings, String verbosity, String summary, String language,
+                                    String effort, int concurrency, String prompt) throws Exception {
+        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
+                .invoke(settings, verbosity, summary, language, effort, concurrency, prompt);
     }
     private static String policy(String method, String value) throws Exception {
         return (String) policyType.getMethod(method, String.class).invoke(null, value);
@@ -100,8 +112,8 @@ public final class ResponsePreferencesRegressionTest {
                 .invoke(null, verbosity, language);
     }
     private static void customPrompt(Object settings, String prompt) throws Exception {
-        settingsType.getMethod("save", String.class, String.class, String.class, boolean.class, String.class)
-                .invoke(settings, "http://localhost", "fixture", "fixture", Boolean.FALSE, prompt);
+        preferences(settings, get(settings, "outputVerbosity"), get(settings, "reasoningSummary"),
+                get(settings, "outputLanguage"), get(settings, "reasoningEffort"), concurrency(settings), prompt);
     }
 
     private static void defaultPreferencesChooseChinese() throws Exception {
@@ -228,15 +240,16 @@ public final class ResponsePreferencesRegressionTest {
         return (Integer) settingsType.getMethod("agentConcurrency").invoke(settings);
     }
     private static void concurrency(Object settings, int value) throws Exception {
-        settingsType.getMethod("setAgentConcurrency", int.class).invoke(settings, value);
+        preferences(settings, get(settings, "outputVerbosity"), get(settings, "reasoningSummary"),
+                get(settings, "outputLanguage"), get(settings, "reasoningEffort"), value, get(settings, "systemPrompt"));
     }
     private static void childDefaultsAndEveryChoicePersist() throws Exception {
         Object context=context(), settings=settings(context);
         check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3,
                 "Fresh settings do not choose manual mode and three children");
-        for(String mode:new String[]{"off","manual","ultra"}) {
-            set(settings,"setAgentMode",mode);
-            check(("ultra".equals(mode)?"ultra":"manual").equals(get(settings(context),"agentMode")),"Compatibility mode did not derive from effort");
+        for(String effort:new String[]{"off","low","max","ultra"}) {
+            set(settings,"setReasoningEffort",effort);
+            check(("ultra".equals(effort)?"ultra":"manual").equals(get(settings(context),"agentMode")),"Delegation mode did not derive from the saved effort");
         }
         for(int count=1;count<=4;count++) {
             concurrency(settings,count);
@@ -250,7 +263,6 @@ public final class ResponsePreferencesRegressionTest {
     private static void invalidChildAndEffortValuesReturnDefaults() throws Exception {
         Object settings=settings(context());
         for(String invalid:new String[]{null,"","all","ULTRA","<script>"}) {
-            set(settings,"setAgentMode",invalid);
             set(settings,"setReasoningEffort",invalid);
             check("manual".equals(get(settings,"agentMode")),"Invalid child mode escaped normalization");
             check("low".equals(get(settings,"reasoningEffort")),"Invalid API reasoning value escaped normalization");
@@ -276,25 +288,23 @@ public final class ResponsePreferencesRegressionTest {
             check(effort.equals(get(settings,"reasoningEffort")),"Selected effort was changed");
             check(effort.equals(get(settings,"effectiveReasoningEffort")),"Selected effort was mapped to another value");
             check(("ultra".equals(effort)?"ultra":"manual").equals(get(settings,"agentMode")),"Max inherited automatic delegation");
-            boolean enabled=(Boolean)settingsType.getMethod("reasoningEnabled").invoke(settings);
-            check(enabled!= "off".equals(effort),"Effective off compatibility is inconsistent");
             check("ja".equals(get(settings,"outputLanguage")) && get(settings,"fullSystemPrompt")
                     .contains(policy("languageInstruction","ja")),"Mode switch changed the output language");
         }
     }
     private static void childPoliciesRequireEvidenceReviewAndSelectiveDelegation() throws Exception {
         Object settings=settings(context());
-        set(settings,"setAgentMode","ultra");concurrency(settings,4);
+        set(settings,"setReasoningEffort","ultra");concurrency(settings,4);
         String ultra=get(settings,"fullSystemPrompt");
         check(ultra.contains("At most 4 child agents") && ultra.contains("Proactively identify independent subtasks")
                 && ultra.contains("Reuse an existing child") && ultra.contains("review and verify")
                 && ultra.contains("simple question or indivisible task does not require a child"),
                 "Ultra lacks limits, reuse, independence or parent evidence review");
-        set(settings,"setAgentMode","manual");
+        set(settings,"setReasoningEffort","low");
         check(!get(settings,"fullSystemPrompt").contains("Proactively identify independent subtasks")
                 && get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Manual inherited automatic delegation");
-        set(settings,"setAgentMode","off");
-        check(get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Legacy off bypassed explicit-user policy");
+        set(settings,"setReasoningEffort","off");
+        check(get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Off effort bypassed explicit-user policy");
     }
     @SuppressWarnings("unchecked")
     private static void legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection() throws Exception {
@@ -328,25 +338,23 @@ public final class ResponsePreferencesRegressionTest {
         settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
                 .invoke(settings, "high", "none", "ja", "ultra", 4, "User-owned prompt");
         settingsType.getMethod("setUseRoot", boolean.class).invoke(settings, false);
-        set(settings, "setAccessLevel", "strict"); set(settings, "setWorkDir", "/storage/emulated/0/project");
+        set(settings, "setAccessLevel", "strict"); set(settings, "setPrimaryWorkDir", "/storage/emulated/0/project");
         java.util.Map<String,Object> stored = (java.util.Map<String,Object>) contextType.getField("values").get(context);
         java.util.Map<String,Object> before = new java.util.HashMap<String,Object>(stored);
-        settingsType.getMethod("saveAiConfiguration", String.class, String.class, String.class, List.class)
-                .invoke(settings, " https://provider.example/v1 ", " secret ", " chosen ",
-                        Arrays.asList("chosen", "other", "chosen", " ", null, "bad\nline"));
-        check("https://provider.example/v1".equals(get(settings, "baseUrl")) && "secret".equals(get(settings, "apiKey"))
-                && "chosen".equals(get(settings, "model")), "AI fields were not saved and trimmed");
-        check(Arrays.asList("chosen", "other").equals(settingsType.getMethod("modelList").invoke(settings)), "AI preview model list was not safely saved");
+        saveProfile(settings, get(settings, "activeProviderId"), " https://provider.example/v1 ", " secret ", " chosen ",
+                Arrays.asList("chosen", "other", "chosen", " ", null, "bad\nline"));
+        check("https://provider.example/v1".equals(activeText(settings, "baseUrl")) && "secret".equals(activeText(settings, "apiKey"))
+                && "chosen".equals(activeText(settings, "model")), "AI fields were not saved and trimmed");
+        check(Arrays.asList("chosen", "other").equals(activeModels(settings)), "AI preview model list was not safely saved");
         for (String key : before.keySet()) check(before.get(key).equals(stored.get(key)), "AI save changed another group: " + key);
     }
 
     @SuppressWarnings("unchecked")
     private static void groupedPreferenceSavePreservesLatestAiAndToolSettings() throws Exception {
         Object context = context(), settings = settings(context);
-        settingsType.getMethod("saveAiConfiguration", String.class, String.class, String.class, List.class)
-                .invoke(settings, "https://new.example/v1", "new-key", "new-model", Arrays.asList("new-model", "available"));
+        saveProfile(settings, get(settings, "activeProviderId"), "https://new.example/v1", "new-key", "new-model", Arrays.asList("new-model", "available"));
         settingsType.getMethod("setUseRoot", boolean.class).invoke(settings, false);
-        set(settings, "setAccessLevel", "guarded"); set(settings, "setWorkDir", "/storage/emulated/0/current");
+        set(settings, "setAccessLevel", "guarded"); set(settings, "setPrimaryWorkDir", "/storage/emulated/0/current");
         java.util.Map<String,Object> stored = (java.util.Map<String,Object>) contextType.getField("values").get(context);
         java.util.Map<String,Object> before = new java.util.HashMap<String,Object>(stored);
         settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
@@ -382,9 +390,25 @@ public final class ResponsePreferencesRegressionTest {
     private static String profileText(Object profile, String field) throws Exception {
         return (String) profile.getClass().getField(field).get(profile);
     }
+    private static Object activeProfile(Object settings) throws Exception {
+        return settingsType.getMethod("activeAiProfile").invoke(settings);
+    }
+    private static String activeText(Object settings, String field) throws Exception {
+        return profileText(activeProfile(settings), field);
+    }
+    private static Object activeModels(Object settings) throws Exception {
+        Object profile = activeProfile(settings);
+        return profile.getClass().getField("modelList").get(profile);
+    }
+    private static void activate(Object settings, String id) throws Exception {
+        settingsType.getMethod("saveAiProfiles", List.class, String.class).invoke(settings, java.util.Collections.emptyList(), id);
+    }
     private static void saveProfile(Object settings, String id, String url, String key, String model, List<String> models) throws Exception {
-        settingsType.getMethod("saveAiProfile", String.class, String.class, String.class, String.class, List.class)
-                .invoke(settings, id, url, key, model, models);
+        Object profile = settingsType.getClassLoader().loadClass("com.mkei.backcast.Settings$AiProfile")
+                .getConstructor(String.class, String.class, String.class, String.class, List.class)
+                .newInstance(id, url, key, model, models);
+        settingsType.getMethod("saveAiProfiles", List.class, String.class)
+                .invoke(settings, Arrays.asList(profile), get(settings, "activeProviderId"));
     }
     @SuppressWarnings("unchecked")
     private static void oldAiConfigurationMigratesOnceWithoutLosingProfilesOrModelLists() throws Exception {
@@ -395,12 +419,12 @@ public final class ResponsePreferencesRegressionTest {
             Object context=context(); java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
             values.put("base_url",urls[i]); values.put("api_key","legacy-key"); values.put("model","legacy-model");
             values.put("model_list","legacy-model\nother-model"); Object settings=settings(context);
-            check(expected[i].equals(get(settings,"activeProviderId"))&&urls[i].equals(get(settings,"baseUrl"))
-                            &&"legacy-key".equals(get(settings,"apiKey"))&&"legacy-model".equals(get(settings,"model"))
-                            &&Arrays.asList("legacy-model","other-model").equals(settingsType.getMethod("modelList").invoke(settings)),
+            check(expected[i].equals(get(settings,"activeProviderId"))&&urls[i].equals(activeText(settings,"baseUrl"))
+                            &&"legacy-key".equals(activeText(settings,"apiKey"))&&"legacy-model".equals(activeText(settings,"model"))
+                            &&Arrays.asList("legacy-model","other-model").equals(activeModels(settings)),
                     "Legacy AI migration lost a field or trusted a lookalike host");
             check(urls[i].equals(values.get("base_url"))&&"legacy-key".equals(values.get("api_key")),"Migration destroyed the original saved configuration");
-            set(settings,"setActiveProvider","grok"); values.put("base_url","https://api.openai.com/v1");
+            activate(settings,"grok"); values.put("base_url","https://api.openai.com/v1");
             check("grok".equals(get(settings(context),"activeProviderId")),"Legacy data replaced an already migrated provider selection");
         }
     }
@@ -414,24 +438,23 @@ public final class ResponsePreferencesRegressionTest {
         boolean immutable=false;try{providers.clear();}catch(UnsupportedOperationException expected){immutable=true;}check(immutable,"Provider snapshots can be changed externally");
         for(String id:new String[]{"deepseek","openai","grok","custom"})saveProfile(settings,id,"https://"+id+".example/v1",id+"-key",id+"-model",Arrays.asList(id+"-model","common"));
         for(String id:new String[]{"deepseek","openai","grok","custom"}){
-            set(settings,"setActiveProvider",id);Object restored=settings(context);
-            check((id+"-key").equals(get(restored,"apiKey"))&&(id+"-model").equals(get(restored,"model")),"Switching providers mixed credentials");
+            activate(settings,id);Object restored=settings(context);
+            check((id+"-key").equals(activeText(restored,"apiKey"))&&(id+"-model").equals(activeText(restored,"model")),"Switching providers mixed credentials");
             List<String> modelList=(List<String>)profile(restored,id).getClass().getField("modelList").get(profile(restored,id));
             immutable=false;try{modelList.add("mutated");}catch(UnsupportedOperationException expected){immutable=true;}check(immutable,"Model snapshot aliases persisted storage");
         }
     }
-    private static void modelSelectionActivatesOnlyItsProviderAndKeepsLegacyAccessorsCompatible() throws Exception {
+    private static void modelSelectionActivatesOnlyItsProviderAndKeepsProfilesIndependent() throws Exception {
         Object context=context(),settings=settings(context),other=settings(context);
         saveProfile(settings,"openai","https://api.openai.com/v1","openai-key","existing",Arrays.asList("existing"));
         saveProfile(other,"grok","https://api.x.ai/v1","grok-key","grok-original",Arrays.asList("grok-original"));
         settingsType.getMethod("selectAiModel",String.class,String.class).invoke(other,"openai","hand-entered-model");
-        check("openai".equals(get(settings,"activeProviderId"))&&"hand-entered-model".equals(get(settings,"model"))
-                        &&"openai-key".equals(get(settings,"apiKey"))&&(Boolean)settingsType.getMethod("isConfigured").invoke(settings),"Model selection failed to atomically activate its provider");
-        check(Arrays.asList("existing","hand-entered-model").equals(settingsType.getMethod("modelList").invoke(settings)),"Selected manual model was not retained for switching");
-        settingsType.getMethod("saveAiConfiguration",String.class,String.class,String.class,List.class)
-                .invoke(settings,"https://openai-gateway.example/v1","changed-key","changed-model",Arrays.asList("changed-model"));
+        check("openai".equals(get(settings,"activeProviderId"))&&"hand-entered-model".equals(activeText(settings,"model"))
+                        &&"openai-key".equals(activeText(settings,"apiKey"))&&(Boolean)settingsType.getMethod("isConfigured").invoke(settings),"Model selection failed to atomically activate its provider");
+        check(Arrays.asList("existing","hand-entered-model").equals(activeModels(settings)),"Selected manual model was not retained for switching");
+        saveProfile(settings,"openai","https://openai-gateway.example/v1","changed-key","changed-model",Arrays.asList("changed-model"));
         check("grok-key".equals(profileText(profile(other,"grok"),"apiKey"))
-                        &&"grok-original".equals(profileText(profile(other,"grok"),"model")),"Legacy save wrote through another provider");
+                        &&"grok-original".equals(profileText(profile(other,"grok"),"model")),"Profile save wrote through another provider");
         boolean rejected=false;try{settingsType.getMethod("selectAiModel",String.class,String.class).invoke(settings,"grok","");}
         catch(java.lang.reflect.InvocationTargetException expected){rejected=expected.getCause() instanceof IllegalArgumentException;}
         check(rejected&&"openai".equals(get(settings,"activeProviderId")),"Invalid model changed active provider");
@@ -473,7 +496,7 @@ public final class ResponsePreferencesRegressionTest {
                     "groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra",
                     "oldAiConfigurationMigratesOnceWithoutLosingProfilesOrModelLists",
                     "providersKeepSeparateCredentialsAndImmutableOfficialDefaults",
-                    "modelSelectionActivatesOnlyItsProviderAndKeepsLegacyAccessorsCompatible",
+                    "modelSelectionActivatesOnlyItsProviderAndKeepsProfilesIndependent",
                     "independentSettingsWritesAndPartialDraftCommitDoNotClobberProviders"}) run(name);
             System.out.println(passed + " response preference tests passed");
         } finally {

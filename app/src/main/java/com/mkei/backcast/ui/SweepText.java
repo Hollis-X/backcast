@@ -7,7 +7,6 @@ import android.graphics.LinearGradient;
 import android.graphics.Matrix;
 import android.graphics.Shader;
 import android.text.TextPaint;
-import android.util.AttributeSet;
 import android.widget.TextView;
 
 /**
@@ -26,10 +25,6 @@ public class SweepText extends TextView {
 
     public SweepText(Context context) {
         super(context);
-    }
-
-    public SweepText(Context context, AttributeSet attrs) {
-        super(context, attrs);
     }
 
     /** 0 到 1 循环。小于 0 关掉扫光。 */

@@ -16,9 +16,6 @@ public final class DiagnosticsRegressionTest {
         boolean fail;
         @Override public void record(long sid, Message message) { messages.add(message); }
         @Override public void replace(long sid, List<Message> messages) { }
-        @Override public void recordRequest(long sid, String p, long ms, String o, String r, int retry) {
-            throw new AssertionError("Legacy and detailed request must not be recorded twice");
-        }
         @Override public void recordRequest(long sid, String p, long ms, String o, String r, int retry, String detail) {
             if (fail) throw new IllegalStateException("full store");
             requests.add(detail);

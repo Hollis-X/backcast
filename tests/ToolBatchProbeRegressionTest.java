@@ -21,13 +21,13 @@ public final class ToolBatchProbeRegressionTest {
         final ToolkitTool toolkit;
         Fixture(String name) throws Exception {
             File project = new File(root, name + "-project"); project.mkdir();
-            store = new ToolchainStore(new File(root, name + "-software"));
+            store = new ToolchainStore(new File(root, name + "-software"), null, "", 0);
             temporary = new TemporaryWorkspace(project.getPath(), false, new File(root, name + "-state"), 1); temporary.beginTurn();
             JSONArray catalog = ToolCatalog.list();
             for (int i = 0; i < catalog.length(); i++) {
                 String id = catalog.getJSONObject(i).getString("id"); File executable = new File(project, id + ("apktool".equals(id) ? ".jar" : ""));
                 Files.write(executable.toPath(), new byte[]{1});
-                store.configure(id, executable.getPath(), "apktool".equals(id) ? "/usr/bin/java" : null);
+                ToolchainFixtures.configure(store, id, executable.getPath(), "apktool".equals(id) ? "/usr/bin/java" : null);
             }
             ShellTool shell = new ShellTool(false, project.getPath(), temporary) {
                 @Override String runProgram(ToolchainStore.Launcher launcher, List<String> arguments, boolean temp, int timeout, int epoch) throws Exception {
@@ -91,7 +91,7 @@ public final class ToolBatchProbeRegressionTest {
             public java.io.InputStream open(String name) { throw new AssertionError("Removed tools implicitly opened APK assets"); }
         }, "arm64-v8a", 30);
         store.root().mkdir(); Files.write(new File(store.root(), "registry.json").toPath(), "{\"bundled_removed\":true,\"tools\":{}}".getBytes("UTF-8"));
-        ToolkitTool toolkit = new ToolkitTool(new ShellTool(false, root.getPath()), store, root.getPath(), null, "arm64-v8a");
+        ToolkitTool toolkit = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
         JSONObject result = ToolBatchProbe.run(toolkit, LIVE, null);
         check(result.getInt("ready_count") == 0 && result.getInt("failed_count") == 13, "Deleted tools were claimed ready or restored");
         for (int i = 0; i < result.getJSONArray("results").length(); i++) check("removed".equals(result.getJSONArray("results").getJSONObject(i).getString("state")), "Removed state was concealed");

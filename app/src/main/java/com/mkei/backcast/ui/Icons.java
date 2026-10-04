@@ -27,7 +27,6 @@ public final class Icons {
     public static final int SEARCH = R.drawable.ic_ds_magnifying_glass_md_regular_24;
     public static final int SETTINGS = R.drawable.ic_ds_gear_regular_24;
     public static final int CHAT = R.drawable.ic_ds_chat_bubble_regular_24;
-    public static final int WARNING = R.drawable.ic_ds_triangle_exclamationmark_regular_24;
     public static final int MORE = R.drawable.ic_ds_ellipsis_horizontal_regular_24;
     public static final int FOLDER = R.drawable.ic_ds_folder_regular_24;
     public static final int SHIELD = R.drawable.ic_ds_shield_checkmark_regular_24;

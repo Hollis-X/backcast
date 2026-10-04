@@ -519,7 +519,7 @@ public final class LlmUsageRegressionTest {
             http.start();
             try {
                 LlmClient.ModelsResult result = LlmClient.fetchModels(
-                        "http://127.0.0.1:" + http.getAddress().getPort() + "/v1/chat/completions", "fake-local-key");
+                        "http://127.0.0.1:" + http.getAddress().getPort() + "/v1/chat/completions", "fake-local-key", "fixture-provider");
                 check(requests.get() == 1 && wireErrors.isEmpty(), "SDK model listing changed endpoint or retried: " + wireErrors);
                 if (status == 200) check(result.error == null
                                 && result.models.equals(Arrays.asList("deepseek-fixture", "provider/custom-model")),

@@ -31,11 +31,6 @@ public class ContextMeter extends View {
     private float ratio;
     private String text = "";
 
-    public ContextMeter(Context context) {
-        super(context);
-        init();
-    }
-
     public ContextMeter(Context context, AttributeSet attrs) {
         super(context, attrs);
         init();
@@ -53,9 +48,7 @@ public class ContextMeter extends View {
         warn.setColor(0xFFD97706);
         label.setColor(0xFF6E6E76);
         label.setTextAlign(Paint.Align.CENTER);
-        if (android.os.Build.VERSION.SDK_INT >= 16) {
-            label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        }
+        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
     }
 
     /** 设置换色比例，让圆环和实际压缩阈值保持一致。 */

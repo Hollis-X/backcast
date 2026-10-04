@@ -29,8 +29,9 @@ public final class SettingsActivity extends AppCompatActivity {
     @Override protected void onResume() {
         super.onResume();
         Settings settings = new Settings(this);
+        Settings.AiProfile active = settings.activeAiProfile();
         ((TextView) findViewById(R.id.settings_ai_summary)).setText(
-                settings.model().trim().length() == 0 ? getString(R.string.status_no_model) : settings.model());
+                active.model.trim().length() == 0 ? getString(R.string.status_no_model) : active.model);
         String[] languageLabels = getResources().getStringArray(R.array.output_language_labels);
         String[] languages = { "zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de" };
         int language = 0;

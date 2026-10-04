@@ -27,7 +27,7 @@ import org.w3c.dom.Node;
 
 /** Optional exported AIDE resource-budget check; original builds and Maven cache stay read-only. */
 public final class AideResourceBudgetRegressionTest {
-    private static final Set<String> ANDROID_ROOTS = Set.of("androidx.appcompat:appcompat:1.0.0", "androidx.multidex:multidex:2.0.1");
+    private static final Set<String> ANDROID_ROOTS = Set.of("androidx.appcompat:appcompat:1.0.0");
     private static final String SDK_ROOT = "com.openai:openai-java:4.75.1";
     private static final Set<String> TRANSPORT_ROOTS = Set.of("com.squareup.okhttp3:okhttp:4.12.0", "com.squareup.okio:okio-jvm:3.6.0");
     private static final String APP = "com/mkei/backcast";

@@ -3,11 +3,8 @@ package com.mkei.backcast.tool;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.file.Files;
-import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,35 +32,36 @@ public final class ToolkitRegressionTest {
         check(catalog.length() == 13, "Catalog lost tools");
         for (int i = 0; i < catalog.length(); i++) check(!catalog.getJSONObject(i).getBoolean("configured"), "Absent tool was configured");
         check("unconfigured".equals(toolkit.status("objection").getString("state")), "Missing Python tool was marked available");
-        check(ToolCatalog.artifact("radare2", "arm64-v8a").url.contains("android-aarch64"), "ARM64 selected a desktop package");
-        boolean failed = false; try { ToolCatalog.artifact("radare2", "x86_64"); } catch (IllegalArgumentException expected) { failed = true; }
-        check(failed, "Unsupported ABI received an Android package");
+        for (int i = 0; i < catalog.length(); i++) check(!catalog.getJSONObject(i).getBoolean("download_available"), "Offline catalog offered an obsolete download");
     }
 
-    private static void configurationIsPersistentAndCannotBindShell() throws Exception {
+    private static void legacyConfigurationPersistsAndHiddenMutationsAreRejected() throws Exception {
         File dir = new File(root, "configured"); dir.mkdir();
         File executable = new File(dir, "readelf"); Files.write(executable.toPath(), new byte[]{1});
-        store.configure("readelf", executable.getPath(), null);
-        check(new ToolchainStore(store.root()).configuration("readelf").getString("path").equals(executable.getPath()), "Configuration did not persist");
+        ToolchainFixtures.configure(store, "readelf", executable.getPath(), null);
+        check(new ToolchainStore(store.root(), null, "", 0).configuration("readelf").getString("path").equals(executable.getPath()), "Configuration did not persist");
         rejects(call("configure", "radare2").put("path", "/bin/sh"));
         rejects(call("configure", "readelf").put("path", "readelf"));
-        store.clear("readelf");
+        rejects(call("clear", "readelf"));
+        rejects(call("install", "apktool"));
+        check(store.configuration("readelf").getString("path").equals(executable.getPath()), "Hidden action mutated a persisted launcher");
+        ToolchainFixtures.clear(store, "readelf");
         check(store.configuration("readelf").length() == 0, "Clear retained launcher");
         check(store.root().list().length == 1, "Registry left temporary write files");
     }
 
     private static void apktoolNeedsRealJvm() throws Exception {
         File jar = new File(root, "apktool.jar"); Files.write(jar.toPath(), new byte[]{1});
-        store.configure("apktool", jar.getPath(), null);
+        ToolchainFixtures.configure(store, "apktool", jar.getPath(), null);
         check("needs_runtime".equals(toolkit.status("apktool").getString("state")), "ART was treated as a JVM");
         rejects(call("configure", "apktool").put("path", jar.getPath()).put("runtime", "/system/bin/dalvikvm"));
-        store.clear("apktool");
+        ToolchainFixtures.clear(store, "apktool");
     }
 
     private static void actualExternalExecutableUsesStructuredArguments() throws Exception {
         File executable = new File("/usr/bin/readelf");
         check(executable.isFile(), "Host readelf fixture is unavailable");
-        store.configure("readelf", executable.getPath(), null);
+        ToolchainFixtures.configure(store, "readelf", executable.getPath(), null);
         check(toolkit.status("readelf").getBoolean("ready"), "External readelf did not probe successfully");
         File sample = new File(project, "sample.elf"); Files.copy(new File("/bin/ls").toPath(), sample.toPath());
         JSONObject result = run(call("run", "readelf").put("arguments", new JSONArray().put("-h").put(sample.getPath())));
@@ -98,7 +96,7 @@ public final class ToolkitRegressionTest {
             }
         };
         ToolkitTool target = new ToolkitTool(probe, store, project.getPath(), temporary, "arm64-v8a");
-        store.configure("apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
+        ToolchainFixtures.configure(store, "apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
         for (String failed : new String[]{"exit=0\n", "exit=0\nKilled \n", "exit=0\nException in thread \"main\" java.lang.ExceptionInInitializerError\n2.9.3\n"}) {
             output[0] = failed;
             JSONObject result = target.status("apktool");
@@ -106,20 +104,20 @@ public final class ToolkitRegressionTest {
         }
         output[0] = "exit=0\n2.9.3\n";
         check(target.status("apktool").getBoolean("ready"), "Valid Apktool version was rejected");
-        store.clear("apktool");
-        store.configure("readelf", "/usr/bin/readelf", null);
+        ToolchainFixtures.clear(store, "apktool");
+        ToolchainFixtures.configure(store, "readelf", "/usr/bin/readelf", null);
         output[0] = "exit=0\n2.9.3\n";
         check(!target.status("readelf").getBoolean("ready"), "Wrong program version declared ready");
         output[0] = "exit=0\nGNU readelf (GNU Binutils) 2.47\n";
         check(target.status("readelf").getBoolean("ready"), "Valid GNU version was rejected");
-        store.clear("readelf");
+        ToolchainFixtures.clear(store, "readelf");
         for (String id : new String[]{"objection", "radare2", "rabin2", "addr2line", "objdump", "nm", "strings", "size", "objcopy", "ar", "strip"}) {
-            store.configure(id, new File(root, id).getPath(), null);
+            ToolchainFixtures.configure(store, id, new File(root, id).getPath(), null);
             String version = "objection".equals(id) ? "objection: 1.12.5" : "radare2".equals(id) || "rabin2".equals(id)
                     ? id + " 6.2.2 0 @ android-arm-64" : "GNU " + id + " (GNU Binutils) 2.47";
             output[0] = "exit=0\n" + version + "\n";
             check(target.status(id).getBoolean("ready"), "Valid " + id + " version was rejected");
-            store.clear(id);
+            ToolchainFixtures.clear(store, id);
         }
     }
 
@@ -176,15 +174,14 @@ public final class ToolkitRegressionTest {
             }
         };
         final ToolkitTool target = new ToolkitTool(counted, store, project.getPath(), temporary, "arm64-v8a");
-        store.configure("readelf", "/usr/bin/readelf", null);
-        for (final String action : new String[]{"run", "status", "configure", "configure-binutils"}) {
+        ToolchainFixtures.configure(store, "readelf", "/usr/bin/readelf", null);
+        for (final String action : new String[]{"run", "status"}) {
             final String[] response = new String[1];
             Thread blocked = new Thread(new Runnable() {
                 public void run() {
                     try {
-                        response[0] = target.run("configure-binutils".equals(action)
-                                ? call("configure", "binutils").put("path", "/usr/bin")
-                                : call(action, "readelf").put("path", "/usr/bin/readelf"));
+                        response[0] = target.run(call(action, "readelf")
+                                .put("arguments", new JSONArray().put("--version")));
                     }
                     catch (Exception failure) { response[0] = failure.toString(); }
                 }
@@ -199,47 +196,6 @@ public final class ToolkitRegressionTest {
             check(!blocked.isAlive() && "cancelled".equals(new JSONObject(response[0]).optString("state")) && started[0] == 0,
                     "Cancelled lock waiter started a program: " + action + " " + response[0]);
         }
-    }
-
-    private static ToolCatalog.Artifact artifact(byte[] content, String format, String prefix) throws Exception {
-        return new ToolCatalog.Artifact("jar".equals(format) ? "apktool" : "radare2", "fixture", "any", "https://github.com/fixture",
-                ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(content)), format, prefix, 1024 * 1024);
-    }
-
-    private static ToolchainInstaller installer(final byte[] content) {
-        return new ToolchainInstaller(store, new ToolchainInstaller.Downloads() {
-            public InputStream open(String url) { return new ByteArrayInputStream(content); }
-        });
-    }
-
-    private static void verifiedInstallationPublishesOnlyCompleteArtifact() throws Exception {
-        byte[] data = "verified fixture jar".getBytes("UTF-8");
-        ToolCatalog.Artifact artifact = artifact(data, "jar", "");
-        File target = installer(data).installArtifact(artifact, LIVE);
-        check(Arrays.equals(data, Files.readAllBytes(new File(target, "apktool.jar").toPath())), "Installer changed artifact bytes");
-        check("official".equals(store.configuration("apktool").getString("origin")), "Installer did not register source");
-        check(target.equals(installer(new byte[]{1}).installArtifact(artifact, LIVE)), "Verified installation was downloaded again");
-        for (String file : store.root().list()) check(!file.startsWith(".install-"), "Installer left private staging files");
-    }
-
-    private static void hashMismatchAndCancellationRemoveStaging() throws Exception {
-        byte[] good = "expected".getBytes("UTF-8");
-        ToolCatalog.Artifact artifact = artifact(good, "jar", "");
-        File isolated = new File(root, "bad-store"); ToolchainStore isolatedStore = new ToolchainStore(isolated);
-        ToolchainInstaller bad = new ToolchainInstaller(isolatedStore, new ToolchainInstaller.Downloads() {
-            public InputStream open(String url) { return new ByteArrayInputStream(new byte[]{0}); }
-        });
-        boolean failed = false; try { bad.installArtifact(artifact, LIVE); } catch (Exception expected) { failed = true; }
-        check(failed && isolated.list().length == 0, "Bad SHA was installed or left staging");
-        final int[] checks = new int[]{0};
-        ToolchainInstaller cancelled = new ToolchainInstaller(isolatedStore, new ToolchainInstaller.Downloads() {
-            public InputStream open(String url) { return new ByteArrayInputStream(new byte[]{0}); }
-        });
-        failed = false;
-        try { cancelled.installArtifact(artifact, new ToolchainInstaller.Cancellation() {
-            public void check() throws Exception { if (++checks[0] >= 2) throw new InterruptedException("fixture cancellation"); }
-        }); } catch (InterruptedException expected) { failed = true; }
-        check(failed && isolated.list().length == 0, "Cancellation left staging or reported success");
     }
 
     private static byte[] tar(String name, String text, int type, String link) throws Exception {
@@ -318,32 +274,6 @@ public final class ToolkitRegressionTest {
         for (String name : project.list()) check(!name.startsWith(".backcast-export-"), "Cancelled export left scratch files");
     }
 
-    private static void officialDownloadsSmoke() throws Exception {
-        java.security.KeyStore certificates = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType());
-        certificates.load(null, null);
-        FileInputStream roots = new FileInputStream("/etc/ssl/certs/ca-certificates.crt");
-        try {
-            int index = 0;
-            for (java.security.cert.Certificate certificate : java.security.cert.CertificateFactory.getInstance("X.509").generateCertificates(roots)) {
-                certificates.setCertificateEntry("host-ca-" + index++, certificate);
-            }
-        } finally { roots.close(); }
-        javax.net.ssl.TrustManagerFactory managers = javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
-        managers.init(certificates);
-        javax.net.ssl.SSLContext tls = javax.net.ssl.SSLContext.getInstance("TLS");
-        tls.init(null, managers.getTrustManagers(), null); javax.net.ssl.SSLContext.setDefault(tls);
-        ToolchainInstaller installer = new ToolchainInstaller(store);
-        File apktool = installer.install("apktool", "arm64-v8a", LIVE);
-        store.configure("apktool", new File(apktool, "apktool.jar").getPath(),
-                new File(System.getProperty("java.home"), "bin/java").getPath());
-        JSONObject version = toolkit.status("apktool");
-        check(version.getBoolean("ready") && version.getString("probe_output").contains("3.0.3"), "Official Apktool JAR did not run in a real JVM: " + version);
-        File nativeTools = installer.install("radare2", "arm64-v8a", LIVE);
-        check(new File(nativeTools, "bin/radare2").isFile() && new File(nativeTools, "bin/rabin2").isFile(), "Official Android archive did not install complete launchers");
-        check(store.launcher("radare2").environment.getString("R2_PREFIX").equals(nativeTools.getPath()), "Relocated native prefix was lost");
-        System.out.println("PASS official Apktool 3.0.3 SHA/JVM and radare2 6.2.2 Android ARM64 SHA/archive smoke");
-    }
-
     private static void remove(File file) throws Exception {
         if (Files.isSymbolicLink(file.toPath())) { Files.delete(file.toPath()); return; }
         File[] children = file.listFiles(); if (children != null) for (File child : children) remove(child);
@@ -353,21 +283,16 @@ public final class ToolkitRegressionTest {
     public static void main(String[] args) throws Exception {
         root = Files.createTempDirectory("backcast-toolkit-").toFile();
         project = new File(root, "project"); project.mkdir(); state = new File(root, "private"); state.mkdir();
-        store = new ToolchainStore(new File(state, "toolchains"));
+        store = new ToolchainStore(new File(state, "toolchains"), null, "", 0);
         temporary = new TemporaryWorkspace(project.getPath(), false, new File(state, "temporary-workspaces"), 1);
         temporary.beginTurn(); shell = new ShellTool(false, project.getPath(), temporary);
         toolkit = new ToolkitTool(shell, store, project.getPath(), temporary, "arm64-v8a");
         try {
-            if (args.length > 0 && "--network-smoke".equals(args[0])) {
-                officialDownloadsSmoke();
-                return;
-            }
-            for (String name : new String[]{"catalogDoesNotPretendToolsAreInstalled", "configurationIsPersistentAndCannotBindShell",
+            for (String name : new String[]{"catalogDoesNotPretendToolsAreInstalled", "legacyConfigurationPersistsAndHiddenMutationsAreRejected",
                     "apktoolNeedsRealJvm", "actualExternalExecutableUsesStructuredArguments", "missingToolsReturnActionableErrorsBeforeOpeningAssets",
                     "versionProbesRejectEmptyAndCrashedSuccessfulExitCodes", "programArgumentsKeepPathBoundaries",
                     "binaryMutationRequiresDisposableExplicitOutputs",
                     "cancellationWhileWaitingForToolLockNeverStartsProgram",
-                    "verifiedInstallationPublishesOnlyCompleteArtifact", "hashMismatchAndCancellationRemoveStaging",
                     "nativeArchiveCopiesInternalLinksSafely", "unsafeArchiveNeverWritesOutsideExtractionRoot",
                     "binaryAndDirectoryExportsSurviveTurnCleanup", "exportsRejectForeignInputsSymlinksAndImplicitOverwrite",
                     "cancelledOverwritePreservesExistingFile"}) {

@@ -87,7 +87,7 @@ public final class ToolInstallProgressUiRegressionTest {
                 + "public void start(){manage(\"package_install\",R.string.toolkit_loading);}"
                 + "public Object operation(){return active;}public void replaceOperation(){active=new ToolkitOperation();active.installing=true;}"
                 + "public void event(Object operation,String stage,String artifact,long completed,long total){"
-                + "queueInstallProgress((ToolkitOperation)operation,new EmbeddedToolchain.Progress(stage,artifact,completed,total,completed,total));}"
+                + "queueInstallProgress((ToolkitOperation)operation,new EmbeddedToolchain.Progress(stage,artifact,completed,total));}"
                 + "public void drain(){main.drain();}public int queued(){return main.size();}public long delay(){return main.delay;}"
                 + "public int percent(){return installProgress.progress;}public boolean unknown(){return installProgress.indeterminate;}"
                 + "public String label(){return installProgressText.text;}public String status(){return operationStatus.text;}"

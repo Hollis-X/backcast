@@ -96,7 +96,7 @@ public final class EmbeddedToolchainRegressionTest {
         JSONArray catalog = ToolCatalog.list(); check(catalog.length() == 13, "Toolkit catalog changed unexpectedly");
         for (ToolchainStore store : new ToolchainStore[]{arm64, arm}) {
             for (int i = 0; i < catalog.length(); i++) {
-                String id = catalog.getJSONObject(i).getString("id"); ToolchainStore.Launcher launcher = store.launcher(id);
+                String id = catalog.getJSONObject(i).getString("id"); ToolchainStore.Launcher launcher = store.launcher(id, ToolchainFixtures.LIVE);
                 check(launcher != null, "Missing offline launcher: " + id);
                 if (!"apktool".equals(id)) check(new File(launcher.executable).isFile() && new File(launcher.executable).canExecute(), "Missing Android native entry: " + id);
                 check("bundled".equals(store.configuration(id).getString("origin")), "Tool requires external configuration: " + id);
@@ -106,7 +106,7 @@ public final class EmbeddedToolchainRegressionTest {
     }
 
     private static void apktoolUsesDalvikAndBundledPureJavaPngInsteadOfDesktopOrNativeImageApis() throws Exception {
-        ToolchainStore.Launcher launcher = arm64.launcher("apktool");
+        ToolchainStore.Launcher launcher = arm64.launcher("apktool", ToolchainFixtures.LIVE);
         check("/system/bin/dalvikvm64".equals(launcher.executable) && launcher.prefix.contains("brut.apktool.Main")
                 && !launcher.environment.has("CLASSPATH"), "Apktool was not launched with the independent Android runtime");
         File jar = apktoolJar(launcher);
@@ -160,7 +160,7 @@ public final class EmbeddedToolchainRegressionTest {
     }
 
     private static void pythonAndObjectionArePrivateAndDoNotRequireTermux() throws Exception {
-        ToolchainStore.Launcher objection = arm64.launcher("objection");
+        ToolchainStore.Launcher objection = arm64.launcher("objection", ToolchainFixtures.LIVE);
         File home = new File(objection.environment.getString("PYTHONHOME"));
         check(home.getPath().startsWith(arm64.root().getPath()), "Python uses an external installation");
         String subprocess = new String(bytes(new File(home, "lib/python3.14/subprocess.py")), "UTF-8");
@@ -198,19 +198,19 @@ public final class EmbeddedToolchainRegressionTest {
     }
 
     private static void clearRestoresTheBundledLauncherAndCancelledPreparationLeavesNoStage() throws Exception {
-        arm64.clear("radare2"); check(arm64.launcher("radare2") != null, "Clear permanently disabled the built-in launcher");
-        arm64.configure("apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
-        check("/system/bin/dalvikvm64".equals(arm64.launcher("apktool").executable)
+        ToolchainFixtures.clear(arm64, "radare2"); check(arm64.launcher("radare2", ToolchainFixtures.LIVE) != null, "Missing registry entry permanently disabled the built-in launcher");
+        ToolchainFixtures.configure(arm64, "apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
+        check("/system/bin/dalvikvm64".equals(arm64.launcher("apktool", ToolchainFixtures.LIVE).executable)
                 && "bundled".equals(arm64.configuration("apktool").getString("origin")), "Upgrade retained the old external JVM launcher");
         File registry = new File(arm64.root(), "registry.json");
         JSONObject old = new JSONObject(new String(bytes(registry), "UTF-8"));
         old.getJSONObject("tools").getJSONObject("apktool").put("path", "/system/bin/app_process")
                 .put("prefix", new JSONArray().put("/").put("brut.apktool.Main"))
-                .put("environment", new JSONObject().put("CLASSPATH", apktoolJar(arm64.launcher("apktool")).getPath()));
+                .put("environment", new JSONObject().put("CLASSPATH", apktoolJar(arm64.launcher("apktool", ToolchainFixtures.LIVE)).getPath()));
         Files.write(registry.toPath(), old.toString().getBytes("UTF-8"));
         ToolchainStore migrated = new ToolchainStore(arm64.root(), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME);
-        check("/system/bin/dalvikvm64".equals(migrated.launcher("apktool").executable)
-                && !migrated.launcher("apktool").environment.has("CLASSPATH") && apktoolJar(migrated.launcher("apktool")).isFile(),
+        check("/system/bin/dalvikvm64".equals(migrated.launcher("apktool", ToolchainFixtures.LIVE).executable)
+                && !migrated.launcher("apktool", ToolchainFixtures.LIVE).environment.has("CLASSPATH") && apktoolJar(migrated.launcher("apktool", ToolchainFixtures.LIVE)).isFile(),
                 "Upgrade retained a previously registered app_process launcher");
         final ToolchainStore cancelled = new ToolchainStore(new File(root, "cancelled"), packaged(), "arm64-v8a", 30);
         final int[] checks = new int[1]; boolean interrupted = false;
@@ -237,7 +237,7 @@ public final class EmbeddedToolchainRegressionTest {
         try { byte[] buffer = new byte[16384]; int read; while ((read = stream.read(buffer)) >= 0) sha.update(buffer, 0, read); }
         finally { stream.close(); }
         sha.update((byte) 0); common.put("bytes", common.getLong("bytes") + 1).put("sha256", ToolchainInstaller.hex(sha.digest()));
-        File oldJar = apktoolJar(arm64.launcher("apktool"));
+        File oldJar = apktoolJar(arm64.launcher("apktool", ToolchainFixtures.LIVE));
         ToolchainStore upgraded = new ToolchainStore(arm64.root(), new EmbeddedToolchain.Assets() {
             public InputStream open(String name) throws Exception {
                 if ("toolchain/manifest.json".equals(name)) return new ByteArrayInputStream(updated.toString().getBytes("UTF-8"));
@@ -245,7 +245,7 @@ public final class EmbeddedToolchainRegressionTest {
                 return new FileInputStream(new File(assets, name));
             }
         }, "arm64-v8a", 30, ANDROID_RUNTIME);
-        File newJar = apktoolJar(upgraded.launcher("apktool"));
+        File newJar = apktoolJar(upgraded.launcher("apktool", ToolchainFixtures.LIVE));
         check(!oldJar.equals(newJar) && oldJar.isFile() && newJar.isFile(), "Payload update overwrote/deleted a potentially running tool or failed on reused release date");
     }
 
@@ -258,9 +258,9 @@ public final class EmbeddedToolchainRegressionTest {
         fixture.prefix.add("-c"); fixture.prefix.add("import time; time.sleep(0.2); print('fixture completed')"); fixture.companion = companion.getPath();
         ShellTool shell = new ShellTool(false, project.getPath(), temporary);
         List<String> arguments = new ArrayList<String>(); arguments.add("version");
-        check(shell.runProgram(fixture, arguments, true, 5).startsWith("exit=0\n") && !marker.exists(), "Version probe started Frida server");
+        check(shell.runProgram(fixture, arguments, true, 5, shell.cancellationEpoch()).startsWith("exit=0\n") && !marker.exists(), "Version probe started Frida server");
         arguments.clear(); arguments.add("run");
-        check(shell.runProgram(fixture, arguments, true, 5).startsWith("exit=0\n") && marker.exists(), "Single invocation did not start its companion");
+        check(shell.runProgram(fixture, arguments, true, 5, shell.cancellationEpoch()).startsWith("exit=0\n") && marker.exists(), "Single invocation did not start its companion");
         String pid = new String(bytes(marker), "UTF-8");
         File status = new File("/proc/" + pid + "/status");
         check(!status.exists() || new String(bytes(status), "UTF-8").contains("State:\tZ"), "Completed invocation left its Frida server alive");

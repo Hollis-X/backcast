@@ -8,11 +8,11 @@ public final class ToolBatchProbe {
     public interface Listener { void onProgress(Progress progress); }
     public static final class Progress {
         public final String stage, id, name;
-        public final int completed, total, ready, failed;
+        public final int completed, total;
         private final String result;
-        private Progress(String stage, String id, String name, int completed, int total, int ready, int failed, JSONObject result) {
+        private Progress(String stage, String id, String name, int completed, int total, JSONObject result) {
             this.stage = stage; this.id = id; this.name = name; this.completed = completed;
-            this.total = total; this.ready = ready; this.failed = failed; this.result = result == null ? "" : result.toString();
+            this.total = total; this.result = result == null ? "" : result.toString();
         }
         public JSONObject result() throws Exception { return result.length() == 0 ? null : new JSONObject(result); }
     }
@@ -23,7 +23,7 @@ public final class ToolBatchProbe {
         for (int i = 0; i < catalog.length(); i++) {
             cancellation.check();
             JSONObject tool = catalog.getJSONObject(i); String id = tool.getString("id"), name = tool.getString("name");
-            if (listener != null) listener.onProgress(new Progress("running", id, name, i, catalog.length(), ready, failed, null));
+            if (listener != null) listener.onProgress(new Progress("running", id, name, i, catalog.length(), null));
             cancellation.check();
             JSONObject result;
             try { result = toolkit.status(id); }
@@ -39,7 +39,7 @@ public final class ToolBatchProbe {
             if (output.length() > 12000) result.put("probe_output", output.substring(0, 12000)).put("output_truncated", true);
             if ("ready".equals(result.optString("state")) && result.optBoolean("ready")) ready++; else failed++;
             results.put(result);
-            if (listener != null) listener.onProgress(new Progress("finished", id, name, i + 1, catalog.length(), ready, failed, result));
+            if (listener != null) listener.onProgress(new Progress("finished", id, name, i + 1, catalog.length(), result));
         }
         cancellation.check();
         return new JSONObject().put("state", "batch_complete").put("completed", catalog.length()).put("total", catalog.length())

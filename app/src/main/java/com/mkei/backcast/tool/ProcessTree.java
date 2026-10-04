@@ -19,7 +19,6 @@ final class ProcessTree {
         }
     }
 
-    private final long parent;
     private final boolean root;
     private final Map<Long, Identity> known = new HashMap<Long, Identity>();
     private Identity leader;
@@ -36,7 +35,6 @@ final class ProcessTree {
                 pid = ((Number)field.get(process)).longValue();
             } catch (Exception ignored) { }
         }
-        parent = pid;
         Identity initial = identity(pid);
         if (initial != null) known.put(Long.valueOf(pid), initial);
         sample();
@@ -92,12 +90,6 @@ final class ProcessTree {
         } while (changed);
     }
 
-    synchronized void observeShell(long pid) {
-        if (pid <= 0) return;
-        Identity current = identity(pid);
-        if (current != null) known.put(Long.valueOf(pid), current);
-    }
-
     synchronized boolean observeSupervisor(String stat) {
         Identity value = parse(stat);
         if (value == null) return false;
@@ -111,11 +103,11 @@ final class ProcessTree {
 
     synchronized boolean stop() {
         sample();
-        signal("STOP", true);
+        signal("STOP");
         sample();
-        signal("STOP", true);
+        signal("STOP");
         sample();
-        signal("KILL", true);
+        signal("KILL");
         long deadline = System.currentTimeMillis() + 600;
         while (System.currentTimeMillis() < deadline) {
             if (!hasSurvivors()) return true;
@@ -152,20 +144,14 @@ final class ProcessTree {
         return false;
     }
 
-    synchronized void stopChildren() {
-        sample();
-        signal("KILL", false);
-    }
-
-    private void signal(String signal, boolean includeParent) {
-        if (leader != null && includeParent) {
+    private void signal(String signal) {
+        if (leader != null) {
             // Leader stays alive until cleanup. Verify it again in the signaling
             // shell, including under su where Java may not be allowed to read proc.
             execute(guard(leader, "kill -s " + signal + " -- -" + leader.pid));
         }
         StringBuilder command = new StringBuilder();
         for (Identity tracked : known.values()) {
-            if (!includeParent && tracked.pid == parent) continue;
             Identity current = identity(tracked.pid);
             if ((root && current == null) || (current != null && tracked.started.equals(current.started))) {
                 command.append(guard(tracked, "kill -s " + signal + " " + tracked.pid)).append(';');

@@ -81,14 +81,14 @@ public final class ArtRuntimeLauncherRegressionTest {
     private static void registrationDoesNotRequireArtAndOtherToolsRemainIndependent() throws Exception {
         Device device = new Device("absent"); ToolchainStore store = installed(device, "no-art-store");
         check("android-art".equals(store.configuration("apktool").getString("runtime_family")), "Installation omitted the logical ART launcher");
-        boolean unavailable = false; try { store.launcher("apktool"); }
+        boolean unavailable = false; try { store.launcher("apktool", ToolchainFixtures.LIVE); }
         catch (IOException expected) { unavailable = expected.getMessage().contains("没有可执行的 ART"); }
-        check(unavailable && store.launcher("readelf") != null, "Missing ART prevented independent GNU tool launchers");
+        check(unavailable && store.launcher("readelf", ToolchainFixtures.LIVE) != null, "Missing ART prevented independent GNU tool launchers");
     }
 
     private static void existingRegistryRefreshesWithoutRestartAndFixesOldAppProcessBootstrap() throws Exception {
         Device device = new Device("changing"); device.runtime("/system/bin/dalvikvm64", 64);
-        ToolchainStore store = installed(device, "changing-store"); ToolchainStore.Launcher first = store.launcher("apktool");
+        ToolchainStore store = installed(device, "changing-store"); ToolchainStore.Launcher first = store.launcher("apktool", ToolchainFixtures.LIVE);
         check(first.executable.endsWith("dalvikvm64"), "Initial launcher did not select the executable runtime");
         File registry = new File(store.root(), "registry.json"); JSONObject data = new JSONObject(new String(Files.readAllBytes(registry.toPath()), "UTF-8"));
         JSONObject old = data.getJSONObject("tools").getJSONObject("apktool");
@@ -97,7 +97,7 @@ public final class ArtRuntimeLauncherRegressionTest {
         Files.write(registry.toPath(), data.toString().getBytes("UTF-8"));
         Files.delete(device.file("/system/bin/dalvikvm64").toPath());
         String newPath = "/apex/com.android.runtime/bin/dalvikvm32"; device.runtime(newPath, 32);
-        ToolchainStore.Launcher refreshed = store.launcher("apktool");
+        ToolchainStore.Launcher refreshed = store.launcher("apktool", ToolchainFixtures.LIVE);
         check(newPath.equals(refreshed.executable) && refreshed.prefix.contains("-Dsun.arch.data.model=32")
                 && refreshed.prefix.contains("-cp") && refreshed.prefix.contains("brut.apktool.Main")
                 && !refreshed.environment.has("CLASSPATH"), "Existing registry retained the stale path, bootstrap or wrong JVM bitness");

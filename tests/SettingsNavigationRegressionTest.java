@@ -77,7 +77,7 @@ public final class SettingsNavigationRegressionTest {
                 + "static class Resources{String[] getStringArray(int id){return new String[]{\"zh\",\"tw\",\"en\",\"ja\",\"ko\",\"es\",\"fr\",\"de\"};}"
                 + "Metrics getDisplayMetrics(){return new Metrics();}}static class Metrics{float density=2;}"
                 + "static class Settings{static final String ACCESS_FULL=\"full\",ACCESS_GUARDED=\"guarded\";static String model=\"\",language=\"zh-CN\",effort=\"max\",access=\"full\";"
-                + "static boolean root;Settings(SettingsActivity a){}String model(){return model;}String outputLanguage(){return language;}"
+                + "static boolean root;Settings(SettingsActivity a){}static final class AiProfile{final String model;AiProfile(String value){model=value;}}AiProfile activeAiProfile(){return new AiProfile(model);}String outputLanguage(){return language;}"
                 + "String reasoningEffort(){return effort;}String accessLevel(){return access;}boolean useRoot(){return root;}}"
                 + "Map<Integer,View> views=new HashMap<Integer,View>();List<Class<?>> opened=new ArrayList<Class<?>>();int finishes;"
                 + "SettingsActivity(){views.put(1,new Toolbar());for(int i=2;i<=10;i++)views.put(i,(i==2||i==5||i==8)?new View():new ImageView());"

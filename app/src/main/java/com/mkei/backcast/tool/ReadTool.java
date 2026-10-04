@@ -25,10 +25,6 @@ public class ReadTool implements Tool {
     private volatile int epoch;
     private volatile int runEpoch;
 
-    public ReadTool(String workDir, boolean useRoot) {
-        this(workDir, useRoot, null);
-    }
-
     public ReadTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
         this.useRoot = useRoot;
@@ -119,10 +115,6 @@ public class ReadTool implements Tool {
         } catch (IllegalArgumentException e) {
             return "错误：" + e.getMessage();
         }
-    }
-
-    static String readFile(File file, String displayPath, int offset, int limit) throws Exception {
-        return readFile(file, displayPath, offset, limit, null, false);
     }
 
     private static String readFile(File file, String displayPath, int offset, int limit, Stop stop,

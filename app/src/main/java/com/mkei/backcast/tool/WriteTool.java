@@ -15,10 +15,6 @@ public class WriteTool implements Tool {
     private final TemporaryWorkspace temporary;
     private volatile int epoch;
 
-    public WriteTool(String workDir, boolean useRoot) {
-        this(workDir, useRoot, null);
-    }
-
     public WriteTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
         this.useRoot = useRoot;

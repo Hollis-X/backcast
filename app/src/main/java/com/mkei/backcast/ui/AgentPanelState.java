@@ -13,7 +13,7 @@ import org.json.JSONObject;
 
 /** Reading and refresh state shared by the task list and its detail view. */
 public final class AgentPanelState {
-    public static final int TASK = 0, ACTIVITY = 1, RESULT = 2;
+    public static final int TASK = 0, ACTIVITY = 1;
     public static final int HISTORY_PAGE_SIZE = 40, RESULT_PAGE_SIZE = 8000;
     public String selectedId = "";
     public int tab = TASK, historyEnd = -1, resultOffset;

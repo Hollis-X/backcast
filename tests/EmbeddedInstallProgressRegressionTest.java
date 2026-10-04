@@ -64,7 +64,6 @@ public final class EmbeddedInstallProgressRegressionTest {
                 check(value.completed >= previous && value.completed <= value.total, "Non-monotonic or overflowing real progress");
                 previous = value.completed;
                 if (value.total > 0) { if (total < 0) total = value.total; else check(total == value.total, "Known whole-package budget changed mid-install"); }
-                check(value.stageCompleted >= 0 && value.stageCompleted <= value.stageTotal, "Phase byte count exceeded expected archive size");
                 if (value.percent() == 100) check(complete && i == values.size() - 1 && "complete".equals(value.stage), "100% preceded publication or escaped failure");
             }
             check(!values.isEmpty(), "No installation progress was delivered");
@@ -104,18 +103,25 @@ public final class EmbeddedInstallProgressRegressionTest {
         } }).getBoolean("installed"), "Offline install failed"); events.validate(true);
         EmbeddedToolchain.Progress last = events.values.get(events.values.size() - 1);
         check(last.total == payload.common.length + payload.commonTar.length + 2L * payload.nativeTar.length + 3, "Budget did not include actual gzip/TAR reads, both publications and registration");
-        int verifying = 0, unpacking = 0, publishing = 0;
+        List<String> phases = new ArrayList<String>();
+        List<Long> starts = new ArrayList<Long>();
         for (EmbeddedToolchain.Progress value : events.values) {
-            if ("verifying".equals(value.stage) && value.stageCompleted == value.stageTotal) verifying++;
-            if ("unpacking".equals(value.stage) && value.stageCompleted == value.stageTotal) unpacking++;
-            if ("publishing".equals(value.stage) && value.stageCompleted == 1) publishing++;
+            String phase = value.stage + (value.artifact.isEmpty() ? "" : ":" + value.artifact);
+            if (phases.isEmpty() || !phase.equals(phases.get(phases.size() - 1))) {
+                phases.add(phase); starts.add(value.completed);
+            }
             if (!value.artifact.isEmpty()) check("any".equals(value.artifact) || "arm64-v8a".equals(value.artifact), "Progress lost payload identity");
         }
-        check(verifying == 2 && unpacking == 2 && publishing == 2 && events.has("registering"), "Real phases were omitted or counted twice");
+        check(phases.equals(java.util.Arrays.asList("checking", "verifying:any", "unpacking:any", "publishing:any",
+                "verifying:arm64-v8a", "unpacking:arm64-v8a", "publishing:arm64-v8a", "registering", "complete")),
+                "Real phase transitions were omitted, duplicated or reordered");
+        long[] work = {payload.common.length, payload.commonTar.length, 1, payload.nativeTar.length, payload.nativeTar.length, 1, 1};
+        for (int i = 0; i < work.length; i++) check(starts.get(i + 2) - starts.get(i + 1) == work[i],
+                "Real total progress did not account for the completed phase " + phases.get(i + 1));
         check(events.values.size() < 30, "Fast byte reads were emitted without throttling"); stagingGone(store);
     }
     private static void cachedAndReinstalledPackagesResetTheirProgress() throws Exception {
-        Payload payload = new Payload(); ToolchainStore store = payload.store("cache"); store.installBundled(LIVE);
+        Payload payload = new Payload(); ToolchainStore store = payload.store("cache"); store.installBundled(LIVE, null);
         int opened = payload.opens; Events cached = new Events(); store.installBundled(LIVE, cached); cached.validate(true);
         check(payload.opens == opened && !cached.has("verifying") && !cached.has("unpacking"), "Cached installation faked copying or reread assets");
         check(cached.values.get(cached.values.size() - 1).total == 1, "Cached progress retained an earlier byte budget");
@@ -132,7 +138,7 @@ public final class EmbeddedInstallProgressRegressionTest {
                 events.onProgress(value); if (stage.equals(value.stage)) cancelled.set(true);
             } }); } catch (InterruptedException expected) { interrupted = true; }
             check(interrupted, "Progress callback swallowed cancellation at " + stage); events.validate(false); stagingGone(store);
-            check(store.installBundled(LIVE).getBoolean("installed"), "Cancelled phase prevented a verified retry");
+            check(store.installBundled(LIVE, null).getBoolean("installed"), "Cancelled phase prevented a verified retry");
         }
     }
     private static void checksumAndObserverFailureCannotReportSuccess() throws Exception {
@@ -145,7 +151,7 @@ public final class EmbeddedInstallProgressRegressionTest {
             failed = false; try { listenerStore.installBundled(LIVE, new EmbeddedToolchain.ProgressListener() {
                 public void onProgress(EmbeddedToolchain.Progress value) {
                     observed.onProgress(value);
-                    if (observerStage.equals(value.stage) || "bytes".equals(observerStage) && "verifying".equals(value.stage) && value.stageCompleted > 0)
+                    if (observerStage.equals(value.stage) || "bytes".equals(observerStage) && "verifying".equals(value.stage) && value.completed > 0)
                         throw new IllegalStateException("broken observer");
                 }
             }); } catch (IllegalStateException expected) { failed = true; }
@@ -156,7 +162,7 @@ public final class EmbeddedInstallProgressRegressionTest {
         failed = false;
         try { outputStore.installBundled(LIVE, new EmbeddedToolchain.ProgressListener() { public void onProgress(EmbeddedToolchain.Progress value) {
             outputEvents.onProgress(value);
-            if ("verifying".equals(value.stage) && value.stageCompleted == 0) {
+            if ("verifying".equals(value.stage) && value.completed == 0) {
                 for (File directory : outputStore.root().listFiles()) if (directory.getName().startsWith(".embedded-"))
                     check(new File(directory, "payload.archive").mkdir(), "Could not inject a destination-open failure");
             }
@@ -172,7 +178,7 @@ public final class EmbeddedInstallProgressRegressionTest {
         } }); } catch (Exception expected) { failed = true; }
         check(failed, "Broken persistent registration was reported as successful"); registryEvents.validate(false); stagingGone(registryStore);
         Files.delete(new File(registryStore.root(), "registry.json").toPath());
-        check(registryStore.installBundled(LIVE).getBoolean("installed"), "Registration failure prevented a clean verified retry");
+        check(registryStore.installBundled(LIVE, null).getBoolean("installed"), "Registration failure prevented a clean verified retry");
     }
     private static void callbacksKeepThePackageMutationGateHeld() throws Exception {
         final ToolchainStore store = new Payload().store("gate"); final Throwable[] failure = new Throwable[1]; final boolean[] tested = new boolean[1];
@@ -190,7 +196,7 @@ public final class EmbeddedInstallProgressRegressionTest {
     private static void progressSnapshotsAreImmutable() throws Exception {
         for (Field field : EmbeddedToolchain.Progress.class.getFields()) check(Modifier.isFinal(field.getModifiers()), "Progress fields can change after delivery");
         Payload payload = new Payload(); Events events = new Events();
-        ToolkitTool tool = new ToolkitTool(new ShellTool(false, root.getPath()), payload.store("toolkit"), root.getPath(), null, "arm64-v8a");
+        ToolkitTool tool = new ToolkitTool(new ShellTool(false, root.getPath(), null), payload.store("toolkit"), root.getPath(), null, "arm64-v8a");
         check(tool.installBundled(events).getBoolean("installed"), "Toolkit/UI bridge did not forward installation progress"); events.validate(true);
         check(events.values.get(0).completed == 0 && events.values.get(0).total == 0, "The initial immutable snapshot was mutated during installation");
     }

@@ -27,31 +27,10 @@ public class ChatStore extends SQLiteOpenHelper {
         public String title;
     }
 
-    /** Local transport evidence; sensitive values are removed before persistence. */
-    public static final class RequestEvent {
-        public final long id, recordedAt, elapsedMs;
-        public final String purpose, outcome, reason;
-        public final String diagnostic;
-        public final int retryCount;
-
-        RequestEvent(long id, long recordedAt, long elapsedMs, String purpose,
-                String outcome, String reason, int retryCount) {
-            this(id, recordedAt, elapsedMs, purpose, outcome, reason, retryCount, "");
-        }
-        RequestEvent(long id, long recordedAt, long elapsedMs, String purpose,
-                String outcome, String reason, int retryCount, String diagnostic) {
-            this.id = id; this.recordedAt = recordedAt; this.elapsedMs = elapsedMs;
-            this.purpose = purpose; this.outcome = outcome; this.reason = reason;
-            this.retryCount = retryCount;
-            this.diagnostic = diagnostic == null ? "" : diagnostic;
-        }
-    }
-
     /** A bounded transcript page; cursors stay valid while new messages are appended. */
     public static final class MessagePage {
         public final List<Message> messages;
         public final long firstId;
-        public final long lastId;
         public final long earlierCount;
         public final String requestBefore;
         /** Only tool call labels, for results whose assistant is in the previous page. */
@@ -59,17 +38,10 @@ public class ChatStore extends SQLiteOpenHelper {
         /** Results just after this page; used to finish existing labels, never drawn twice. */
         public final List<Message> trailingResults;
 
-        public MessagePage(List<Message> messages, long firstId, long lastId, long earlierCount,
-                String requestBefore, Message leadingAssistant) {
-            this(messages, firstId, lastId, earlierCount, requestBefore, leadingAssistant,
-                    new ArrayList<Message>());
-        }
-
-        public MessagePage(List<Message> messages, long firstId, long lastId, long earlierCount,
+        public MessagePage(List<Message> messages, long firstId, long earlierCount,
                 String requestBefore, Message leadingAssistant, List<Message> trailingResults) {
             this.messages = Collections.unmodifiableList(messages);
             this.firstId = firstId;
-            this.lastId = lastId;
             this.earlierCount = earlierCount;
             this.requestBefore = requestBefore;
             this.leadingAssistant = leadingAssistant;
@@ -173,11 +145,6 @@ public class ChatStore extends SQLiteOpenHelper {
 
     /** Keep at most 200 completed attempts per conversation, independently of model history. */
     public synchronized void recordRequest(long sessionId, String purpose, long elapsedMs,
-            String outcome, String reason, int retryCount) {
-        recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount, "");
-    }
-
-    public synchronized void recordRequest(long sessionId, String purpose, long elapsedMs,
             String outcome, String reason, int retryCount, String diagnostic) {
         if (sessionId < 0) return;
         ContentValues values = new ContentValues();
@@ -200,19 +167,6 @@ public class ChatStore extends SQLiteOpenHelper {
                     new Object[]{Long.valueOf(sessionId), Long.valueOf(sessionId)});
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
-    }
-
-    public synchronized List<RequestEvent> requestEvents(long sessionId, int limit) {
-        List<RequestEvent> events = new ArrayList<RequestEvent>();
-        Cursor cursor = getReadableDatabase().query("request_events",
-                new String[]{"id", "recorded_at", "elapsed_ms", "purpose", "outcome", "reason", "retry_count", "diagnostic"},
-                "session_id=?", new String[]{String.valueOf(sessionId)}, null, null, "id DESC",
-                String.valueOf(Math.max(1, Math.min(200, limit))));
-        try {
-            while (cursor.moveToNext()) events.add(new RequestEvent(cursor.getLong(0), cursor.getLong(1),
-                    cursor.getLong(2), cursor.getString(3), cursor.getString(4), cursor.getString(5), cursor.getInt(6), cursor.getString(7)));
-        } finally { cursor.close(); }
-        return Collections.unmodifiableList(events);
     }
 
     private static void createDiagnosticErrors(SQLiteDatabase db) {
@@ -404,10 +358,6 @@ public class ChatStore extends SQLiteOpenHelper {
         }
     }
 
-    public synchronized List<Message> messages(long sessionId) {
-        return readMessages(sessionId, -1);
-    }
-
     /** Call on a worker thread. A non-positive cursor selects the latest page. */
     public synchronized MessagePage messagePage(long sessionId, long beforeId, int limit) {
         int pageSize = Math.min(128, Math.max(1, limit));
@@ -435,7 +385,7 @@ public class ChatStore extends SQLiteOpenHelper {
             c.close();
         }
         Collections.reverse(out);
-        if (out.isEmpty()) return new MessagePage(out, 0, 0, 0, "", null);
+        if (out.isEmpty()) return new MessagePage(out, 0, 0, "", null, Collections.<Message>emptyList());
 
         String[] prefixArgs = new String[]{String.valueOf(sessionId), String.valueOf(firstId)};
         long earlierCount = 0;
@@ -491,7 +441,7 @@ public class ChatStore extends SQLiteOpenHelper {
                 previous.close();
             }
         }
-        return new MessagePage(out, firstId, lastId, earlierCount, request, leading,
+        return new MessagePage(out, firstId, earlierCount, request, leading,
                 trailingResults(db, sessionId, lastId, out));
     }
 

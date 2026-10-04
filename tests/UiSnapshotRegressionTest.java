@@ -193,12 +193,11 @@ public final class UiSnapshotRegressionTest {
         final Fixture fixture = new Fixture();
         final int[] executions = {0};
         final ArrayList<String> stages = new ArrayList<String>();
-        final ArrayList<Integer> attempts = new ArrayList<Integer>();
         final AgentLoop.Quiet listener = new AgentLoop.Quiet() {
-            @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+            @Override public void onProgress(int gen, String phase, String name, String detail) {
                 check(AgentLoop.callingUiSource() == fixture.loop && fixture.loop.callingUiSequence() > 0,
                         "Progress bypassed the source/token/snapshot boundary");
-                stages.add(phase); attempts.add(Integer.valueOf(attempt));
+                stages.add(phase);
                 check(!detail.contains("secret-token"), "Stage exposed provider credentials or echoed content");
             }
         };
@@ -213,21 +212,21 @@ public final class UiSnapshotRegressionTest {
                     failed.error = "HTTP 503: secret-token and echoed prompt"; return failed;
                 }
                 if (f.calls == 2) {
-                    check(!stages.contains("retry") && !attempts.contains(Integer.valueOf(1)), "Explicit user resume was reported as an automatic retry");
+                    check(!stages.contains("retry"), "Explicit user resume was reported as an automatic retry");
                     final ArrayList<String> snapshotStages = new ArrayList<String>();
                     AgentLoop.Quiet replay = new AgentLoop.Quiet() {
-                        @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
-                            snapshotStages.add(phase + ":" + attempt);
+                        @Override public void onProgress(int gen, String phase, String name, String detail) {
+                            snapshotStages.add(phase);
                         }
                     };
                     f.loop.replayUiSnapshot(f.snapshot(replay), replay);
-                    check(snapshotStages.equals(java.util.Arrays.asList("model:0")), "Reentry lost the current phase or replayed a failed-request retry");
+                    check(snapshotStages.equals(java.util.Arrays.asList("model")), "Reentry lost the current phase or replayed a failed-request retry");
                     assertCurrentStageSurvivesReentryWithoutInventedRetries(f);
                     f.loop.setListener(listener);
                     sink.onToolCall(0, "tool-id", "probe", "{}"); return toolReply();
                 }
                 check(executions[0] == 1, "Explicit continuation duplicated a real tool execution");
-                check(attempts.get(attempts.size() - 1).intValue() == 0, "Normal followup invented a retry count");
+                check(!stages.contains("retry"), "Normal followup invented an automatic retry");
                 assertCurrentStageSurvivesReentryWithoutInventedRetries(f);
                 f.loop.setListener(listener);
                 return answer("done");
@@ -246,11 +245,11 @@ public final class UiSnapshotRegressionTest {
         final ArrayList<String> phases = new ArrayList<String>();
         final ArrayList<Long> sequences = new ArrayList<Long>();
         AgentLoop.Quiet replay = new AgentLoop.Quiet() {
-            @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+            @Override public void onProgress(int gen, String phase, String name, String detail) {
                 check(AgentLoop.callingUiSource() == fixture.loop && fixture.loop.callingToken() == 9
                                 && fixture.loop.isReplayingUiSnapshot() && gen == fixture.loop.generation(),
                         "Recovered progress lost its source, token, generation or replay boundary");
-                check(attempt == 0 && !"retry".equals(phase), "Recovered current phase invented an automatic retry");
+                check(!"retry".equals(phase), "Recovered current phase invented an automatic retry");
                 phases.add(phase); sequences.add(fixture.loop.callingUiSequence());
             }
             @Override public void onToolPreview(int gen, int index, String id, String name, String args) {
@@ -278,7 +277,7 @@ public final class UiSnapshotRegressionTest {
                 }
             });
             fixture.loop.setListener(new AgentLoop.Quiet() {
-                @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) { events.add(phase); }
+                @Override public void onProgress(int gen, String phase, String name, String detail) { events.add(phase); }
                 @Override public void onToolStart(int gen, String name, String args) { events.add("start"); }
             });
             fixture.script = new Script() {

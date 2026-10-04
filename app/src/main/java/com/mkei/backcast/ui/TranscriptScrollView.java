@@ -11,16 +11,8 @@ import android.widget.ScrollView;
 public class TranscriptScrollView extends ScrollView {
     private Runnable touchStart;
 
-    public TranscriptScrollView(Context context) {
-        super(context);
-    }
-
     public TranscriptScrollView(Context context, AttributeSet attrs) {
         super(context, attrs);
-    }
-
-    public TranscriptScrollView(Context context, AttributeSet attrs, int style) {
-        super(context, attrs, style);
     }
 
     public void setOnTouchStartListener(Runnable listener) {
@@ -43,7 +35,7 @@ public class TranscriptScrollView extends ScrollView {
             // Native DOWN aborts both fling and smooth scrolling without private API access.
             super.onTouchEvent(down);
             super.onTouchEvent(cancel);
-            // API 16 also needs intercept CANCEL to clear a non-dragging pointer/tracker.
+            // Intercept CANCEL also clears a non-dragging pointer/tracker.
             super.onInterceptTouchEvent(cancel);
         } finally {
             down.recycle();

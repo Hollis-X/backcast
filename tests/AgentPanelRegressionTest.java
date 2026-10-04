@@ -93,7 +93,7 @@ public final class AgentPanelRegressionTest {
         AgentPanelState state = (AgentPanelState) get(panel, "state"); state.tab = AgentPanelState.ACTIVITY;
         invoke(panel, "renderDetail", false);
         check(visible(panel).contains("ONLY_ACTIVITY_TAB") && !visible(panel).contains(row.task) && !visible(panel).contains("ONLY_RESULT_TAB"), "Activity tab is not separate");
-        state.tab = AgentPanelState.RESULT; invoke(panel, "renderDetail", false);
+        state.tab = 2; invoke(panel, "renderDetail", false);
         check(visible(panel).contains("ONLY_RESULT_TAB") && !visible(panel).contains("ONLY_ERROR_TAB")
                         && visible(panel).contains("执行错误") && !visible(panel).contains("ONLY_ACTIVITY_TAB"),
                 "Result view loses evidence, exposes raw errors, or mixes activity");
@@ -111,23 +111,23 @@ public final class AgentPanelRegressionTest {
         }
         pass("toolGenerationReviewApprovalAndChildWaitingHaveDistinctVisibleStages");
     }
-    private static void retryCountAndReasonAreVisibleAndRefreshIndependentlyOfPhase() throws Exception {
-        Object panel = panel(); SubAgentManager.Record row = record("retries", SubAgentManager.RUNNING, "retrying");
-        row.retryAttempt = 2; row.retryReason = "接口返回 HTTP 503";
+    private static void failedAssignmentKeepsItsTaskAndManualContinuationRefreshesItsState() throws Exception {
+        Object panel = panel(); SubAgentManager.Record row = record("continued", SubAgentManager.RUNNING, "thinking");
         set(panel, "selected", row); invoke(panel, "renderDetail", false);
-        check(!visible(panel).contains("重试") && !visible(panel).contains("HTTP 503")
-                        && visible(panel).contains(row.task), "Retry diagnostics leaked or assignment disappeared");
-        invoke(panel, "renderList", Arrays.asList(row));
-        check(!visible(panel).contains("重试") && !visible(panel).contains("HTTP 503"), "Compact list leaked retry metadata");
-        row.retryAttempt = 3; row.retryReason = "等待模型响应超时";
-        invoke(panel, "renderList", Arrays.asList(row));
-        check(!visible(panel).contains("重试") && !visible(panel).contains("超时"), "Retry change exposed private failure text");
+        check(visible(panel).contains(row.task), "Running assignment disappeared");
         row.status=SubAgentManager.FAILED;row.phase="failed";row.progress="RAW_FAILURE_PROGRESS";row.error="RAW_API_STACK";row.revision++;
         set(panel,"selected",row);invoke(panel,"renderDetail",false);
         check(visible(panel).contains("失败")&&visible(panel).contains(row.task)
                         &&!visible(panel).contains("RAW_FAILURE")&&!visible(panel).contains("RAW_API_STACK"),
                 "Failed task became hidden or exposed API failure details");
-        pass("retryAndFailureMetadataStayPrivateWhileTheActualFailedAssignmentRemainsVisible");
+        invoke(panel, "renderList", Arrays.asList(row));
+        check(visible(panel).contains("失败") && !visible(panel).contains("RAW_API_STACK"), "Compact task list hid failure or leaked its private error");
+        row.status = SubAgentManager.RUNNING; row.phase = "thinking"; row.progress = "MANUAL_CONTINUATION_PROGRESS";
+        row.task = "NEW_USER_ASSIGNMENT"; row.error = ""; row.revision++;
+        invoke(panel, "renderDetail", false);
+        check(visible(panel).contains(row.task) && visible(panel).contains(row.progress)
+                        && !visible(panel).contains("RAW_FAILURE_PROGRESS"), "User continuation retained the previous task failure or old assignment");
+        pass("failedAssignmentKeepsItsTaskAndManualContinuationRefreshesItsState");
     }
     private static void activityPagesAreStableWhileNewHistoryArrives() throws Exception {
         Object panel = panel(); SubAgentManager.Record row = record("a", SubAgentManager.RUNNING, "reviewing");
@@ -149,7 +149,7 @@ public final class AgentPanelRegressionTest {
         Object panel = panel(); SubAgentManager.Record row = record("a", SubAgentManager.IDLE, "completed");
         char[] first = new char[8000], second = new char[8000]; Arrays.fill(first, 'a'); Arrays.fill(second, 'b');
         row.result = new String(first) + new String(second) + "LAST_RESULT_PAGE";
-        set(panel, "selected", row); AgentPanelState state = (AgentPanelState) get(panel, "state"); state.tab = AgentPanelState.RESULT;
+        set(panel, "selected", row); AgentPanelState state = (AgentPanelState) get(panel, "state"); state.tab = 2;
         invoke(panel, "renderDetail", false);
         check(visible(panel).contains(new String(first)) && !visible(panel).contains("LAST_RESULT_PAGE"), "First result page isn't bounded");
         invoke(panel, "page", true); check(visible(panel).contains(new String(second)) && !visible(panel).contains("LAST_RESULT_PAGE"), "Second result page lost text");
@@ -270,7 +270,7 @@ public final class AgentPanelRegressionTest {
                 listShowsCompactTaskStatusWithoutResultsOrJson();
                 taskActivityAndResultRemainSeparate();
                 preciseStagesDoNotClaimToolsAlreadyExecuted();
-                retryCountAndReasonAreVisibleAndRefreshIndependentlyOfPhase();
+                failedAssignmentKeepsItsTaskAndManualContinuationRefreshesItsState();
                 activityPagesAreStableWhileNewHistoryArrives();
                 resultPagingExposesTheFullResultWithoutOneHugeView();
                 refreshKeepsScrollAndClosedTasksDisableCommands();

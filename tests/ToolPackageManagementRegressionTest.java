@@ -61,21 +61,21 @@ public final class ToolPackageManagementRegressionTest {
     private static void repeatedOfflineInstallationRetainsTheSameVerifiedFiles() throws Exception {
         Payload payload = new Payload(); ToolchainStore store = payload.store("repeat");
         check("not_installed".equals(store.packageStatus().getString("state")), "Listing installed software as a side effect");
-        check(store.installBundled(LIVE).getBoolean("installed"), "Offline installation failed");
-        File jar = new File(store.launcher("apktool").prefix.get(2)); byte[] original = Files.readAllBytes(jar.toPath());
+        check(store.installBundled(LIVE, null).getBoolean("installed"), "Offline installation failed");
+        File jar = new File(store.launcher("apktool", ToolchainFixtures.LIVE).prefix.get(2)); byte[] original = Files.readAllBytes(jar.toPath());
         int opens = payload.opens;
-        check(store.installBundled(LIVE).getBoolean("installed") && payload.opens == opens, "Repeated installation recopied APK resources");
+        check(store.installBundled(LIVE, null).getBoolean("installed") && payload.opens == opens, "Repeated installation recopied APK resources");
         check(java.util.Arrays.equals(original, Files.readAllBytes(jar.toPath())), "Repeated installation rewrote the verified tool");
         ToolchainStore second = new ToolchainStore(store.root(), payload, "arm64-v8a", 30);
         second.removeBundled(LIVE);
-        check(store.installBundled(LIVE).getBoolean("installed") && new File(store.launcher("apktool").prefix.get(2)).isFile(),
+        check(store.installBundled(LIVE, null).getBoolean("installed") && new File(store.launcher("apktool", ToolchainFixtures.LIVE).prefix.get(2)).isFile(),
                 "A different store deleted software but its old prepared cache prevented reinstallation");
     }
 
     private static final class BlockingShell extends ShellTool {
         final CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
         final List<String> expectedArguments;
-        BlockingShell(List<String> expectedArguments) { super(false, root.getPath()); this.expectedArguments = expectedArguments; }
+        BlockingShell(List<String> expectedArguments) { super(false, root.getPath(), null); this.expectedArguments = expectedArguments; }
         @Override String runProgram(ToolchainStore.Launcher launcher, List<String> arguments, boolean temporary, int timeout, int epoch) throws Exception {
             check("readelf".equals(launcher.id) && expectedArguments.equals(arguments), "Package gate fixture received an invalid tool request");
             entered.countDown();
@@ -85,7 +85,7 @@ public final class ToolPackageManagementRegressionTest {
     }
     private static void modelRunAndUiProbeBothBlockInstallAndDelete() throws Exception {
         for (final String action : new String[]{"run", "status"}) {
-            Payload payload = new Payload(); final ToolchainStore store = payload.store("busy-" + action); store.installBundled(LIVE);
+            Payload payload = new Payload(); final ToolchainStore store = payload.store("busy-" + action); store.installBundled(LIVE, null);
             final File input = new File(root, "gate-input-" + action + ".elf"); Files.write(input.toPath(), new byte[]{127, 'E', 'L', 'F'});
             final BlockingShell shell = new BlockingShell("run".equals(action)
                     ? java.util.Arrays.asList("-h", input.getPath()) : java.util.Arrays.asList("--version"));
@@ -104,7 +104,7 @@ public final class ToolPackageManagementRegressionTest {
                 check(shell.entered.await(3, TimeUnit.SECONDS), "Actual invocation did not enter the shell: " + failure[0]);
                 for (boolean remove : new boolean[]{false, true}) {
                     boolean busy = false;
-                    try { if (remove) store.removeBundled(LIVE); else store.installBundled(LIVE); }
+                    try { if (remove) store.removeBundled(LIVE); else store.installBundled(LIVE, null); }
                     catch (IllegalStateException expected) { busy = expected.getMessage().contains("正在执行"); }
                     check(busy, "Package mutation bypassed active " + action);
                 }
@@ -118,35 +118,35 @@ public final class ToolPackageManagementRegressionTest {
     }
 
     private static void deleteOnlyTouchesOwnedPrivatePayloadAndRequiresExplicitReinstallation() throws Exception {
-        Payload payload = new Payload(); ToolchainStore store = payload.store("scope"); store.installBundled(LIVE);
+        Payload payload = new Payload(); ToolchainStore store = payload.store("scope"); store.installBundled(LIVE, null);
         File project = new File(root, "project.txt"), persistent = new File(store.root(), "sessions.json"), unknown = new File(store.root(), "unrelated");
         Files.write(project.toPath(), "project".getBytes("UTF-8")); Files.write(persistent.toPath(), "history".getBytes("UTF-8")); unknown.mkdir();
         store.removeBundled(LIVE); int opens = payload.opens;
         check(project.isFile() && persistent.isFile() && unknown.isDirectory(), "Deletion removed project or unrelated private data");
         for (File child : store.root().listFiles()) check(!child.getName().startsWith("builtin-"), "Released shared package survived deletion");
-        ToolkitTool toolkit = new ToolkitTool(new ShellTool(false, root.getPath()), store, root.getPath(), null, "arm64-v8a");
+        ToolkitTool toolkit = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
         check("removed".equals(toolkit.status("readelf").getString("state")) && payload.opens == opens, "Probe silently reinstalled deleted software");
-        boolean refused = false; try { store.launcher("readelf"); } catch (IllegalStateException expected) { refused = true; }
-        check(refused && store.installBundled(LIVE).getBoolean("installed"), "Explicit offline reinstallation did not restore removed tools");
+        boolean refused = false; try { store.launcher("readelf", ToolchainFixtures.LIVE); } catch (IllegalStateException expected) { refused = true; }
+        check(refused && store.installBundled(LIVE, null).getBoolean("installed"), "Explicit offline reinstallation did not restore removed tools");
     }
 
     private static void cancelledDeleteKeepsOwnershipAndCanBeResumed() throws Exception {
         for (boolean resumeDelete : new boolean[]{false, true}) {
-            Payload payload = new Payload(); ToolchainStore store = payload.store("cancel-delete-" + resumeDelete); store.installBundled(LIVE);
+            Payload payload = new Payload(); ToolchainStore store = payload.store("cancel-delete-" + resumeDelete); store.installBundled(LIVE, null);
             final int[] checks = new int[1]; boolean cancelled = false;
             try { store.removeBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception {
                 if (++checks[0] == 7) throw new InterruptedException("cancelled fixture");
             } }); } catch (InterruptedException expected) { cancelled = true; }
             check(cancelled && store.bundledRemoved(), "Cancelled deletion re-enabled incomplete software");
             if (resumeDelete) check("removed".equals(store.removeBundled(LIVE).getString("state")), "Cancelled deletion lost ownership evidence and cannot be retried");
-            check(store.installBundled(LIVE).getBoolean("installed"), "Cancelled deletion blocked clean reinstallation");
-            check(new File(store.launcher("apktool").prefix.get(2)).isFile(), "Reinstallation trusted the receipt of a partially deleted tool package");
-            check(new File(store.launcher("readelf").executable).isFile(), "Reinstallation did not restore all shared native tools");
+            check(store.installBundled(LIVE, null).getBoolean("installed"), "Cancelled deletion blocked clean reinstallation");
+            check(new File(store.launcher("apktool", ToolchainFixtures.LIVE).prefix.get(2)).isFile(), "Reinstallation trusted the receipt of a partially deleted tool package");
+            check(new File(store.launcher("readelf", ToolchainFixtures.LIVE).executable).isFile(), "Reinstallation did not restore all shared native tools");
         }
     }
 
     private static void linkedOrUnownedPrivatePayloadIsRejected() throws Exception {
-        Payload payload = new Payload(); ToolchainStore store = payload.store("linked"); store.installBundled(LIVE);
+        Payload payload = new Payload(); ToolchainStore store = payload.store("linked"); store.installBundled(LIVE, null);
         File target = new File(root, "outside"); target.mkdir(); File precious = new File(target, "precious.txt"); Files.write(precious.toPath(), "keep".getBytes("UTF-8"));
         File candidate = new File(store.root(), "builtin-common-malicious-1234567890abcdef"); Files.createSymbolicLink(candidate.toPath(), target.toPath());
         boolean refused = false; try { store.removeBundled(LIVE); } catch (IllegalArgumentException expected) { refused = true; }
@@ -161,10 +161,10 @@ public final class ToolPackageManagementRegressionTest {
         boolean cancelled = false;
         try { store.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception {
             if (++checks[0] == 8) throw new InterruptedException("cancelled fixture");
-        } }); } catch (InterruptedException expected) { cancelled = true; }
+        } }, null); } catch (InterruptedException expected) { cancelled = true; }
         check(cancelled && !store.packageStatus().getBoolean("installed"), "Cancelled installation published a runnable package");
         for (File file : store.root().listFiles()) check(!file.getName().startsWith(".embedded-"), "Cancelled installation leaked extraction staging");
-        check(store.installBundled(LIVE).getBoolean("installed"), "Cancelled installation cannot be retried");
+        check(store.installBundled(LIVE, null).getBoolean("installed"), "Cancelled installation cannot be retried");
     }
 
     public static void main(String[] args) throws Exception {

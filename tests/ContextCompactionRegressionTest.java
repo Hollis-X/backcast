@@ -193,7 +193,7 @@ public final class ContextCompactionRegressionTest {
                 Message.toolResult("read-1", repeat('x', 8000)),
                 Message.user("latest instruction"), Message.assistant("already answered", null)));
         loop.compactNow(1L, loop.generation(), 1);
-        List<Message> first = loop.history();
+        List<Message> first = loop.historySnapshot();
         check(summaries(first) == 1, "Old summaries accumulated in the replacement window");
         check(Message.USER.equals(first.get(first.size() - 1).role), "Summary is not a user fragment");
         check(contains(first, "checkpoint-one"), "New summary was lost");
@@ -207,7 +207,7 @@ public final class ContextCompactionRegressionTest {
                     "Old tool call survived compaction");
         }
         loop.compactNow(1L, loop.generation(), 2);
-        List<Message> second = loop.history();
+        List<Message> second = loop.historySnapshot();
         check(summaries(second) == 1 && contains(second, "checkpoint-two"),
                 "Repeated compaction did not leave exactly the newest summary");
         check(!contains(second, "checkpoint-one"), "Repeated compaction accumulated summaries");
@@ -222,10 +222,10 @@ public final class ContextCompactionRegressionTest {
         loop.loadHistory("system fixture", Arrays.asList(Message.user("old instruction"),
                 Message.user("newest instruction " + repeat('z', 120000) + " latest correction")));
         loop.compactNow(1L, loop.generation(), 1);
-        check(userTokens(loop.history()) <= 20000, "Retained user text exceeds 20k tokens");
-        check(contains(loop.history(), "newest instruction"), "Latest user instruction lost its beginning");
-        check(contains(loop.history(), "latest correction"), "Latest user instruction lost its ending");
-        check(!contains(loop.history(), "old instruction"), "Old instructions consumed the latest budget");
+        check(userTokens(loop.historySnapshot()) <= 20000, "Retained user text exceeds 20k tokens");
+        check(contains(loop.historySnapshot(), "newest instruction"), "Latest user instruction lost its beginning");
+        check(contains(loop.historySnapshot(), "latest correction"), "Latest user instruction lost its ending");
+        check(!contains(loop.historySnapshot(), "old instruction"), "Old instructions consumed the latest budget");
         client.exhausted();
     }
 
@@ -236,9 +236,9 @@ public final class ContextCompactionRegressionTest {
         loop.loadHistory("system fixture", Arrays.asList(
                 Message.user("latest " + repeat('q', 20000) + " final constraint")));
         loop.compactNow(1L, loop.generation(), 1);
-        check(userTokens(loop.history()) <= 2000, "Small window did not scale retained user budget");
-        check(contains(loop.history(), "latest"), "Small window discarded the latest instruction");
-        check(contains(loop.history(), "final constraint"), "Small window discarded the final correction");
+        check(userTokens(loop.historySnapshot()) <= 2000, "Small window did not scale retained user budget");
+        check(contains(loop.historySnapshot(), "latest"), "Small window discarded the latest instruction");
+        check(contains(loop.historySnapshot(), "final constraint"), "Small window discarded the final correction");
         client.exhausted();
     }
 
@@ -251,11 +251,11 @@ public final class ContextCompactionRegressionTest {
         original.setContextBudget(8000, 0.9f);
         original.loadHistory("system fixture", Arrays.asList(delegated));
         original.compactNow(1L, original.generation(), 1);
-        Message retained = original.history().get(1);
+        Message retained = original.historySnapshot().get(1);
         check(retained.content.length() < delegated.content.length() && task.equals(retained.delegatedRequest),
                 "Truncated reference lost the delegated request identity");
         check(!retained.toJson().has("delegated_request"), "Delegation metadata entered API fields");
-        List<Message> checkpoint = restoreCheckpoint(original.history());
+        List<Message> checkpoint = restoreCheckpoint(original.historySnapshot());
         checkpoint.get(checkpoint.size() - 1).resumeAfterCompaction = true;
         ScriptedClient resumedClient = new ScriptedClient().then(false, text("已核验实际文件"));
         AgentLoop restored = loop(resumedClient);
@@ -274,7 +274,7 @@ public final class ContextCompactionRegressionTest {
                 Message.user("recent-user"), Message.assistant("recent-assistant", calls("recent-tool", "read")),
                 Message.toolResult("recent-tool", "recent-result"), Message.assistant("recent-answer", null)));
         loop.compactNow(1L, loop.generation(), 1);
-        List<Message> retained = loop.history();
+        List<Message> retained = loop.historySnapshot();
         check(client.requests.size() == 1 && contains(retained, "old-user") && contains(retained, "old-assistant")
                 && contains(retained, "old-result") && contains(retained, "old-answer")
                 && contains(retained, "recent-user") && contains(retained, "recent-result") && summaries(retained) == 0,
@@ -293,7 +293,7 @@ public final class ContextCompactionRegressionTest {
                 Message.assistant("latest work", calls("b", "read")),
                 Message.toolResult("b", "latest result")));
         loop.compactNow(1L, loop.generation(), 1);
-        List<Message> retained = loop.history();
+        List<Message> retained = loop.historySnapshot();
         validPairs(retained);
         check(client.requests.size() == 1 && contains(retained, "old checkpoint tool") && contains(retained, "old result")
                         && contains(retained, "recent request") && contains(retained, "latest result") && !contains(retained, Compactor.PROMPT),
@@ -306,7 +306,7 @@ public final class ContextCompactionRegressionTest {
         AgentLoop loop = loop(client);
         loop.submit("complete this request", 1L, loop.generation(), 1);
         check(client.requests.size() == 1 && !loop.busy() && loop.needsResume()
-                        && summaries(loop.history()) == 0 && contains(loop.history(), "complete this request"),
+                        && summaries(loop.historySnapshot()) == 0 && contains(loop.historySnapshot(), "complete this request"),
                 "Model overflow automatically compressed/retried or lost the unfinished user task");
         loop.resume(1L, 2);
         check(client.requests.size() == 2 && !client.requests.get(1).compact
@@ -418,7 +418,7 @@ public final class ContextCompactionRegressionTest {
         AgentLoop loop = loop(client);
         loop.submit("first request", 1L, loop.generation(), 1);
         loop.compactNow(1L, loop.generation(), 2);
-        check(loop.contextUsed() == TokenMeter.of(loop.history()),
+        check(loop.contextUsed() == TokenMeter.of(loop.historySnapshot()),
                 "Compaction retained the oversized pre-compaction usage anchor");
         check(loop.contextUsed() < 1000, "Tiny checkpoint still reports a full old context");
         client.exhausted();
@@ -429,9 +429,9 @@ public final class ContextCompactionRegressionTest {
         AgentLoop loop = loop(client);
         loop.submit("first request", 1L, loop.generation(), 1);
         loop.loadHistory("new system", Arrays.asList(Message.user("restored request")));
-        check(loop.contextUsed() == TokenMeter.of(loop.history()), "History reload retained stale actual usage");
+        check(loop.contextUsed() == TokenMeter.of(loop.historySnapshot()), "History reload retained stale actual usage");
         loop.reset("reset system");
-        check(loop.contextUsed() == TokenMeter.of(loop.history()), "Reset retained stale actual usage");
+        check(loop.contextUsed() == TokenMeter.of(loop.historySnapshot()), "Reset retained stale actual usage");
         client.exhausted();
     }
 
@@ -535,7 +535,7 @@ public final class ContextCompactionRegressionTest {
         });
         AgentLoop restored = loop(resumedClient, resumedTools);
         restored.restoreGoal(original.goalText(), original.goalStatus(), original.goalElapsed(),
-                original.goalTokensUsed(), original.goalTokenBudget());
+                original.goalTokensUsed(), original.goalTokenBudget(), null);
         restored.loadHistory("system fixture", checkpoint);
         check(restored.needsResume(), "Completed checkpoint lost its pending final answer");
         restored.resume(1L, 2);

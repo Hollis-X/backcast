@@ -216,8 +216,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
         List<SubAgentManager.Record> ordered = AgentPanelState.ordered(records);
         for (SubAgentManager.Record row : ordered) {
             if (AgentPanelState.active(row.status)) active++;
-            signature.append(row.id).append(row.status).append(row.phase).append(row.progress).append(row.activeTool).append(row.task)
-                    .append(row.retryAttempt).append(row.retryReason);
+            signature.append(row.id).append(row.status).append(row.phase).append(row.progress).append(row.activeTool).append(row.task);
         }
         summary.setText(getString(R.string.agent_panel_count, ordered.size(), active));
         if (rendered.equals(signature.toString())) return;
@@ -267,8 +266,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
         try {
             if (state.tab == AgentPanelState.TASK) {
                 pages.setVisibility(View.GONE);
-                if (row.progress.length() > 0 && !"retry".equals(row.phase) && !"retrying".equals(row.phase)
-                        && !SubAgentManager.FAILED.equals(row.status))
+                if (row.progress.length() > 0 && !SubAgentManager.FAILED.equals(row.status))
                     section(R.string.agent_panel_progress, AgentPanelState.shortText(redact(row.progress), 600));
                 section(R.string.agent_panel_assigned, redact(row.task));
                 section(R.string.agent_panel_parent, SubAgentManager.ROOT.equals(row.parentId) ? getString(R.string.agent_panel_main) : row.parentId);
@@ -404,7 +402,6 @@ public final class SubAgentsActivity extends AppCompatActivity {
         if ("responding".equals(phase)) return getString(R.string.sub_agents_phase_responding);
         if ("reviewing".equals(phase)) return getString(R.string.sub_agents_phase_reviewing);
         if ("compacting".equals(phase)) return getString(R.string.sub_agents_phase_compacting);
-        if ("retrying".equals(phase) || "retry".equals(phase)) return getString(R.string.sub_agents_phase_model);
         if ("completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
         if ("starting".equals(phase)) return getString(R.string.agent_panel_phase_starting);
         if ("model".equals(phase)) return getString(R.string.sub_agents_phase_model);

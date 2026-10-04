@@ -1,7 +1,6 @@
 package com.mkei.backcast.ui;
 
 import android.content.Context;
-import android.os.Build;
 import android.text.Editable;
 import android.text.Spannable;
 import android.text.Spanned;
@@ -211,9 +210,6 @@ public class SlashInput extends EditText {
         return text;
     }
 
-    public boolean isChipped() {
-        return chipped;
-    }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
@@ -246,9 +242,9 @@ public class SlashInput extends EditText {
 
             @Override
             public boolean deleteSurroundingTextInCodePoints(int before, int after) {
-                // 这个接口 API 24 才有。部分输入法走它删字，
+                // 部分输入法走它删字，
                 // 不拦的话整块会被拆成一个个字符删掉。
-                if (Build.VERSION.SDK_INT >= 24 && onDelete(before)) {
+                if (onDelete(before)) {
                     return true;
                 }
                 return super.deleteSurroundingTextInCodePoints(before, after);

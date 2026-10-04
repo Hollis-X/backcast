@@ -160,8 +160,6 @@ public final class AndroidSourceCompileCheck {
             r.append('}');
         }
         sources.add(new Source("com.mkei.backcast.R", r.append('}').toString()));
-        sources.add(new Source("androidx.multidex.MultiDex",
-                "package androidx.multidex; public final class MultiDex { public static void install(android.content.Context context){} }"));
         sources.add(new Source("androidx.appcompat.app.AppCompatActivity",
                 "package androidx.appcompat.app; public class AppCompatActivity extends android.app.Activity { public void setSupportActionBar(androidx.appcompat.widget.Toolbar t){} }"));
         sources.add(new Source("androidx.appcompat.widget.Toolbar",

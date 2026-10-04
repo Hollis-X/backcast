@@ -2,8 +2,6 @@ package com.mkei.backcast;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
-import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -11,8 +9,6 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
@@ -32,7 +28,6 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
-import android.view.animation.Animation;
 import android.view.animation.AnimationUtils;
 import android.view.animation.DecelerateInterpolator;
 import android.view.ViewTreeObserver;
@@ -57,11 +52,6 @@ import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.TokenMeter;
-import com.mkei.backcast.agent.ToolRegistry;
-import com.mkei.backcast.tool.EditTool;
-import com.mkei.backcast.tool.ReadTool;
-import com.mkei.backcast.tool.ShellTool;
-import com.mkei.backcast.tool.WriteTool;
 import com.mkei.backcast.ui.ContextMeter;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
@@ -76,7 +66,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.LinkedList;
 import java.util.Map;
@@ -210,30 +199,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 当前会话。-1 表示还没落库的新会话。 */
     private long sessionId = -1;
     private AgentLoop loop;
-    private LlmClient client;
-    private ToolRegistry registry;
-
-    /** 正在执行的那个工具卡片，onToolEnd 回来时更新它。 */
-    private TextView runningToolHeader;
-    private TextView runningToolBody;
-
-    /** 等待模型返回时的占位行（靠左的 Thinking）。 */
-    private TextView pendingRow;
-    private Animation pendingPulse;
     /** 当前这一轮的「工作了」。点它展开下面的思考和命令，不另开一份。 */
     private TextView workHeader;
-    private TextView thinkLabel;
     private View turnChevron;
     /** 第一段折叠区，紧贴「工作了」那一行。正文之前的思考和命令排在这里。 */
     private LinearLayout turnRows;
-    /** 当前正文段。命令插到正文后面之后，后面的正文明新起一段。 */
-    private LinearLayout turnBody;
     /** 这一轮在界面上的落位状态：当前正文段和它后面的折叠段。 */
     private Flow turnFlow;
-    /** 本轮开始时段容器里的孩子数。重试时截回到这里，撤掉半截的正文和命令。 */
+    /** 本轮开始时段容器里的孩子数。请求失败时撤掉半截的正文和命令。 */
     private int turnMarkBox = -1;
     private int turnMarkRows = -1;
-    /** 本轮开始时刻已经画到第几条。重试就回到这里，不重画已经落地的。 */
+    /** 本轮开始时刻已经画到第几条。失败回退不重画已经落地的内容。 */
     private int turnMarkRendered = -1;
     private LinearLayout turnMarkBody;
     private int turnMarkBodyChildren;
@@ -244,7 +220,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final LinearLayout rows;
         LinearLayout body;
         LinearLayout tail;
-        TextView tailTitle;
         boolean bodySeen;
         TurnTrace.Range activeRange;
 
@@ -263,9 +238,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private final List<TextView> marquees = new ArrayList<TextView>();
     private boolean marqueeLoop;
     private float marqueePhase;
-    /** 正在跑、还没出结果的那条命令。跑完就从跑马灯里拿掉。 */
-    private TextView openCommandLabel;
-    private TurnTrace.Step openCommandStep;
     private final Runnable marqueeTick = new Runnable() {
         @Override
         public void run() {
@@ -288,7 +260,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private int turnRendered;
     /** 当前这段思考开始的时刻。命令或正文一来就钉死，不跟工作总时长混。 */
     private long thinkOpenAt;
-    private TextView openThinkLabel;
     private TurnTrace currentTrace;
     /** 重画时最后一轮。还在跑就接着用它，不再另起一行「工作了」。 */
     private TurnTrace replayTailTrace;
@@ -320,12 +291,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private TurnTrace.Range sheetRange;
     private WorkTimeline sheetTimeline;
     private WorkTimeline.CommandView sheetCommand;
-    private TextView sheetRequestOutput;
-    private TextView sheetRequestLive;
-    private long sheetRequestSession = -1L;
-    private final Runnable requestDiagnosticsRefresh = new Runnable() {
-        @Override public void run() { refreshRequestDiagnostics(); }
-    };
     private ReasoningNotes reasoningNotes;
     private String reasoningPreference = "";
     private final Runnable sheetRefresh = new Runnable() {
@@ -337,21 +302,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             if (body != null) body.postDelayed(this, 750);
         }
     };
-    /**
-     * 面板里各段思考的标题。
-     *
-     * 思考耗时只按整轮记（服务端不按段给时间），所以每段都用同一个数，
-     * 和对话里那行「思考了 Ns」对齐。
-     */
-
-
-    private String currentBaseUrl;
-    private String currentModel;
-    private String currentApiKey;
-    private boolean currentUseRoot;
-    /** 建工具时用的工作目录；变了要重建，系统提示词里的目录才会跟着更新。 */
-    private String currentWorkDir;
-    private String currentEffort = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -466,7 +416,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 }
             });
         }
-        if (sessionTitle != null && Build.VERSION.SDK_INT >= 21) {
+        if (sessionTitle != null) {
             sessionTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         }
         drawerOverlay = findViewById(R.id.drawer_overlay);
@@ -501,7 +451,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     }
                     loop.cancel();
                 }
-                hidePending();
                 settleWork();
                 if (compactLive) {
                     // 压到一半被停：不要留一行「压缩了 Ns」，它并没有压完。
@@ -629,7 +578,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         applyGate();
         refreshGoal();
         maybeContinue();
-        refreshRequestDiagnostics();
     }
 
     private void refreshReasoningPreference() {
@@ -673,8 +621,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     @Override
     protected void onPause() {
         hideKeyboard();
-        View body = findViewById(R.id.sheet_body);
-        if (body != null) body.removeCallbacks(requestDiagnosticsRefresh);
         super.onPause();
     }
 
@@ -1153,29 +1099,20 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 状态栏和导航栏都透明。内容铺到边缘，图标保持深色。底部小白条不做模糊。 */
     private void configureSystemBars() {
         Window window = getWindow();
-        if (Build.VERSION.SDK_INT >= 21) {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS
-                    | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
-            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-            window.setStatusBarColor(Color.TRANSPARENT);
-            window.setNavigationBarColor(Color.TRANSPARENT);
-        } else {
-            window.addFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS
-                    | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
-        }
+        window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS
+                | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
         if (Build.VERSION.SDK_INT >= 29) {
             window.setStatusBarContrastEnforced(false);
             window.setNavigationBarContrastEnforced(false);
         }
         int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
-        if (Build.VERSION.SDK_INT >= 23) {
-            flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-        }
-        if (Build.VERSION.SDK_INT >= 26) {
-            flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-        }
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         window.getDecorView().setSystemUiVisibility(flags);
     }
 
@@ -1200,18 +1137,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             });
         }
         applyBarInsets(barSize("status_bar_height", 24), barSize("navigation_bar_height", 48));
-        if (Build.VERSION.SDK_INT >= 20) {
-            final View root = findViewById(R.id.main_root);
-            root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
-                @Override
-                public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
-                    applyBarInsets(insets.getSystemWindowInsetTop(),
-                            insets.getSystemWindowInsetBottom());
-                    return insets;
-                }
-            });
-            root.requestApplyInsets();
-        }
+        final View root = findViewById(R.id.main_root);
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                applyBarInsets(insets.getSystemWindowInsetTop(),
+                        insets.getSystemWindowInsetBottom());
+                return insets;
+            }
+        });
+        root.requestApplyInsets();
         if (scroll != null) {
             scroll.getViewTreeObserver().addOnScrollChangedListener(
                     new ViewTreeObserver.OnScrollChangedListener() {
@@ -1691,7 +1626,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setMinHeight(dp(46));
         row.setPadding(dp(12), 0, dp(12), 0);
-        if (providerId.equals(settings.activeProviderId()) && model.equals(settings.model())) {
+        Settings.AiProfile active = settings.activeAiProfile();
+        if (providerId.equals(active.id) && model.equals(active.model)) {
             row.setBackgroundResource(R.drawable.bg_popup_selected);
             row.setText("✓ " + displayModelName(model));
         }
@@ -1718,7 +1654,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                                final AgentLoop target, final int token) {
         if (!modelSelectionCurrent(sid, target, token)) return;
         if (modelPopup != null) modelPopup.dismiss();
-        if (providerId.equals(settings.activeProviderId()) && model.equals(settings.model())) return;
+        Settings.AiProfile active = settings.activeAiProfile();
+        if (providerId.equals(active.id) && model.equals(active.model)) return;
         Settings.AiProfile profile = modelChoice(providerId, model);
         if (profile == null) return;
         if (target == null || !target.busy()) {
@@ -1750,7 +1687,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (target.goalActive()) target.pauseGoal();
         target.cancel();
         cancelApprovals();
-        hidePending();
         settleWork();
         if (compactLive) dropCompactRow();
         else settleCompact();
@@ -1771,12 +1707,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         Intent intent = new Intent(this, SubAgentsActivity.class);
         intent.putExtra(SubAgentsActivity.EXTRA_SESSION_ID, sessionId);
         startActivity(intent);
-    }
-
-
-    private static String shortChildText(String text, int limit) {
-        if (text == null) return "";
-        return text.length() <= limit ? text : text.substring(0, limit) + "…";
     }
 
     /** 芯片在底栏，菜单往上弹，避免掉到屏幕外。 */
@@ -1927,11 +1857,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sessionId = -1;
         releaseLiveViews();
         stream.removeAllViews();
-        hidePending();
-        runningToolHeader = null;
-        runningToolBody = null;
         workHeader = null;
-        thinkLabel = null;
         turnChevron = null;
         currentTrace = null;
         turnStartedAt = 0;
@@ -1958,11 +1884,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         loop = null;
         releaseLiveViews();
         stream.removeAllViews();
-        hidePending();
-        runningToolHeader = null;
-        runningToolBody = null;
         workHeader = null;
-        thinkLabel = null;
         turnChevron = null;
         currentTrace = null;
         turnStartedAt = 0;
@@ -2390,10 +2312,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             // 输入框里的内容不再匹配指令时，syncSlashPopup 会自己收掉。
             slashPopup.setOutsideTouchable(false);
             slashPopup.setFocusable(false);
-            if (Build.VERSION.SDK_INT >= 21) {
-                // 不吃外面的触摸，点输入框仍然能正常聚焦打字。
-                slashPopup.setTouchModal(false);
-            }
+            // 不吃外面的触摸，点输入框仍然能正常聚焦打字。
+            slashPopup.setTouchModal(false);
             slashPopup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
             slashPopup.setAnimationStyle(R.style.SlashPopupAnimation);
         } else {
@@ -2500,7 +2420,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sealLiveAnswer();
         sealCurrentTurn();
         settleCompact();
-        addUserBubble(text, settings.workDir());
+        addUserBubble(text);
         if (asGoal) target.setGoal(text);
         turnUiToken = token;
         turnStartedAt = SystemClock.elapsedRealtime();
@@ -2551,10 +2471,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private final AgentLoop.Listener listener = new AgentLoop.Quiet() {
         @Override
         public void onProgress(final int gen, final String phase, final String name,
-                final String detail, final int attempt) {
+                final String detail) {
             uiLive(gen, new Runnable() {
                 @Override public void run() {
-                    applyTurnProgress(phase, name, detail, attempt);
+                    applyTurnProgress(phase, name, detail);
                 }
             });
         }
@@ -2584,7 +2504,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             uiLive(gen, new Runnable() {
                 @Override
                 public void run() {
-                    hidePending();
                     noteFirstEvent();
                     appendAgentDelta(text);
                 }
@@ -2596,7 +2515,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             uiLive(gen, new Runnable() {
                 @Override
                 public void run() {
-                    hidePending();
                     noteFirstEvent();
                     attachReasoning(text);
                 }
@@ -2609,7 +2527,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             uiLive(gen, new Runnable() {
                 @Override
                 public void run() {
-                    hidePending();
                     noteFirstEvent();
                     if (currentTrace == null) {
                         beginWorkRow();
@@ -2632,7 +2549,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             uiLive(gen, new Runnable() {
                 @Override
                 public void run() {
-                    hidePending();
                     noteFirstEvent();
                     if (currentTrace == null) {
                         beginWorkRow();
@@ -2707,22 +2623,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             uiLive(gen, new Runnable() {
                 @Override
                 public void run() {
-                    hidePending();
                     sealLiveAnswer();
                     settleWork();
                     settleCompact();
                     setBusy(false);
                     refreshGoal();
-                }
-            });
-        }
-
-        @Override
-        public void onRetry(final int gen) {
-            uiLive(gen, new Runnable() {
-                @Override
-                public void run() {
-                    rewindLiveRound();
                 }
             });
         }
@@ -2739,14 +2644,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     };
 
     /** Stage notifications use the same generation and snapshot gate as streamed text. */
-    private void applyTurnProgress(String phase, String name, String detail, int attempt) {
+    private void applyTurnProgress(String phase, String name, String detail) {
         if (currentTrace == null) beginWorkRow();
         if (currentTrace == null) return;
         if ("tool_ready".equals(phase)) {
             sealOpenThink();
             sealLiveAnswer();
         }
-        currentTrace.setProgress(phase, name, detail, attempt);
+        currentTrace.setProgress(phase, name, detail);
         syncTurnFold();
         refreshTurnChrome();
         syncSheetTools();
@@ -2858,16 +2763,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         trace.elapsedMs = 0;
         currentTrace = trace;
         workHeader = headerView;
-        thinkLabel = null;
         turnChevron = chevronView;
         turnRows = rows;
         turnFlow = flowOf(rows);
         restoreFlow(turnFlow);
-        turnBody = turnFlow != null ? turnFlow.body : null;
         turnRendered = trace.order.size();
-        openThinkLabel = null;
-        openCommandLabel = null;
-        openCommandStep = null;
         long loopAt = loopTurnStart();
         if (loopAt > 0 && (turnStartedAt <= 0 || loopAt < turnStartedAt)) {
             turnStartedAt = loopAt;
@@ -2912,7 +2812,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         refreshAllFolds(flow);
     }
 
-    /** 记下这一轮开始时的位置。重试时截回这里，不把上半轮画两遍。 */
+    /** 记下这一轮开始时的位置，失败时只撤回未落库的预览。 */
     private void markTurn() {
         turnMarkBody = null;
         turnMarkBodyChildren = 0;
@@ -2929,7 +2829,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         turnMarkBodyChildren = turnMarkBody == null ? 0 : turnMarkBody.getChildCount();
     }
 
-    /** 这次请求要重试。截回本轮起点，撤掉没写进历史的半截。 */
+    /** 截回失败请求的起点，撤掉没写进历史的半截。 */
     private void rewindLiveRound() {
         if (currentTrace != null) {
             currentTrace.dropIncompleteRound();
@@ -2956,14 +2856,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             // 截断后重算段落状态：起点没有正文，新正文明起一段。
             turnFlow.body = null;
             turnFlow.tail = null;
-            turnFlow.tailTitle = null;
             turnFlow.bodySeen = false;
             restoreFlow(turnFlow);
         }
-        turnBody = turnFlow != null ? turnFlow.body : null;
-        openThinkLabel = null;
-        openCommandLabel = null;
-        openCommandStep = null;
         thinkOpenAt = 0;
         if (turnMarkBox >= 0 && currentTrace != null) {
             // 截回本轮起点后，已经落地的那些还画着，接着往后补就行。
@@ -3098,8 +2993,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (currentTrace == null) return;
         currentTrace.phase = "thinking";
         if (PromptGuard.REFUSAL.equals(text)) {
-            currentTrace.reasoning.setLength(0);
-            currentTrace.reasoning.append(text);
             TurnTrace.Piece piece = openThinkPiece();
             if (piece == null) currentTrace.appendThink(text);
             else {
@@ -3139,7 +3032,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             // 正文落到当前那一段里。上一段正文后面如果已经排了命令，
             // 这里会另起一段，命令就留在它出现的位置，不会被顶到最后。
             LinearLayout slot = bodySlot(turnFlow);
-            turnBody = slot;
             ViewGroup parent = slot != null ? slot : stream;
             parent.addView(liveAnswer, fullWidth());
         }
@@ -3151,9 +3043,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         scheduleLiveFlush();
     }
-
-    /** 正文或思考里出现了内部指令原文，就整段换成拒绝。 */
-    
 
     /** 这一段正文结束。视图留在对话里，下一轮再新建。 */
     private void sealLiveAnswer() {
@@ -3172,7 +3061,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View body = findViewById(R.id.sheet_body);
         if (body != null) body.removeCallbacks(sheetRefresh);
         sheetTrace = null; sheetTimeline = null; sheetRange = null;
-        turnRows = null; turnBody = null; turnFlow = null; turnRendered = 0;
+        turnRows = null; turnFlow = null; turnRendered = 0;
         thinkOpenAt = 0; compactHeader = null; compactLive = false; compactStartedAt = 0;
         stopMarquee();
     }
@@ -3302,7 +3191,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (currentTrace == null) {
             tickToken++;
             workHeader = null;
-            thinkLabel = null;
             turnChevron = null;
             turnStartedAt = 0;
             firstEventAt = 0;
@@ -3326,7 +3214,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (workHeader != null) {
             workHeader.clearAnimation();
         }
-        pendingPulse = null;
         sealOpenThink();
         currentTrace.stampThinkIfMissing(currentTrace.thinkMs);
         refreshTurnChrome();
@@ -3337,15 +3224,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         tickToken++;
         workHeader = null;
-        thinkLabel = null;
         turnChevron = null;
         turnRows = null;
-        turnBody = null;
         turnFlow = null;
         turnRendered = 0;
-        openThinkLabel = null;
-        openCommandLabel = null;
-        openCommandStep = null;
         stopMarquee();
         currentTrace = null;
         turnStartedAt = 0;
@@ -3358,16 +3240,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sealCurrentTurn();
     }
 
-    /** 移除占位行。 */
-    private void hidePending() {
-        if (pendingRow == null) {
-            return;
-        }
-        pendingRow.clearAnimation();
-        pendingPulse = null;
-        stream.removeView(pendingRow);
-        pendingRow = null;
-    }
 
     /** 助手回复：白底正文，Markdown 渲染成加粗 / 代码 / 列表 / 表格。 */
     private void addAgentText(String text) {
@@ -3453,7 +3325,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 自动续跑仍属于同一条用户请求，不再向聊天插入分隔或重开工作卡片。 */
     private void showSteerBreak() {
         if (loop == null || !loop.goalActive()) return;
-        hidePending();
         sealLiveAnswer();
         sealOpenThink();
         if (currentTrace == null) beginWorkRow();
@@ -3495,8 +3366,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             @Override public void run() {
                 if (!compactLive && currentTrace != null && ("model".equals(currentTrace.phase)
                         || "thinking".equals(currentTrace.phase) || "responding".equals(currentTrace.phase)
-                        || "preview".equals(currentTrace.phase) || "retry".equals(currentTrace.phase))) rewindLiveRound();
-                hidePending(); sealLiveAnswer(); settleWork();
+                        || "preview".equals(currentTrace.phase))) rewindLiveRound();
+                sealLiveAnswer(); settleWork();
                 if (compactLive) dropCompactRow(); else settleCompact();
                 refreshGoal();
                 if (replaying || errorToastSource == source && errorToastToken == token
@@ -3535,7 +3406,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     /** 用户消息只显示正文；目录仍保存在会话记录中供工具解析。 */
-    private void addUserBubble(String text, String workDir) {
+    private void addUserBubble(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
         tv.setTextSize(16);
@@ -3562,12 +3433,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         autoScroll();
     }
 
-    private static String dirName(String dir) {
-        String t = dir == null ? "" : dir.trim();
-        while (t.length() > 1 && t.endsWith("/")) t = t.substring(0, t.length() - 1);
-        int cut = t.lastIndexOf('/');
-        return cut < 0 || cut == t.length() - 1 ? t : t.substring(cut + 1);
-    }
 
     /**
      * 工作时间单独一行。里面有思考或命令才出现箭头，点这一行才展开。
@@ -3613,8 +3478,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         box.setTag(flow);
         host().addView(box, fullWidth());
         if (live) {
-            workHeader = header; thinkLabel = null; turnChevron = chevron;
-            turnRows = rows; turnFlow = flow; turnBody = null; turnRendered = 0;
+            workHeader = header; turnChevron = chevron;
+            turnRows = rows; turnFlow = flow; turnRendered = 0;
         }
         bindSummary(header, trace);
         refreshFoldResults(rows);
@@ -3677,7 +3542,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
     }
 
-    /** Whole-turn elapsed time includes model, retry, review and execution stages. */
+    /** Whole-turn elapsed time includes model, review and execution stages. */
     private void bindSummary(TextView header, TurnTrace trace) {
         if (header == null || trace == null) {
             return;
@@ -3708,10 +3573,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         syncSheetTools();
     }
 
-    
-
-    
-
     private TurnTrace.Piece openThinkPiece() {
         if (currentTrace == null || currentTrace.order.isEmpty()) {
             return null;
@@ -3729,26 +3590,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         syncMarquee();
     }
 
-    /**
-     * 正文下面的那一行。
-     * 第一条是命令就写「执行了命令」，箭头贴到屏幕右缘，内边距和命令行对齐。
-     * 第一条是思考则把时间放在最右，再加箭头。
-     */
-    
-
-    /**
-     * 正文之后那段折叠的标题。
-     * 段里第一条是命令就写「执行了命令」，是思考就把耗时放最右。
-     */
-    
-
-    
-
-    private int sidePad() {
-        return scroll != null && scroll.getPaddingRight() > 0
-                ? scroll.getPaddingRight() : dp(18);
-    }
-
     private Flow flowOf(LinearLayout rows) {
         if (rows == null || !(rows.getParent() instanceof LinearLayout)) {
             return null;
@@ -3756,10 +3597,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         Object tag = ((LinearLayout) rows.getParent()).getTag();
         return tag instanceof Flow ? (Flow) tag : null;
     }
-
-    
-
-    
 
     /**
      * 按发生顺序补折叠行。
@@ -3793,7 +3630,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private WorkTimeline.Actions activityActions() {
         return new WorkTimeline.Actions() {
             public void summarize(final TurnTrace.Piece piece, boolean retry) {
-                if (retry) { piece.summaryError = ""; piece.requestedChars = 0; }
+                if (retry) piece.summaryError = "";
                 reasoningNotes.request(piece, new Runnable() {
                     public void run() { syncSheetTools(); fitActivitySheet(); }
                 });
@@ -3848,29 +3685,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             flow.bodySeen = true;
             // 这一段正文之后的命令另开一段，不能落回上一段里。
             flow.tail = null;
-            flow.tailTitle = null;
             flow.activeRange = null;
         }
         return flow.body;
     }
-
-    /**
-     * 这一轮的命令或思考要落位。
-     * 正文已经画过，就把当前正文段封口，后面再来的正文明起一段；
-     * 命令因此停在它真正发生的位置，不会被后面的正文顶到最后。
-     */
-    
-
-    /** 折叠段那一行的标题。跑马灯要拿它，段一建出来就记住。 */
-    
-
-    
-
-    
-
-    
-
-    
 
     private void refreshFoldResults(LinearLayout rows) {
         if (rows == null || rows.getChildCount() == 0 || !(rows.getTag() instanceof TurnTrace.Range)) return;
@@ -3883,21 +3701,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (!next.contentEquals(caption.getText())) caption.setText(next);
         rows.setVisibility(range.hasDetail() ? View.VISIBLE : View.GONE);
     }
-
-    /** 会话里只留几行。整段命令和结果要点「执行结果」才打开。 */
-    
-
-    
-
-    /** 展开和收起都走高度，不一下子把后面的正文顶走。 */
-    
-
-    
-
-    /** 折叠块原先是 GONE，直接量经常得到 0。不够高时改把可见的子项加起来。 */
-    
-
-    
 
     /** 整条命令和结果。只从「执行结果」进来，不摊在会话里。 */
     private void showCommandScreen(TurnTrace.Step step) {
@@ -3914,10 +3717,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         findViewById(R.id.sheet_body).postDelayed(sheetRefresh, 750);
     }
 
-    
-
-    
-
     /** 同一个箭头。收起时尖头朝右，展开转到朝下。 */
     private View makeChevron() {
         ImageView chevron = new ImageView(this);
@@ -3932,32 +3731,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return chevron;
     }
 
-    private void spinChevron(final View chevron, final boolean expanded, final boolean animate) {
-        chevron.post(new Runnable() {
-            @Override
-            public void run() {
-                if (chevron.getWidth() == 0) {
-                    if (chevron.getVisibility() != View.GONE) {
-                        chevron.post(this);
-                    }
-                    chevron.setRotation(expanded ? 90f : 0f);
-                    return;
-                }
-                chevron.setPivotX(chevron.getWidth() / 2f);
-                chevron.setPivotY(chevron.getHeight() / 2f);
-                float to = expanded ? 90f : 0f;
-                if (!animate && Math.abs(chevron.getRotation() - to) < 1f) {
-                    return;
-                }
-                if (animate) {
-                    chevron.animate().rotation(to).setDuration(180).start();
-                } else {
-                    chevron.animate().cancel();
-                    chevron.setRotation(to);
-                }
-            }
-        });
-    }
 
     private long displayElapsed(TurnTrace trace) {
         if (trace == currentTrace) {
@@ -3972,30 +3745,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return 1000L;
     }
 
-    private long displayThink(TurnTrace trace) {
-        if (trace == currentTrace) {
-            long origin = liveOrigin();
-            if (origin > 0) {
-                long first = liveFirst();
-                long end = first > origin ? first : SystemClock.elapsedRealtime();
-                return Math.max(1L, end - origin);
-            }
-        }
-        if (trace.thinkMs > 0) {
-            return trace.thinkMs;
-        }
-        if (trace.elapsedMs > 0) {
-            return trace.elapsedMs;
-        }
-        return 1000L;
-    }
 
     private int seconds(long ms) {
         return (int) Math.max(1L, (ms + 999) / 1000);
     }
-
-    /** 展开块超过 maxPx 时改成定高，内部自己滚。 */
-    
 
     private void resetHistoryLoading() {
         if (loop != null && (sessionOpening || initialHistoryLoading)) {
@@ -4232,25 +3985,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return renderHost != null ? renderHost : stream;
     }
 
-    private void renderRange(List<Message> messages, int from, int to) {
-        if (messages == null) {
-            return;
-        }
-        ReplayCursor cursor = new ReplayCursor();
-        int start = Math.max(0, from);
-        int end = Math.min(to, messages.size());
-        for (int i = 0; i < Math.min(start, end); i++) {
-            Message earlier = messages.get(i);
-            if (earlier != null && Message.USER.equals(earlier.role)) {
-                cursor.request = Goal.isSteer(earlier.content) || Goal.isNote(earlier.content)
-                        ? "" : earlier.content;
-            }
-        }
-        renderSlice(messages, start, end, cursor);
-        closeReplayTurn(cursor.turn, cursor.rows);
-        replayTailTrace = cursor.turn;
-        replayTailRows = cursor.rows;
-    }
 
     private void renderSlice(List<Message> messages, int start, int end, ReplayCursor cursor) {
         TurnTrace turn = cursor.turn;
@@ -4273,7 +4007,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 rows = null;
                 rendered = 0;
                 request = m.content;
-                addUserBubble(m.content == null ? "" : m.content, m.workDir);
+                addUserBubble(m.content == null ? "" : m.content);
             } else if (Message.ASSISTANT.equals(m.role)) {
                 String content = PromptGuard.redact(m.content, settings.systemPrompt(),
                         settings.environmentContext(), Compactor.PROMPT, request);
@@ -4428,8 +4162,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         chevron.setVisibility(range != null && range.hasDetail() ? View.VISIBLE : View.GONE);
     }
 
-    
-
     /** 正文不进折叠。按发生顺序落到这一段正文里；命令之后新来的正文明起一段。 */
     private void addBodyInto(LinearLayout rows, String text) {
         TextView tv = new TextView(this);
@@ -4448,9 +4180,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         TurnTrace trace = traceOf(rows);
         if (trace != null && trace.bodyAt < 0) {
             trace.bodyAt = trace.order.size();
-        }
-        if (rows == turnRows) {
-            turnBody = slot;
         }
         slot.addView(tv, fullWidth());
         renderMarkdown(tv, raw, false);
@@ -4507,7 +4236,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
         panel.setLayoutParams(lp);
         sheetToken++;
-        if (Build.VERSION.SDK_INT >= 21) getWindow().setNavigationBarColor(Color.WHITE);
+        getWindow().setNavigationBarColor(Color.WHITE);
         overlay.setVisibility(View.VISIBLE);
         panel.startAnimation(AnimationUtils.loadAnimation(this, R.anim.sheet_in));
         if (scrim != null) {
@@ -4534,7 +4263,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View body = findViewById(R.id.sheet_body);
         if (body != null) {
             body.removeCallbacks(sheetRefresh);
-            body.removeCallbacks(requestDiagnosticsRefresh);
         }
         LinearLayout panel = (LinearLayout) findViewById(R.id.sheet_panel);
         if (panel != null) {
@@ -4542,9 +4270,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 if (panel.getChildAt(i) instanceof WorkTimeline.CommandView) panel.removeViewAt(i);
         }
         sheetCommand = null;
-        sheetRequestOutput = null;
-        sheetRequestLive = null;
-        sheetRequestSession = -1L;
         sheetTrace = null;
         sheetRange = null;
         sheetTimeline = null;
@@ -4565,118 +4290,18 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void showActivitySheet(final TurnTrace.Range range) {
-        if (range == null || !range.hasDetail()) return;
-        // A request with no visible activity has no timeline to show: open its log directly.
-        if (!range.hasActivity()) { showRequestDiagnostics(); return; }
+        if (range == null || !range.hasActivity()) return;
         LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
         if (body == null) return;
         showSheet();
         body.removeAllViews();
         sheetTrace = range.trace;
         sheetRange = range;
-        TextView diagnostics = new TextView(this);
-        diagnostics.setText("请求诊断");
-        diagnostics.setTextSize(14);
-        diagnostics.setTextColor(0xFF6E6E76);
-        diagnostics.setPadding(0, dp(10), 0, dp(10));
-        diagnostics.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { showRequestDiagnostics(); }
-        });
-        body.addView(diagnostics, fullWidth());
         sheetTimeline = new WorkTimeline(this, activityActions());
         body.addView(sheetTimeline, fullWidth());
         syncSheetTools();
         fitActivitySheet();
         body.postDelayed(sheetRefresh, 750);
-    }
-
-    /** Read diagnostics off the UI thread and reject results after sheet/session changes. */
-    private void showRequestDiagnostics() {
-        final long sid = sessionId;
-        if (sid < 0) return;
-        LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
-        if (body == null) return;
-        showSheet();
-        body.removeAllViews();
-        TextView live = new TextView(this);
-        live.setTextSize(14);
-        live.setTextColor(0xFF252528);
-        live.setLineSpacing(dp(5), 1f);
-        live.setPadding(0, 0, 0, dp(14));
-        body.addView(live, fullWidth());
-        final TextView output = new TextView(this);
-        output.setText("本会话最近 20 次请求\n正在读取…");
-        output.setTextSize(14);
-        output.setTextColor(0xFF252528);
-        output.setLineSpacing(dp(5), 1f);
-        enableCopy(output);
-        body.addView(output, fullWidth());
-        sheetRequestOutput = output;
-        sheetRequestLive = live;
-        sheetRequestSession = sid;
-        refreshRequestDiagnostics();
-        fitRequestDiagnosticsSheet();
-        historyReader.execute(new Runnable() {
-            @Override public void run() {
-                String value;
-                try { value = requestDiagnosticsText(chatStore.requestEvents(sid, 20)); }
-                catch (Exception error) { recordUiFailure(sid, "ui:history", error); value = "请求状态读取失败"; }
-                final String text = value;
-                ui(new Runnable() {
-                    @Override public void run() {
-                        if (sessionId == sid && sheetRequestOutput == output && !activityDestroyed && !isFinishing()) output.setText(text);
-                    }
-                });
-            }
-        });
-    }
-
-    /** Refresh only in-memory timing; completed request history is read once when opening. */
-    private void refreshRequestDiagnostics() {
-        if (sheetRequestLive == null || sheetRequestOutput == null || sheetRequestSession != sessionId
-                || activityDestroyed || isFinishing()) return;
-        LlmClient.RequestActivity request = loop == null ? null : loop.requestActivity();
-        sheetRequestLive.setText(liveRequestDiagnosticsText(request));
-        View body = findViewById(R.id.sheet_body);
-        if (body != null) {
-            body.removeCallbacks(requestDiagnosticsRefresh);
-            body.postDelayed(requestDiagnosticsRefresh, 750);
-        }
-    }
-
-    private String liveRequestDiagnosticsText(LlmClient.RequestActivity request) {
-        if (request == null) return "当前没有正在进行的模型请求。\n授权等待和工具执行不计入单次请求耗时。";
-        String state = request.quietMs >= 10000L ? "等待模型响应"
-                : request.hasProgress ? "正在接收输出"
-                : request.responseStarted ? "已收到响应，等待内容" : "等待首次响应";
-        return "当前单次请求 · " + state + "\n请求耗时 " + request.elapsedMs
-                + "ms · 已静默 " + request.quietMs + "ms";
-    }
-
-    /** The sheet's 0dp weighted ScrollView needs a bounded positive parent height. */
-    private void fitRequestDiagnosticsSheet() {
-        View panel = findViewById(R.id.sheet_panel);
-        if (panel == null) return;
-        ViewGroup.LayoutParams params = panel.getLayoutParams();
-        params.height = Math.max(1, (int) (getResources().getDisplayMetrics().heightPixels * .72f));
-        panel.setLayoutParams(params);
-    }
-
-    private String requestDiagnosticsText(List<ChatStore.RequestEvent> events) {
-        StringBuilder text = new StringBuilder("本会话最近 20 次请求\n这里显示模型请求耗时，不是工具执行耗时。详细错误保存在本地诊断日志，不进入聊天上下文。\n");
-        if (events.isEmpty()) return text.append("\n暂无记录。更新前的请求没有诊断数据。").toString();
-        for (ChatStore.RequestEvent event : events) {
-            String purpose = "compact".equals(event.purpose) ? "上下文压缩"
-                    : "review".equals(event.purpose) ? "权限检查" : "模型请求";
-            String outcome = "success".equals(event.outcome) ? "成功"
-                    : "cancelled".equals(event.outcome) ? "已取消"
-                    : "失败";
-            text.append('\n').append(android.text.format.DateFormat.format("MM-dd HH:mm:ss", event.recordedAt))
-                    .append(" · ").append(purpose).append(" · ").append(outcome)
-                    .append('\n').append("请求耗时 ").append(event.elapsedMs).append("ms");
-            text.append('\n');
-        }
-        return text.toString();
     }
 
     private void hideWorkSheet() {
@@ -4686,12 +4311,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View body = findViewById(R.id.sheet_body);
         if (body != null) {
             body.removeCallbacks(sheetRefresh);
-            body.removeCallbacks(requestDiagnosticsRefresh);
         }
         sheetTrace = null; sheetTimeline = null; sheetRange = null;
-        sheetRequestOutput = null;
-        sheetRequestLive = null;
-        sheetRequestSession = -1L;
         if (overlay == null || overlay.getVisibility() != View.VISIBLE) return;
         sheetToken++;
         final int token = sheetToken;
@@ -4702,26 +4323,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 if (token != sheetToken) return;
                 overlay.setVisibility(View.GONE);
                 resetSheetDetails();
-                if (Build.VERSION.SDK_INT >= 21) getWindow().setNavigationBarColor(Color.TRANSPARENT);
+                getWindow().setNavigationBarColor(Color.TRANSPARENT);
             }
         }, 220);
     }
-/**
-     * 一段思考。出现在哪次工具调用后面，就画在那条工具后面。
-     *
-     * 标题按这一轮的思考耗时写成「思考了 Ns」，和对话里那行摘要的口径一致。
-     */
-    
-
-    
-
-    
-
-    
-
-    
-
-    
 
     /** 压缩指令只该出现在压缩请求里，回放会话时剔除。 */
     private static List<Message> stripCompactionAsks(List<Message> raw) {
@@ -4739,57 +4344,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         return out;
     }
-
-    /** 中断的工具调用补一条失败结果，避免下次请求因缺 tool 消息被拒。 */
-    private List<Message> withToolResults(List<Message> raw) {
-        List<Message> out = new ArrayList<Message>();
-        if (raw == null) {
-            return out;
-        }
-        for (int i = 0; i < raw.size(); i++) {
-            Message m = raw.get(i);
-            out.add(m);
-            if (m == null || !Message.ASSISTANT.equals(m.role) || m.toolCalls == null) {
-                continue;
-            }
-            for (int c = 0; c < m.toolCalls.length(); c++) {
-                JSONObject call = m.toolCalls.optJSONObject(c);
-                if (call == null) {
-                    continue;
-                }
-                String id = call.optString("id", "");
-                if (!hasToolResult(raw, i + 1, id)) {
-                    out.add(Message.toolResult(id, AgentLoop.FAIL_PREFIX + "会话中断，没有结果。"));
-                }
-            }
-        }
-        return out;
-    }
-
-    private boolean hasToolResult(List<Message> messages, int from, String id) {
-        for (int i = from; i < messages.size(); i++) {
-            Message m = messages.get(i);
-            if (m == null) {
-                continue;
-            }
-            if (Message.USER.equals(m.role) || Message.ASSISTANT.equals(m.role)) {
-                return false;
-            }
-            String callId = m.toolCallId == null ? "" : m.toolCallId;
-            if (Message.TOOL.equals(m.role) && id.equals(callId)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** 工具调用：一行小字，点开看命令与输出。 */
-    
-
-    
-
-    /** 工具行标题：小箭头 + 名称 + 状态，箭头用图标。 */
-    
 
     private LinearLayout.LayoutParams fullWidth() {
         return new LinearLayout.LayoutParams(
@@ -4811,26 +4365,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         });
     }
 
-    /** 工具结果是否算失败：异常前缀、显式错误、或命令超时。 */
-    private static boolean isFailure(String result) {
-        if (result == null) {
-            return false;
-        }
-        return result.startsWith(AgentLoop.FAIL_PREFIX)
-                || result.startsWith("错误：")
-                || result.indexOf("命令超时") >= 0;
-    }
 
     private int dp(int v) {
         return (int) (v * getResources().getDisplayMetrics().density);
     }
 
-    private static String trim(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.length() <= 4000 ? s : s.substring(0, 4000) + "\n…（已截断）";
-    }
 
     private void ui(Runnable r) {
         runOnUiThread(r);
@@ -4984,7 +4523,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         loop.clearGoal();
         if (busy) {
             loop.cancel();
-            hidePending();
             settleWork();
             if (compactLive) {
                 dropCompactRow();
@@ -5005,7 +4543,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             liveToken++;
             loop.pauseGoal();
             loop.cancel();
-            hidePending();
             settleWork();
             setBusy(false);
             refreshGoal();

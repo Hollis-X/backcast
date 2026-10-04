@@ -53,9 +53,9 @@ public final class MultipleWorkspaceRegressionTest {
         ShellTool shell = new ShellTool(false, primary.getPath(), temporary);
         ToolchainStore.Launcher launcher = new ToolchainStore.Launcher("readelf", "/bin/cat");
         try {
-            String output = shell.runProgram(launcher, Collections.singletonList(new File(extra, "same.txt").getPath()), true, 5);
+            String output = shell.runProgram(launcher, Collections.singletonList(new File(extra, "same.txt").getPath()), true, 5, shell.cancellationEpoch());
             check(output.startsWith("exit=0") && output.contains("edited"), "Structured toolkit input rejected extra root");
-            output = shell.runProgram(launcher, Collections.singletonList(new File(other, "secret.txt").getPath()), true, 5);
+            output = shell.runProgram(launcher, Collections.singletonList(new File(other, "secret.txt").getPath()), true, 5, shell.cancellationEpoch());
             check(output.startsWith("错误："), "Structured toolkit input accepted unlisted root");
         } finally { shell.abort(); }
     }
@@ -78,7 +78,7 @@ public final class MultipleWorkspaceRegressionTest {
         check(writer.run(write(test.getPath(), "test", "test")).startsWith("已写入"), "Extra root formal test was rejected");
         check(writer.run(write(new File(extra, "loose.txt").getPath(), "test", "test")).startsWith("错误："), "Loose test accepted");
         File source = temporary.resolveTemporary("result.txt"); Files.write(source.toPath(), "result".getBytes("UTF-8"));
-        ToolchainStore store = new ToolchainStore(new File(fixture, "toolchains"));
+        ToolchainStore store = new ToolchainStore(new File(fixture, "toolchains"), null, "", 0);
         File target = new File(extra, "delivery/result.txt");
         ToolkitExport.copy(primary.getPath(), temporary, store, source.getPath(), target.getPath(), "deliverable", false, LIVE);
         check(target.isFile(), "Extra project export was not published");

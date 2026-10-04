@@ -38,10 +38,6 @@ public final class ToolchainStore {
         public void close() { if (!closed) { closed = true; operations.readLock().unlock(); } }
     }
 
-    public ToolchainStore(File directory) {
-        this(directory, null, "", 0);
-    }
-
     public ToolchainStore(File directory, EmbeddedToolchain.Assets assets, String abi, int sdk) {
         this(directory, assets, abi, sdk, ArtRuntimeLauncher.DEVICE);
     }
@@ -92,10 +88,6 @@ public final class ToolchainStore {
     public JSONObject packageStatus() throws Exception {
         if (embedded == null) return new JSONObject().put("state", "unconfigured").put("installed", false);
         return embedded.packageStatus().put("busy", operations.getReadLockCount() > 0 || operations.isWriteLocked());
-    }
-
-    public JSONObject installBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
-        return installBundled(cancellation, null);
     }
 
     public JSONObject installBundled(final ToolchainInstaller.Cancellation cancellation, final EmbeddedToolchain.ProgressListener listener) throws Exception {
@@ -196,77 +188,6 @@ public final class ToolchainStore {
         JSONObject tools = load().optJSONObject("tools");
         JSONObject value = tools == null ? null : tools.optJSONObject(id);
         return value == null ? new JSONObject() : new JSONObject(value.toString());
-    }
-
-    public JSONObject configure(String id, String path, String runtime) throws Exception {
-        synchronized (toolLock(id)) { return configureLocked(id, path, runtime); }
-    }
-
-    private JSONObject configureLocked(String id, String path, String runtime) throws Exception {
-        ToolCatalog.Entry entry = ToolCatalog.get(id);
-        File executable = absolute(path);
-        String name = new File(path).getName();
-        boolean jar = "apktool".equals(id) && name.endsWith(".jar");
-        boolean known = false;
-        for (String alias : entry.aliases) if (name.equals(alias)) known = true;
-        if (!known && !jar) throw new IllegalArgumentException("请选择 " + id + " 对应的可执行文件，不能绑定任意 shell。允许名称：" + names(entry.aliases));
-        JSONObject value = new JSONObject().put("path", executable.getPath()).put("origin", "configured");
-        if (jar) {
-            if (runtime != null && runtime.length() > 0) {
-                File java = absolute(runtime);
-                if (!"java".equals(java.getName())) throw new IllegalArgumentException("Apktool JAR 的运行时必须是设备上的 java 可执行文件。");
-                value.put("runtime", java.getPath());
-            }
-        } else if (runtime != null && runtime.length() > 0) {
-            throw new IllegalArgumentException("此工具请绑定完整可执行入口，不要附加未经验证的运行脚本。");
-        }
-        put(id, value);
-        return configuration(id);
-    }
-
-    public void clear(String id) throws Exception {
-        synchronized (toolLock(id)) {
-            synchronized (this) {
-                ToolCatalog.get(id);
-                JSONObject data = load(), tools = data.optJSONObject("tools");
-                if (tools != null) tools.remove(id);
-                save(data);
-            }
-        }
-    }
-
-    public JSONArray configureBinutilsDirectory(String path) throws Exception {
-        return configureBinutilsDirectory(path, null);
-    }
-
-    JSONArray configureBinutilsDirectory(String path, ToolchainInstaller.Cancellation cancellation) throws Exception {
-        File directory = absolute(path);
-        JSONArray configured = new JSONArray();
-        JSONArray catalog = ToolCatalog.list();
-        for (int i = 0; i < catalog.length(); i++) {
-            String id = catalog.getJSONObject(i).getString("id");
-            ToolCatalog.Entry entry = ToolCatalog.get(id);
-            if (!"binutils".equals(entry.group)) continue;
-            for (String alias : entry.aliases) {
-                File candidate = new File(directory, alias);
-                if (candidate.isFile()) {
-                    synchronized (toolLock(id)) {
-                        if (cancellation != null) cancellation.check();
-                        configure(id, candidate.getPath(), null);
-                    }
-                    configured.put(id); break;
-                }
-            }
-        }
-        return configured;
-    }
-
-    public Launcher launcher(String id) throws Exception {
-        return launcher(id, new ToolchainInstaller.Cancellation() {
-            public void check() throws InterruptedException {
-                if (Thread.currentThread().isInterrupted()) throw new InterruptedException("工具准备已取消。");
-            }
-        });
     }
 
     Launcher launcher(String id, ToolchainInstaller.Cancellation cancellation) throws Exception {
@@ -386,29 +307,6 @@ public final class ToolchainStore {
         return ToolPaths.lock(new File(root, "rabin2".equals(id) ? "radare2" : id));
     }
 
-    void installed(ToolCatalog.Artifact artifact, File destination) throws Exception {
-        synchronized (toolLock(artifact.id)) {
-            synchronized (this) { installedLocked(artifact, destination); }
-        }
-    }
-
-    private void installedLocked(ToolCatalog.Artifact artifact, File destination) throws Exception {
-        JSONObject value = new JSONObject().put("origin", "official").put("version", artifact.version)
-                .put("sha256", artifact.sha256).put("source", artifact.url).put("abi", artifact.abi);
-        if ("apktool".equals(artifact.id)) {
-            value.put("path", new File(destination, "apktool.jar").getPath());
-            String runtime = configuration("apktool").optString("runtime", "");
-            if (runtime.length() > 0) value.put("runtime", runtime);
-            put("apktool", value);
-        } else {
-            value.put("path", new File(destination, "bin/radare2").getPath()).put("native_prefix", destination.getPath());
-            JSONObject rabin = new JSONObject(value.toString()).put("path", new File(destination, "bin/rabin2").getPath());
-            JSONObject data = load(), tools = data.optJSONObject("tools");
-            if (tools == null) { tools = new JSONObject(); data.put("tools", tools); }
-            tools.put("radare2", value); tools.put("rabin2", rabin); save(data);
-        }
-    }
-
     File managed(String path) throws Exception {
         File file = new File(path).getAbsoluteFile();
         if (!file.getPath().equals(file.getCanonicalPath()) || !within(root, file)) {
@@ -425,12 +323,6 @@ public final class ToolchainStore {
         File file = new File(path);
         if (!file.isAbsolute()) throw new IllegalArgumentException("工具路径必须是绝对路径。");
         return file.getCanonicalFile();
-    }
-
-    private static String names(String[] names) {
-        StringBuilder result = new StringBuilder();
-        for (String name : names) { if (result.length() > 0) result.append(", "); result.append(name); }
-        return result.toString();
     }
 
     private synchronized void put(String id, JSONObject value) throws Exception {

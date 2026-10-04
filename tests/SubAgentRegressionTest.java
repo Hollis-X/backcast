@@ -67,7 +67,7 @@ public final class SubAgentRegressionTest {
             };
             ToolRegistry registry = new ToolRegistry(); SubAgentTools.register(registry, shared, task.id);
             AgentLoop loop = new AgentLoop(client, registry, listener);
-            loop.reset("child trusted policy"); loop.setContextBudget(root.contextLimit(), root.compactRatio());
+            loop.reset("child trusted policy"); loop.setContextBudget(root.contextLimit(), 0.8f);
             loop.setAccessLevel(root.accessLevel());
             synchronized (loops) { loops.put(task.id, loop); }
             return loop;
@@ -76,7 +76,7 @@ public final class SubAgentRegressionTest {
         String spawn(String name, String task) throws Exception { return manager.spawn("main", name, task, false).getString("id"); }
         void settle() throws Exception {
             manager.waitFor("main", null, 5000L);
-            check(!manager.hasPendingWork(), "Child work failed to settle: " + manager.list("main"));
+            check(!manager.hasPendingWork(), "Child work failed to settle: " + manager.list("main", 0));
         }
     }
 
@@ -243,7 +243,7 @@ public final class SubAgentRegressionTest {
         Fixture f = new Fixture(1); f.store.fail = true; boolean failed = false;
         try { f.spawn("failed-save", "never run"); } catch (IllegalStateException expected) { failed = true; }
         check(failed && f.created.get() == 0 && !f.manager.hasPendingWork(), "Failed initial persistence started hidden child work");
-        check(f.manager.records().size() == 1, "Failed spawn leaked an orphan task record");
+        check(f.manager.list("main", 0).getInt("totalAgents") == 0, "Failed spawn leaked an orphan task record");
     }
 
     private static void waitToolCollectsResultsExactlyOnce() throws Exception {
@@ -334,7 +334,7 @@ public final class SubAgentRegressionTest {
         SubAgentManager.Record active = new SubAgentManager.Record(); active.id = "newer_active"; active.parentId = "main";
         active.name = "newer"; active.task = "restore latest"; active.status = SubAgentManager.QUEUED; active.sessionId = 10;
         active.pending.put(new JSONObject().put("from", "main").put("text", "restore latest")); store.save(active);
-        Fixture f = new Fixture(1, store); check(f.manager.records().size() == 22, "Restore silently dropped records after sixteen closed entries");
+        Fixture f = new Fixture(1, store); check(f.manager.list("main", 0).getInt("totalAgents") == 21, "Restore silently dropped records after sixteen closed entries");
         f.manager.resumePending(); f.settle();
         check(f.manager.find(active.id).result.contains("restore latest"), "Closed histories hid registered running work");
     }
@@ -348,7 +348,7 @@ public final class SubAgentRegressionTest {
         });
         String first = "";
         for (int i = 0; i < 12; i++) { String id = f.spawn("large", repeat("T", 2000)); if (i == 0) first = id; }
-        f.settle(); JSONObject listed = f.manager.list("main");
+        f.settle(); JSONObject listed = f.manager.list("main", 0);
         check(listed.toString().length() < 65000 && !listed.isNull("nextCursor"), "List result exceeded its batch bound");
         int delivered = 0;
         while (f.manager.hasUncollectedResults()) {
@@ -443,7 +443,7 @@ public final class SubAgentRegressionTest {
         String first = repeat("a", 31950) + "FIRST_MESSAGE_TAIL";
         String second = repeat("b", 31950) + "SECOND_MESSAGE_TAIL";
         f.manager.send(id, "main", first); f.manager.send(id, "main", second);
-        JSONObject preview = f.manager.list("main").getJSONArray("inbox").getJSONObject(0);
+        JSONObject preview = f.manager.list("main", 0).getJSONArray("inbox").getJSONObject(0);
         check(preview.getBoolean("truncated") && preview.getString("text").length() == 4000,
                 "List preview stopped bounding long inbox entries");
         JSONObject batch = f.manager.collectResults("main", null);

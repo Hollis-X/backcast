@@ -7,7 +7,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 
@@ -25,11 +24,7 @@ public class AgentService extends Service {
     public static void start(Context context) {
         try {
             Intent intent = new Intent(context, AgentService.class);
-            if (Build.VERSION.SDK_INT >= 26) {
-                context.startForegroundService(intent);
-            } else {
-                context.startService(intent);
-            }
+            context.startForegroundService(intent);
         } catch (Exception ignored) {
             // 进程已经在后台时系统可能拒绝再拉起前台服务。任务本身还在原来的线程上。
         }
@@ -48,11 +43,7 @@ public class AgentService extends Service {
         hub.recover();
         if (!hub.hasWork()) {
             releaseWake();
-            if (Build.VERSION.SDK_INT >= 24) {
-                stopForeground(STOP_FOREGROUND_REMOVE);
-            } else {
-                stopForeground(true);
-            }
+            stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -67,7 +58,7 @@ public class AgentService extends Service {
 
     private void startInForeground() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (Build.VERSION.SDK_INT >= 26 && nm != null) {
+        if (nm != null) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL, "任务", NotificationManager.IMPORTANCE_LOW);
             channel.setShowBadge(false);
@@ -75,14 +66,9 @@ public class AgentService extends Service {
         }
         Intent open = new Intent(this, MainActivity.class);
         open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= 23) {
-            flags |= PendingIntent.FLAG_IMMUTABLE;
-        }
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pending = PendingIntent.getActivity(this, 0, open, flags);
-        Notification.Builder builder = Build.VERSION.SDK_INT >= 26
-                ? new Notification.Builder(this, CHANNEL)
-                : new Notification.Builder(this);
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL);
         String text = RunHub.get(this).noteText();
         builder.setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle(getString(R.string.app_name))

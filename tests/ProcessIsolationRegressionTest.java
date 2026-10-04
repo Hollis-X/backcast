@@ -25,7 +25,7 @@ public final class ProcessIsolationRegressionTest {
     public static void main(String[] args) throws Exception {
         File project = Files.createTempDirectory("backcast-process-test-").toFile();
         try {
-            ShellTool shell = new ShellTool(false, project.getPath());
+            ShellTool shell = new ShellTool(false, project.getPath(), null);
             String result = shell.run(new JSONObject().put("command", "printf '中文\\n'; exit 7"));
             check(result.startsWith("exit=7") && result.contains("中文"), "Supervisor lost command output/exit: " + result);
             pass("supervisorExitAndOutput");
@@ -41,7 +41,7 @@ public final class ProcessIsolationRegressionTest {
             Thread.sleep(300);
             check(!new File(project, "leaked").exists(), "Timeout background writer recreated directory");
             pass("timeoutKillsBackgroundWriter");
-            final ShellTool cancelled = new ShellTool(false, project.getPath());
+            final ShellTool cancelled = new ShellTool(false, project.getPath(), null);
             final String[] answer = new String[1];
             Thread worker = new Thread(new Runnable() {
                 public void run() { try { answer[0] = cancelled.run(new JSONObject().put("command", writer() + "sleep 20")); }

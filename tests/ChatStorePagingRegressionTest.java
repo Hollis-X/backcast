@@ -119,6 +119,10 @@ public final class ChatStorePagingRegressionTest {
         return storeType.getMethod("messagePage", long.class, long.class, int.class).invoke(store, sid, before, size);
     }
     private static Object field(Object target, String name) throws Exception {
+        if (target instanceof Map) {
+            String column = name.replaceAll("([a-z])([A-Z])", "$1_$2").toLowerCase(java.util.Locale.US);
+            return ((Map<?, ?>) target).get(column);
+        }
         return target.getClass().getField(name).get(target);
     }
     private static long number(Object target, String name) throws Exception { return (Long)field(target, name); }
@@ -132,7 +136,7 @@ public final class ChatStorePagingRegressionTest {
         append(store, 8, Message.user("other session"));
         Object page = page(store, 7, -1, 48);
         check(messages(page).size() == 48, "Latest query decoded the full transcript");
-        check(number(page, "firstId") == 953 && number(page, "lastId") == 1000, "Incorrect page cursors");
+        check(number(page, "firstId") == 953, "Incorrect page cursor");
         check(number(page, "earlierCount") == 952, "Earlier count included another session");
         for (int i = 0; i < 48; i++) check(messages(page).get(i).content.equals("message " + (952 + i)), "Page is not chronological");
         check("message 951".equals(field(page, "requestBefore")), "Lost user context before page");
@@ -149,7 +153,7 @@ public final class ChatStorePagingRegressionTest {
         while (number(page, "earlierCount") > 0) {
             long before = number(page, "firstId");
             page = page(store, 7, before, 48);
-            check(number(page, "lastId") < before, "Cursor boundary was repeated");
+            check(number(page, "firstId") < before, "Cursor boundary was repeated");
             for (Message m : messages(page)) check(seen.add(m.content), "Message loaded twice: " + m.content);
         }
         check(seen.size() == 141 && !seen.contains("new message"), "Appending changed older page boundaries");
@@ -207,14 +211,14 @@ public final class ChatStorePagingRegressionTest {
                 && result.get(1).toolCalls.length() == 1, "Assistant metadata was decoded at the wrong offset");
         check("c1".equals(result.get(2).toolCallId), "Tool result id was lost");
         @SuppressWarnings("unchecked")
-        List<Message> full = (List<Message>)storeType.getMethod("messages", long.class).invoke(store, 7);
+        List<Message> full = (List<Message>)storeType.getMethod("contextMessages", long.class).invoke(store, 7);
         check(full.size() == 3 && "c1".equals(full.get(2).toolCallId) && full.get(1).elapsedMs == 2500,
                 "Full model history could not use shared decoding");
     }
 
     private static void emptyPageHasNoContext() throws Exception {
         Object page = page(fresh(), 7, -1, 48);
-        check(messages(page).isEmpty() && number(page, "firstId") == 0 && number(page, "lastId") == 0
+        check(messages(page).isEmpty() && number(page, "firstId") == 0
                 && number(page, "earlierCount") == 0 && "".equals(field(page, "requestBefore"))
                 && field(page, "leadingAssistant") == null, "Empty page carried stale cursors or context");
     }
@@ -247,20 +251,18 @@ public final class ChatStorePagingRegressionTest {
         MethodAccess.recordRequest(store, 8, "model", 45, "success", "", 0);
         for (int i = 0; i < 205; i++) MethodAccess.recordRequest(store, 7, "model", i,
                 i == 204 ? "retryable_error" : "success", i == 204 ? "接口返回 HTTP 503" : "", i == 204 ? 2 : 0);
-        List<?> all = MethodAccess.requestEvents(store, 7, Integer.MAX_VALUE);
+        List<?> all = requestRecords(7);
         check(all.size() == 200 && number(all.get(0), "elapsedMs") == 204
                         && number(all.get(199), "elapsedMs") == 5,
                 "Request history exceeded its cap or discarded the newest attempts");
-        check(MethodAccess.requestEvents(store, 7, 20).size() == 20 && MethodAccess.requestEvents(store, 7, 0).size() == 1,
-                "Diagnostic reads were unbounded");
         check("retryable_error".equals(field(all.get(0), "outcome"))
                         && "接口返回 HTTP 503".equals(field(all.get(0), "reason"))
                         && (Integer) field(all.get(0), "retryCount") == 2,
                 "Safe request failure metadata was not preserved");
-        check(MethodAccess.requestEvents(store, 8, 200).size() == 1, "Retention deleted another conversation's request");
+        check(requestRecords(8).size() == 1, "Retention deleted another conversation's request");
         check(messages(page(store, 7, -1, 48)).size() == 1, "Diagnostics polluted model/transcript history");
         storeType.getMethod("delete", long.class).invoke(store, 7L);
-        check(MethodAccess.requestEvents(store, 7, 200).isEmpty() && MethodAccess.requestEvents(store, 8, 200).size() == 1,
+        check(requestRecords(7).isEmpty() && requestRecords(8).size() == 1,
                 "Conversation removal left private request logs or removed another conversation's logs");
     }
 
@@ -280,14 +282,12 @@ public final class ChatStorePagingRegressionTest {
                 "Version 10 direct upgrade omitted evidence tables or attempted to add an existing diagnostic column");
         MethodAccess.recordRequest(store, 7, "review", 123, "error", "权限检查失败\n服务暂不可用", 0);
         MethodAccess.recordRequest(store, 7, "compact", 0, "cancelled", "用户停止", 1);
-        List<?> events = MethodAccess.requestEvents(store, 7, 20);
+        List<?> events = requestRecords(7);
         check("compact".equals(field(events.get(0), "purpose")) && "cancelled".equals(field(events.get(0), "outcome"))
                         && "review".equals(field(events.get(1), "purpose"))
                         && "权限检查失败 服务暂不可用".equals(field(events.get(1), "reason"))
                         && number(events.get(1), "elapsedMs") == 123 && number(events.get(1), "recordedAt") > 0,
                 "Purpose, cancellation, safe reason or request duration was decoded incorrectly");
-        try { ((List) events).clear(); throw new AssertionError("Diagnostics were mutable"); }
-        catch (UnsupportedOperationException expected) { }
     }
 
     private static void versionElevenMigrationPreservesRequestRows() throws Exception {
@@ -306,14 +306,14 @@ public final class ChatStorePagingRegressionTest {
                         && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
                         && sql.get(2).contains("diagnostic_errors(session_id,id)"),
                 "Version 11 migration recreated request history or did not apply the additive column default");
-        List<?> before = MethodAccess.requestEvents(store, 7, 20);
+        List<?> before = requestRecords(7);
         check(before.size() == 1 && number(before.get(0), "id") == oldId && number(before.get(0), "recordedAt") == 123
                         && number(before.get(0), "elapsedMs") == 41 && "compact".equals(field(before.get(0), "purpose"))
                         && "cancelled".equals(field(before.get(0), "outcome")) && "old reason".equals(field(before.get(0), "reason"))
                         && (Integer) field(before.get(0), "retryCount") == 2 && "".equals(field(before.get(0), "diagnostic")),
                 "The migration lost an existing attempt or failed to decode the new empty diagnostic default");
         MethodAccess.recordRequest(store, 7, "model", 3, "success", "", 0, "{\"provider\":\"grok\"}");
-        List<?> after = MethodAccess.requestEvents(store, 7, 20);
+        List<?> after = requestRecords(7);
         check(after.size() == 2 && number(after.get(1), "id") == oldId
                         && "grok".equals(new JSONObject((String) field(after.get(0), "diagnostic")).getString("provider"))
                         && "preserved conversation".equals(messages(page(store, 7, -1, 48)).get(0).content),
@@ -334,7 +334,7 @@ public final class ChatStorePagingRegressionTest {
                 .put("error", new JSONObject().put("code", "invalid_model").put("message", "model unavailable"))
                 .put("response_body", "{\"password\":\"nested-secret\",\"error\":\"bad model\"}").toString();
         MethodAccess.recordRequest(store, 7, "unknown", -10, "unexpected", "Bearer opaque-secret\n" + repeated('x', 250), -2, evidence);
-        Object event = MethodAccess.requestEvents(store, 7, 20).get(0);
+        Object event = requestRecords(7).get(0);
         String detail = (String) field(event, "diagnostic"), reason = (String) field(event, "reason");
         JSONObject parsed = new JSONObject(detail);
         check("deepseek".equals(parsed.getString("provider")) && parsed.getInt("status_code") == 401
@@ -349,14 +349,14 @@ public final class ChatStorePagingRegressionTest {
                 "Untrusted metadata was not normalized and bounded");
         MethodAccess.recordRequest(store, 7, "review", 1, "error", "", 0,
                 new JSONObject().put("error", new JSONObject().put("message", repeated('x', 20000))).toString());
-        detail = (String) field(MethodAccess.requestEvents(store, 7, 20).get(0), "diagnostic");
+        detail = (String) field(requestRecords(7).get(0), "diagnostic");
         check(detail.length() <= 8192 && new JSONObject(detail).getJSONObject("error").getString("message").length() < 20000,
                 "Large failure bodies exceeded the local evidence cap");
         MethodAccess.recordRequest(store, 7, "model", 1, "error", "", 0, "Bearer plaintext-secret");
-        detail = (String) field(MethodAccess.requestEvents(store, 7, 20).get(0), "diagnostic");
+        detail = (String) field(requestRecords(7).get(0), "diagnostic");
         check(!detail.contains("plaintext-secret") && new JSONObject(detail).has("detail"), "Plain text failure evidence was not structured and scrubbed");
         MethodAccess.recordRequest(store, -1, "model", 1, "error", "", 0, evidence);
-        check(MethodAccess.requestEvents(store, -1, 20).isEmpty(), "Global configuration errors became model request history");
+        check(requestRecords(-1).isEmpty(), "Global configuration errors became model request history");
         @SuppressWarnings("unchecked") List<Message> history = (List<Message>) storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
         check(history.size() == 1 && "private user request".equals(history.get(0).content), "Request evidence was injected into model context");
     }
@@ -364,6 +364,12 @@ public final class ChatStorePagingRegressionTest {
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> records(String table, long sid) throws Exception {
         return (List<Map<String, Object>>) databaseType.getMethod("records", String.class, long.class).invoke(null, table, sid);
+    }
+
+    private static List<Map<String, Object>> requestRecords(long sid) throws Exception {
+        List<Map<String, Object>> rows = records("request_events", sid);
+        java.util.Collections.reverse(rows);
+        return rows;
     }
 
     private static void configurationDiagnosticsAreRetainedAndSessionIsolated() throws Exception {
@@ -390,8 +396,8 @@ public final class ChatStorePagingRegressionTest {
                         && !source.contains("\n") && !summary.contains("\r") && ((Number) last.get("recorded_at")).longValue() > 0
                         && new JSONObject(detail).has("error"),
                 "Configuration failures lost structured evidence, redaction, timestamps or size limits");
-        check(messages(page(store, 7, -1, 48)).size() == 1 && MethodAccess.requestEvents(store, 7, 20).isEmpty()
-                        && MethodAccess.requestEvents(store, -1, 20).isEmpty(),
+        check(messages(page(store, 7, -1, 48)).size() == 1 && requestRecords(7).isEmpty()
+                        && requestRecords(-1).isEmpty(),
                 "Configuration/tool errors polluted model transcript or request attempts");
         storeType.getMethod("delete", long.class).invoke(store, 7L);
         check(records("diagnostic_errors", 7).isEmpty() && records("diagnostic_errors", -1).size() == 200
@@ -401,8 +407,7 @@ public final class ChatStorePagingRegressionTest {
 
     private static final class MethodAccess {
         static void recordRequest(Object store, long sid, String purpose, long ms, String outcome, String reason, int retry) throws Exception {
-            storeType.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class)
-                    .invoke(store, sid, purpose, ms, outcome, reason, retry);
+            recordRequest(store, sid, purpose, ms, outcome, reason, retry, "");
         }
         static void recordRequest(Object store, long sid, String purpose, long ms, String outcome, String reason, int retry, String diagnostic) throws Exception {
             storeType.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class, String.class)
@@ -410,9 +415,6 @@ public final class ChatStorePagingRegressionTest {
         }
         static void recordDiagnostic(Object store, long sid, String source, String summary, String detail) throws Exception {
             storeType.getMethod("recordDiagnostic", long.class, String.class, String.class, String.class).invoke(store, sid, source, summary, detail);
-        }
-        static List<?> requestEvents(Object store, long sid, int limit) throws Exception {
-            return (List<?>) storeType.getMethod("requestEvents", long.class, int.class).invoke(store, sid, limit);
         }
     }
 
@@ -431,7 +433,7 @@ public final class ChatStorePagingRegressionTest {
         append(store, 7, Message.toolResult("pending", "different batch result"));
         Object earlier = page(store, 7, 4, 48);
         List<Message> trailing = (List<Message>)field(earlier, "trailingResults");
-        check(messages(earlier).size() == 3 && number(earlier, "lastId") == 3,
+        check(messages(earlier).size() == 3 && number(earlier, "firstId") == 1,
                 "Context results were added to the visible page or changed the cursor");
         check(trailing.size() == 1 && "c2".equals(trailing.get(0).toolCallId)
                 && "same batch result".equals(trailing.get(0).content),

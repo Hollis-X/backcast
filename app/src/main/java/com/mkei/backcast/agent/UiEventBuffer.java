@@ -7,7 +7,7 @@ import java.util.List;
 final class UiEventBuffer {
     static final int REQUEST = 0, TEXT = 1, REASONING = 2, PREVIEW = 3, START = 4,
             END = 5, ERROR = 6, CONTEXT = 7, COMPACT_START = 8, COMPACTED = 9,
-            FINISH = 10, RETRY = 11, STEER = 12, PROGRESS = 13;
+            FINISH = 10, STEER = 11, PROGRESS = 12;
 
     static final class Event {
         final int kind, generation, token;
@@ -42,11 +42,10 @@ final class UiEventBuffer {
                 case COMPACT_START: listener.onCompactStart(generation); break;
                 case COMPACTED: listener.onCompacted(generation, flag); break;
                 case FINISH: listener.onFinish(generation); break;
-                case RETRY: listener.onRetry(generation); break;
                 case STEER: listener.onSteer(generation); break;
                 case PROGRESS:
                     if (listener instanceof AgentLoop.ProgressListener) ((AgentLoop.ProgressListener) listener)
-                            .onProgress(generation, name, arguments, text.toString(), first);
+                            .onProgress(generation, name, arguments, text.toString());
                     break;
                 default: throw new IllegalStateException("Unknown UI event");
             }
@@ -57,25 +56,8 @@ final class UiEventBuffer {
 
     void clear() { events.clear(); }
 
-    /** Committed output has its transcript row; the last safe error remains turn metadata. */
-    void clearOutputPreservingRetry() {
-        Event retry = null;
-        for (Event event : events) if (isRetryProgress(event)) retry = event;
-        clear();
-        if (retry != null) events.add(retry.copy());
-    }
-
-    private static boolean isRetryProgress(Event event) {
-        return event.kind == PROGRESS && "retry".equals(event.name);
-    }
-
     void add(Event event) {
         if (event.kind == END) return;
-        if (event.kind == RETRY) {
-            clear();
-            events.add(new Event(REQUEST, event.generation, event.token, event.sequence, ""));
-            return;
-        }
         if (!events.isEmpty()) {
             Event last = events.get(events.size() - 1);
             if ((event.kind == TEXT || event.kind == REASONING) && last.kind == event.kind
@@ -89,7 +71,6 @@ final class UiEventBuffer {
                 Event previous = events.get(i);
                 if (previous.kind == event.kind && previous.token == event.token
                         && previous.generation == event.generation
-                        && (event.kind != PROGRESS || isRetryProgress(previous) == isRetryProgress(event))
                         && (event.kind != PREVIEW || previous.first == event.first)) {
                     if (event.kind == PREVIEW) events.set(i, event.copy());
                     else { events.remove(i); events.add(event.copy()); }

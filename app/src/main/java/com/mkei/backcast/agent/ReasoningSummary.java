@@ -15,8 +15,6 @@ public final class ReasoningSummary {
             + "Plans are not actions: never claim a file was written or a tool ran without evidence. "
             + "The source may be an unfinished sample. Never invent missing results. "
             + "Return ONLY a JSON array of objects, each with title and text. ";
-    public static final String PROMPT = prompt("auto", "zh-CN");
-
     private ReasoningSummary() {}
 
     public static String prompt(String mode, String language) {
@@ -57,10 +55,6 @@ public final class ReasoningSummary {
                 + "\n[Latest sample]\n" + text.subSequence(size - span, size).toString();
     }
 
-    public static List<Message> request(String sample, boolean complete) {
-        return request(sample, complete, "auto", "zh-CN");
-    }
-
     public static List<Message> request(String sample, boolean complete, String mode, String language) {
         List<Message> messages = new ArrayList<Message>();
         if ("none".equals(mode)) return messages;
@@ -68,10 +62,6 @@ public final class ReasoningSummary {
         messages.add(Message.user((complete ? "Source is complete.\n" : "Source is still streaming.\n")
                 + "<source>\n" + sample + "\n</source>"));
         return messages;
-    }
-
-    public static String validate(String output) throws Exception {
-        return validate(output, "auto");
     }
 
     public static String validate(String output, String mode) throws Exception {

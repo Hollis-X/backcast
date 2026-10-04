@@ -84,8 +84,8 @@ public final class ToolBatchProbeUiRegressionTest {
         throw new NoSuchMethodException(name);
     }
     private static ToolBatchProbe.Progress progress(String stage,String id,int completed,JSONObject result) throws Exception {
-        Constructor<ToolBatchProbe.Progress> constructor=ToolBatchProbe.Progress.class.getDeclaredConstructor(String.class,String.class,String.class,int.class,int.class,int.class,int.class,JSONObject.class);
-        constructor.setAccessible(true);return constructor.newInstance(stage,id,id,completed,13,completed,0,result);
+        Constructor<ToolBatchProbe.Progress> constructor=ToolBatchProbe.Progress.class.getDeclaredConstructor(String.class,String.class,String.class,int.class,int.class,JSONObject.class);
+        constructor.setAccessible(true);return constructor.newInstance(stage,id,id,completed,13,result);
     }
     public static void main(String[] args) throws Exception {
         Path root=Paths.get(args[0]),temporary=Files.createTempDirectory("backcast-batch-ui-");

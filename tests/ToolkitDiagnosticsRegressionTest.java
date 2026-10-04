@@ -41,13 +41,13 @@ public final class ToolkitDiagnosticsRegressionTest {
             JSONObject config = listing.getJSONObject(i).getJSONObject("configuration");
             check(!config.has("prefix") && !config.has("environment"), "List exposed a bundled launcher script");
         }
-        check(bootstrap.equals(store.launcher("objection").prefix.get(1))
-                && store.launcher("objection").environment.has("PYTHONPATH"), "Sanitizing presentation mutated the stored launcher");
+        check(bootstrap.equals(store.launcher("objection", ToolchainFixtures.LIVE).prefix.get(1))
+                && store.launcher("objection", ToolchainFixtures.LIVE).environment.has("PYTHONPATH"), "Sanitizing presentation mutated the stored launcher");
     }
 
     private static void customConfigurationRemainsVisible() throws Exception {
         File custom = new File(root, "custom/bin/objection"); custom.getParentFile().mkdirs(); Files.write(custom.toPath(), new byte[]{1});
-        store.configure("objection", custom.getPath(), "");
+        ToolchainFixtures.configure(store, "objection", custom.getPath(), "");
         JSONObject visible = run("status").getJSONObject("configuration");
         check(visible.getString("path").equals(custom.getPath()) && !visible.has("managed_private"), "User configuration was hidden or relabeled as managed");
         register();
@@ -108,7 +108,7 @@ public final class ToolkitDiagnosticsRegressionTest {
     public static void main(String[] args) throws Exception {
         root = Files.createTempDirectory("backcast-tool-diagnostics-").toFile();
         project = new File(root, "project"); project.mkdir();
-        store = new ToolchainStore(new File(root, "private/toolchains"));
+        store = new ToolchainStore(new File(root, "private/toolchains"), null, "", 0);
         nativeTools = new File(store.root(), "native"); common = new File(store.root(), "common");
         File bin = new File(nativeTools, "usr/bin"); bin.mkdirs(); common.mkdirs();
         for (String name : new String[]{"frida-server", "python3"}) {

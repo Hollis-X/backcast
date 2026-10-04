@@ -17,7 +17,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
-/** Exercises the real stopScroll method with the API 16 native touch/animation contract. */
+/** Exercises the XML-created view's real stopScroll method with the native touch/animation contract. */
 public final class TranscriptScrollRegressionTest {
     private static int passed;
     private static Class<?> scrollType;
@@ -50,7 +50,8 @@ public final class TranscriptScrollRegressionTest {
         return invoke(target, name, new Class<?>[0]);
     }
     private static Object newScroll() throws Exception {
-        return scrollType.getConstructor(contextType).newInstance(contextType.getConstructor().newInstance());
+        Class<?> attributes = scrollType.getClassLoader().loadClass("android.util.AttributeSet");
+        return scrollType.getConstructor(contextType, attributes).newInstance(contextType.getConstructor().newInstance(), null);
     }
     private static void touch(Object scroll, int action, float y) throws Exception {
         Object event = eventType.getMethod("obtain", long.class, long.class, int.class,
@@ -82,8 +83,7 @@ public final class TranscriptScrollRegressionTest {
                 + "public boolean animating,dragging;public float lastY;public Parent parent=new Parent();"
                 + "public static class Parent implements ViewParent {public boolean disallow;"
                 + "public void requestDisallowInterceptTouchEvent(boolean value){disallow=value;} }"
-                + "public ScrollView(Context c){}public ScrollView(Context c,AttributeSet a){}"
-                + "public ScrollView(Context c,AttributeSet a,int s){}"
+                + "public ScrollView(Context c,AttributeSet a){}"
                 + "public int getScrollX(){return x;}public int getScrollY(){return y;}"
                 + "public ViewParent getParent(){return parent;}"
                 + "public void scrollTo(int a,int b){if(children>0){x=a;y=Math.max(0,Math.min(range,b));}}"
@@ -107,7 +107,7 @@ public final class TranscriptScrollRegressionTest {
             for (JavaFileObject source : fm.getJavaFileObjects(root.resolve(
                     "app/src/main/java/com/mkei/backcast/ui/TranscriptScrollView.java").toFile())) sources.add(source);
             check(ToolProvider.getSystemJavaCompiler().getTask(null, fm, null,
-                    Arrays.asList("-proc:none", "-encoding", "UTF-8", "-source", "7", "-target", "7",
+                    Arrays.asList("-proc:none", "-encoding", "UTF-8", "-source", "8", "-target", "8",
                             "-Xlint:-options", "-d", build.toString()), null, sources).call(),
                     "TranscriptScrollView fixture compilation failed");
         }

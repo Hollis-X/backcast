@@ -64,8 +64,9 @@ public final class SummaryPreferencesRegressionTest {
         check(request.get(0).content.contains("private reasoning steps"), "Detailed mode requests private reasoning");
         check(request.get(1).content.contains("<source>\nuntrusted source\n</source>"),
                 "Summary source was promoted to instructions");
-        check(ReasoningSummary.PROMPT.equals(ReasoningSummary.prompt("auto", "zh-CN")),
-                "Legacy summary prompt no longer uses the default preferences");
+        String automatic = ReasoningSummary.request("source", true, "auto", "zh-CN").get(0).content;
+        check(automatic.contains("one to three objects") && automatic.contains("Simplified Chinese"),
+                "Automatic summary request lost its configured detail or language");
     }
 
     private static void noneProducesNoSummaryRequest() {
@@ -87,7 +88,7 @@ public final class SummaryPreferencesRegressionTest {
                 "None mode leaves a visible reasoning detail row");
         check(mixed.hasDetail() && mixed.caption().contains("工具") && !mixed.caption().contains("思考"),
                 "None mode hides tools or exposes a reasoning caption");
-        check("original reasoning".equals(trace.reasoning.toString()) && trace.order.size() == 2,
+        check("original reasoning".contentEquals(trace.order.get(0).think) && trace.order.size() == 2,
                 "UI preferences removed the original reasoning or chronology");
         trace.showReasoning = true;
         check(thought.hasDetail() && thought.caption().contains("思考"), "Reasoning cannot be shown again");
@@ -215,7 +216,7 @@ public final class SummaryPreferencesRegressionTest {
         sources.add(new File(root, "app/src/main/java/com/mkei/backcast/ReasoningNotes.java"));
         add(sources, build, "android.os.Looper", "package android.os; public class Looper { public static Looper getMainLooper(){ return new Looper(); } }");
         add(sources, build, "android.os.Handler", "package android.os; import java.util.concurrent.*; public class Handler { static final ConcurrentLinkedQueue<Runnable> queue=new ConcurrentLinkedQueue<Runnable>(); public Handler(Looper l){} public void post(Runnable r){queue.add(r);} public static int pending(){return queue.size();} public static void drain(){Runnable r;while((r=queue.poll())!=null)r.run();} }");
-        add(sources, build, "com.mkei.backcast.Settings", "package com.mkei.backcast; public class Settings { public String mode=\"auto\",language=\"zh-CN\"; public String reasoningSummary(){return mode;} public String outputLanguage(){return language;} public String baseUrl(){return \"http://fixture\";} public String apiKey(){return \"fixture\";} public String model(){return \"fixture\";} public String systemPrompt(){return \"\";} public String environmentContext(){return \"\";} }");
+        add(sources, build, "com.mkei.backcast.Settings", "package com.mkei.backcast; public class Settings { public String mode=\"auto\",language=\"zh-CN\"; public String reasoningSummary(){return mode;} public String outputLanguage(){return language;} public static final class AiProfile { public final String baseUrl=\"http://fixture\",apiKey=\"fixture\",model=\"fixture\"; } public AiProfile activeAiProfile(){return new AiProfile();} public String systemPrompt(){return \"\";} public String environmentContext(){return \"\";} }");
         add(sources, build, "com.mkei.backcast.ChatStore", "package com.mkei.backcast; import java.util.*; public class ChatStore { Map<String,String> cache=new HashMap<String,String>(); public synchronized String reasoningNote(String key){return cache.containsKey(key)?cache.get(key):\"\";} public synchronized void saveReasoningNote(String key,String value){cache.put(key,value);} }");
         add(sources, build, "com.mkei.backcast.agent.LlmClient", "package com.mkei.backcast.agent; import java.util.*; import java.util.concurrent.*; public class LlmClient { public static int calls,lastTokens; public static String lastPrompt; public static CountDownLatch started,release; public static class Config { public String baseUrl,model,responseInstructions; public int maxTokens,timeoutMs,totalTimeoutMs,maxResponseChars; public Config(String b,String k,String m){baseUrl=b;model=m;} } public static class Reply { public String error,content=\"[{\\\"title\\\":\\\"Progress\\\",\\\"text\\\":\\\"Inspected the project\\\"}]\"; } private final Config config; public LlmClient(Config c){config=c;} public Reply send(List<Message> messages,Object tools,Object sink) throws Exception {calls++;lastTokens=config.maxTokens;lastPrompt=messages.get(0).content+config.responseInstructions; if(started!=null)started.countDown();if(release!=null&&!release.await(5,TimeUnit.SECONDS))throw new IllegalStateException(\"Timeout\");return new Reply();} }");
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();

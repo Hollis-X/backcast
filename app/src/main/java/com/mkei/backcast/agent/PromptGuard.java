@@ -52,45 +52,6 @@ public final class PromptGuard {
                 : requestsDisclosure(request) ? REFUSAL : redact(text, instructions, environment, extra);
     }
 
-    /** 忽略排版变化，并识别较长指令里的连续原文片段。 */
-    public static boolean recites(String text, String secret) {
-        if (text == null || secret == null) {
-            return false;
-        }
-        String visible = normalize(text);
-        String[] lines = secret.split("\n");
-        for (int i = 0; i < lines.length; i++) {
-            String line = normalize(lines[i]);
-            if (line.length() < MIN_LINE) {
-                continue;
-            }
-            int span = Math.max(MIN_LINE, (line.length() * 2 + 2) / 3);
-            for (int at = 0; at + span <= line.length(); at++) {
-                if (visible.contains(line.substring(at, at + span))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /** 单独提到路径不算；至少两个不同环境字段同时被复述才拦。 */
-    public static boolean dumpsEnvironment(String text, String environment) {
-        if (text == null || environment == null) {
-            return false;
-        }
-        String visible = normalize(text);
-        int hits = 0;
-        String[] lines = environment.split("\n");
-        for (int i = 0; i < lines.length; i++) {
-            String line = normalize(lines[i]);
-            if (line.length() >= 8 && visible.contains(line) && ++hits >= 2) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /** Reuses compiled patterns and scans only deltas plus a bounded overlap. */
     public static final class Stream {
         private final List<String> needles = new ArrayList<String>();

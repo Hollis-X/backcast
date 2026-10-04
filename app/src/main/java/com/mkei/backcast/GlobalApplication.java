@@ -13,7 +13,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.TextUtils;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -22,7 +21,6 @@ import android.widget.HorizontalScrollView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-import androidx.multidex.MultiDex;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -38,17 +36,10 @@ import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.LinkedHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GlobalApplication extends Application {
 
-    private static Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
-
-    @Override
-    protected void attachBaseContext(Context base) {
-        super.attachBaseContext(base);
-        MultiDex.install(this);
-    }
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
 
     @Override
     public void onCreate() {
@@ -103,8 +94,6 @@ public class GlobalApplication extends Application {
 
         private static CrashHandler sInstance;
 
-        private PartCrashHandler mPartCrashHandler;
-
         public static CrashHandler getInstance() {
             if (sInstance == null) {
                 sInstance = new CrashHandler();
@@ -113,35 +102,16 @@ public class GlobalApplication extends Application {
         }
 
         public void registerGlobal(Context context) {
-            registerGlobal(context, null);
-        }
-
-        public void registerGlobal(Context context, String crashDir) {
-            Thread.setDefaultUncaughtExceptionHandler(new UncaughtExceptionHandlerImpl(context.getApplicationContext(), crashDir));
-        }
-
-        public void unregister() {
-            Thread.setDefaultUncaughtExceptionHandler(DEFAULT_UNCAUGHT_EXCEPTION_HANDLER);
+            Thread.setDefaultUncaughtExceptionHandler(new UncaughtExceptionHandlerImpl(context.getApplicationContext()));
         }
 
         public void registerPart(Context context) {
-            unregisterPart(context);
-            mPartCrashHandler = new PartCrashHandler(context.getApplicationContext());
-            MAIN_HANDLER.postAtFrontOfQueue(mPartCrashHandler);
-        }
-
-        public void unregisterPart(Context context) {
-            if (mPartCrashHandler != null) {
-                mPartCrashHandler.isRunning.set(false);
-                mPartCrashHandler = null;
-            }
+            MAIN_HANDLER.postAtFrontOfQueue(new PartCrashHandler(context.getApplicationContext()));
         }
 
         private static class PartCrashHandler implements Runnable {
 
             private final Context mContext;
-
-            public AtomicBoolean isRunning = new AtomicBoolean(true);
 
             public PartCrashHandler(Context context) {
                 this.mContext = context;
@@ -149,26 +119,17 @@ public class GlobalApplication extends Application {
 
             @Override
             public void run() {
-                while (isRunning.get()) {
+                while (true) {
                     try {
                         Looper.loop();
                     } catch (final Throwable e) {
                         e.printStackTrace();
-                        if (isRunning.get()) {
-                            MAIN_HANDLER.post(new Runnable(){
-
-                                    @Override
-                                    public void run() {
-                                        Toast.makeText(mContext, e.toString(), Toast.LENGTH_LONG).show();
-                                    }
-                                });
-                        } else {
-                            if (e instanceof RuntimeException) {
-                                throw (RuntimeException)e;
-                            } else {
-                                throw new RuntimeException(e);
+                        MAIN_HANDLER.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                Toast.makeText(mContext, e.toString(), Toast.LENGTH_LONG).show();
                             }
-                        }
+                        });
                     }
                 }
             }
@@ -182,9 +143,9 @@ public class GlobalApplication extends Application {
 
             private final File mCrashDir;
 
-            public UncaughtExceptionHandlerImpl(Context context, String crashDir) {
+            public UncaughtExceptionHandlerImpl(Context context) {
                 this.mContext = context;
-                this.mCrashDir = TextUtils.isEmpty(crashDir) ? new File(mContext.getExternalCacheDir(), "crash") : new File(crashDir);
+                this.mCrashDir = new File(mContext.getExternalCacheDir(), "crash");
             }
 
             @Override
@@ -230,7 +191,7 @@ public class GlobalApplication extends Application {
                 head.put("Android Version", String.format("%s (%d)", Build.VERSION.RELEASE, Build.VERSION.SDK_INT));
                 head.put("App Version", String.format("%s (%d)", versionName, versionCode));
                 head.put("Kernel", getKernel());
-                head.put("Support Abis", Build.VERSION.SDK_INT >= 21 && Build.SUPPORTED_ABIS != null ? Arrays.toString(Build.SUPPORTED_ABIS): "unknown");
+                head.put("Support Abis", Build.SUPPORTED_ABIS != null ? Arrays.toString(Build.SUPPORTED_ABIS): "unknown");
                 head.put("Fingerprint", Build.FINGERPRINT);
 
                 StringBuilder builder = new StringBuilder();

@@ -100,7 +100,7 @@ public final class WorkspaceRegressionTest {
         try(StandardJavaFileManager manager=ToolProvider.getSystemJavaCompiler().getStandardFileManager(null,null,null)){
             manager.getJavaFileObjects(root.resolve("app/src/main/java/com/mkei/backcast/Settings.java").toFile(),
                     root.resolve("app/src/main/java/com/mkei/backcast/agent/ResponsePreferences.java").toFile()).forEach(sources::add);
-            check(ToolProvider.getSystemJavaCompiler().getTask(null,manager,null,List.of("-proc:none","-source","7","-target","7","-Xlint:-options","-encoding","UTF-8","-d",output.toString()),null,sources).call(),"Actual workspace settings/page failed compilation");
+            check(ToolProvider.getSystemJavaCompiler().getTask(null,manager,null,List.of("-proc:none","-source","8","-target","8","-Xlint:-options","-encoding","UTF-8","-d",output.toString()),null,sources).call(),"Actual workspace settings/page failed compilation");
         }
         URLClassLoader loader=new URLClassLoader(new java.net.URL[]{output.toUri().toURL()},null);
         settingsType=loader.loadClass("com.mkei.backcast.Settings");contextType=loader.loadClass("android.content.Context");uiType=loader.loadClass("com.mkei.backcast.WorkspaceUiFixture");return loader;
@@ -125,10 +125,10 @@ public final class WorkspaceRegressionTest {
             check(call(settings,"workDir").equals("/projects/main")&&roots(settings(context)).equals(List.of("/projects/main","/projects/extra")),"Adding simultaneous root changed the relative-path base or duplicated entry");
             roots(settings).clear();check(roots(settings).size()==2,"Caller mutation changed persisted authorization");pass("multiple roots persist and additions preserve the primary path base");
 
-            Object freshContext=contextType.getConstructor().newInstance(),freshSettings=settings(freshContext);
-            call(freshSettings,"setWorkDir","/projects/narrow");check(roots(freshSettings).equals(List.of("/projects/narrow")),"Legacy primary setter implicitly retained the broad default directory");
-            call(freshSettings,"addAuthorizedWorkDir","/projects/shared");call(freshSettings,"setWorkDir","/projects/replacement");
-            check(roots(freshSettings).equals(List.of("/projects/replacement","/projects/shared")),"Legacy setter dropped explicit additional roots or retained replaced primary");
+            Object freshContext=contextType.getConstructor().newInstance();values(freshContext).put("work_dir","/projects/narrow");
+            Object freshSettings=settings(freshContext);check(roots(freshSettings).equals(List.of("/projects/narrow")),"Legacy migration implicitly authorized the broad default directory");
+            call(freshSettings,"addAuthorizedWorkDir","/projects/shared");call(freshSettings,"setPrimaryWorkDir","/projects/replacement");
+            check(roots(freshSettings).equals(List.of("/projects/replacement","/projects/narrow","/projects/shared")),"Primary selection dropped an already authorized project");
 
             call(settings,"setPrimaryWorkDir","/projects/extra");check(roots(settings).equals(List.of("/projects/extra","/projects/main")),"Primary selection dropped another authorized root");
             check((boolean)call(settings,"removeAuthorizedWorkDir","/projects/extra")&&call(settings,"workDir").equals("/projects/main"),"Removing primary did not select an already-authorized root");
@@ -137,8 +137,7 @@ public final class WorkspaceRegressionTest {
             Map<String,Object> before=new LinkedHashMap<>(values(context));
             for(String invalid:new String[]{"relative/project","", " /projects/main\n", "/projects/\rmain", "/projects/\0main"}){
                 check(!(boolean)settingsType.getMethod("validWorkDir",String.class).invoke(null,invalid),"Invalid input accepted "+invalid);
-                for(String setter:List.of("addAuthorizedWorkDir","setPrimaryWorkDir","setWorkDir")){
-                    if(invalid.isEmpty()&&setter.equals("setWorkDir"))continue; // Original empty setter selects the legacy default.
+                for(String setter:List.of("addAuthorizedWorkDir","setPrimaryWorkDir")){
                     boolean rejected=false;try{call(settings,setter,invalid);}catch(InvocationTargetException error){rejected=error.getCause()instanceof IllegalArgumentException;}
                     check(rejected,"Invalid root silently persisted via "+setter);
                 }
@@ -147,9 +146,11 @@ public final class WorkspaceRegressionTest {
 
             values(context).put("base_url","https://fixture");values(context).put("api_key","secret");values(context).put("model","model");values(context).put("output_language","en");
             call(settings,"addAuthorizedWorkDir","/projects/extra");call(settings,"setPrimaryWorkDir","/projects/extra");
-            check(call(settings,"baseUrl").equals("https://fixture")&&call(settings,"apiKey").equals("secret")&&call(settings,"model").equals("model")&&call(settings,"outputLanguage").equals("en"),"Workspace edit overwrote AI/preferences");
-            Object concurrentContext=contextType.getConstructor().newInstance(),concurrentSettings=settings(concurrentContext);
-            call(concurrentSettings,"setWorkDir","/projects/main");call(concurrentSettings,"addAuthorizedWorkDir","/projects/revoke");
+            Object active=call(settings,"activeAiProfile");
+            check(active.getClass().getField("baseUrl").get(active).equals("https://fixture")&&active.getClass().getField("apiKey").get(active).equals("secret")
+                    &&active.getClass().getField("model").get(active).equals("model")&&call(settings,"outputLanguage").equals("en"),"Workspace edit overwrote AI/preferences");
+            Object concurrentContext=contextType.getConstructor().newInstance();values(concurrentContext).put("work_dir","/projects/main");
+            Object concurrentSettings=settings(concurrentContext);call(concurrentSettings,"addAuthorizedWorkDir","/projects/revoke");
             java.util.concurrent.CountDownLatch start=new java.util.concurrent.CountDownLatch(1);
             java.util.concurrent.atomic.AtomicReference<Throwable> failure=new java.util.concurrent.atomic.AtomicReference<>();List<Thread> workers=new ArrayList<>();
             for(int i=0;i<32;i++){final int index=i;final Object instance=settings(concurrentContext);Thread thread=new Thread(()->{

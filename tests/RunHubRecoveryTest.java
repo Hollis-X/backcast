@@ -81,7 +81,6 @@ public final class RunHubRecoveryTest {
                 + "public java.util.List<com.mkei.backcast.agent.Message> contextMessages(long sid) { if(pausedRead==sid) { readStarted.countDown(); try { readRelease.await(5,java.util.concurrent.TimeUnit.SECONDS); } catch(InterruptedException e) { throw new RuntimeException(e); } } return new java.util.ArrayList<com.mkei.backcast.agent.Message>(); }"
                 + "public void append(long sid,com.mkei.backcast.agent.Message m) {}"
                 + "public void replaceAll(long sid,java.util.List<com.mkei.backcast.agent.Message> m) {}"
-                + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry){recordRequest(sid,purpose,elapsed,outcome,reason,retry,\"\");}"
                 + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String detail){requestSession=sid;requestPurpose=purpose;requestElapsed=elapsed;requestOutcome=outcome;requestReason=reason;requestRetry=retry;requestDiagnostic=detail;}"
                 + "public void recordDiagnostic(long sid,String source,String summary,String detail){diagnosticSession=sid;diagnosticSource=source;diagnosticSummary=summary;diagnosticDetail=detail;diagnosticCalls++;}"
                 + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished) {} }");
@@ -90,8 +89,7 @@ public final class RunHubRecoveryTest {
                 + "public static final int DEFAULT_CONTEXT_LIMIT=456000;"
                 + "public interface Listener {} public static class Quiet implements Listener {}"
                 + "public interface Recorder { void record(long sid,Message m); void replace(long sid,java.util.List<Message> m); }"
-                + "public interface RequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry);}"
-                + "public interface DetailedRequestRecorder extends RequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String diagnostic);}"
+                + "public interface DetailedRequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String diagnostic);}"
                 + "public interface ErrorRecorder {void recordDiagnostic(long sid,String source,String summary,String detail);}"
                 + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished); }"
                 + "public interface UsageObserver{void onUsage(long tokens);}public UsageObserver usageObserver;"
@@ -506,8 +504,8 @@ public final class RunHubRecoveryTest {
         Object gate=gateType.getConstructor().newInstance();
         call(hub,"broadcastAccess",new Class[]{String.class,gateType},"strict",gate);
         check(field(child,"gate")==gate && "strict".equals(field(child,"access")),"Permission change did not reach a running child");
-        call(hub,"clearGate",new Class[]{gateType},gate);
-        check(field(child,"gate")==null,"Detached UI left its gate reachable from a child");
+        call(hub,"broadcastAccess",new Class[]{String.class,gateType},"full",gate);
+        check(field(child,"gate")==null && "full".equals(field(child,"access")),"Full access left an approval gate reachable from a child");
         Object checkpoint=field(manager,"store");
         call(hub,"drop",new Class[]{long.class},26L);
         check(count(root,"cancellations")>0 && count(child,"cancellations")>0 && (Integer)field(checkpoint,"removes")==1,
@@ -604,10 +602,10 @@ public final class RunHubRecoveryTest {
     private static void modelDiagnosticsUseTheConversationRecorder() throws Exception {
         Object hub = freshHub(), root = bind(hub, 31, listener());
         Object recorder = field(root, "recorder");
-        Class<?> contract = hubType.getClassLoader().loadClass("com.mkei.backcast.agent.AgentLoop$RequestRecorder");
-        check(contract.isInstance(recorder), "Production recorder drops optional request diagnostics");
-        contract.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class)
-                .invoke(recorder, 31L, "review", 14234L, "retryable_error", "接口返回 HTTP 503", 2);
+        Class<?> contract = hubType.getClassLoader().loadClass("com.mkei.backcast.agent.AgentLoop$DetailedRequestRecorder");
+        check(contract.isInstance(recorder), "Production recorder drops request diagnostics");
+        contract.getMethod("recordRequest", long.class, String.class, long.class, String.class, String.class, int.class, String.class)
+                .invoke(recorder, 31L, "review", 14234L, "retryable_error", "接口返回 HTTP 503", 2, "");
         check(storeType.getField("requestSession").getLong(null) == 31L
                         && storeType.getField("requestElapsed").getLong(null) == 14234L
                         && storeType.getField("requestRetry").getInt(null) == 2

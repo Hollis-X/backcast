@@ -69,10 +69,6 @@ public final class RunHub {
         @Override public void record(long sessionId, Message message) { store.append(sessionId, message); }
         @Override public void replace(long sessionId, List<Message> messages) { store.replaceAll(sessionId, messages); }
         @Override public void recordRequest(long sessionId, String purpose, long elapsedMs,
-                String outcome, String reason, int retryCount) {
-            store.recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount);
-        }
-        @Override public void recordRequest(long sessionId, String purpose, long elapsedMs,
                 String outcome, String reason, int retryCount, String diagnostic) {
             store.recordRequest(sessionId, purpose, elapsedMs, outcome, reason, retryCount, diagnostic);
         }
@@ -85,10 +81,6 @@ public final class RunHub {
         private final AgentLoop parent;
         private final String id;
         ChildDiagnostics(AgentLoop parent, String id) { this.parent = parent; this.id = id; }
-        @Override public void recordRequest(long sid, String purpose, long elapsedMs,
-                String outcome, String reason, int retryCount) {
-            recordRequest(sid, purpose, elapsedMs, outcome, reason, retryCount, "");
-        }
         @Override public void recordRequest(long sid, String purpose, long elapsedMs,
                 String outcome, String reason, int retryCount, String detail) {
             org.json.JSONObject evidence;
@@ -294,17 +286,6 @@ public final class RunHub {
                 child.setAccessLevel(level);
                 child.setApprovalGate(use);
             }
-        }
-    }
-
-    public synchronized void clearGate(ApprovalGate gate) {
-        if (gate == null) {
-            return;
-        }
-        for (AgentLoop loop : all()) {
-            loop.clearGate(gate);
-            SubAgentManager manager = children.get(loop);
-            if (manager != null) for (AgentLoop child : manager.runtimeLoops()) child.clearGate(gate);
         }
     }
 

@@ -63,32 +63,32 @@ public final class ToolkitOperationRegressionTest {
     }
 
     private static void correctAddr2lineAddressesRunTheActualGnuProgram() throws Exception {
-        store.configure("addr2line", "/usr/bin/addr2line", null);
+        ToolchainFixtures.configure(store, "addr2line", "/usr/bin/addr2line", null);
         JSONObject result = run("addr2line", "-f", "-C", "-e", input.getPath(), "0x1000");
         check(result.getBoolean("success") && result.getString("output").startsWith("exit=0\n"), "Valid addr2line request did not run the real program: " + result);
-        store.clear("addr2line");
+        ToolchainFixtures.clear(store, "addr2line");
     }
 
     private static void objcopyDiscardSymbolsWritesAnExplicitTemporaryOutput() throws Exception {
-        store.configure("objcopy", "/usr/bin/objcopy", null);
+        ToolchainFixtures.configure(store, "objcopy", "/usr/bin/objcopy", null);
         byte[] original = Files.readAllBytes(input.toPath()); File output = new File(temporary.directory(), "discarded.elf");
         JSONObject result = run("objcopy", "-x", input.getPath(), output.getPath());
         check(result.getBoolean("success") && output.isFile() && Arrays.equals(original, Files.readAllBytes(input.toPath())),
                 "objcopy -x was rejected or changed the project input: " + result);
         rejects("objcopy", "-x", input.getPath());
         rejects("objcopy", "-x", input.getPath(), new File(project, "overwrite.elf").getPath());
-        store.clear("objcopy");
+        ToolchainFixtures.clear(store, "objcopy");
     }
 
     private static void archiveListingReadsProjectArchivesAndExplainsSharedObjectMisuse() throws Exception {
         File member = new File(project, "member.o"), archive = new File(project, "sample.a"); Files.write(member.toPath(), new byte[]{1, 2, 3});
         Process process = new ProcessBuilder("/usr/bin/ar", "rcs", archive.getPath(), member.getPath()).start();
-        check(process.waitFor() == 0, "Cannot create actual GNU archive fixture"); store.configure("ar", "/usr/bin/ar", null);
+        check(process.waitFor() == 0, "Cannot create actual GNU archive fixture"); ToolchainFixtures.configure(store, "ar", "/usr/bin/ar", null);
         JSONObject listing = new JSONObject(toolkit.run(request("ar", "t", archive.getPath()).put("temporary", false)));
         check(listing.getBoolean("success") && listing.getString("output").contains("member.o"), "Read-only archive listing required private output or failed: " + listing);
         JSONObject wrong = run("ar", "t", input.getPath());
         check(!wrong.getBoolean("success") && "not_an_archive".equals(wrong.getString("failure_kind")), "Shared-object archive misuse lost its specific explanation");
-        store.clear("ar");
+        ToolchainFixtures.clear(store, "ar");
     }
 
     private static void dynamicFailuresKeepRealOutputAndDoNotImplyWorkingJavaHooks() throws Exception {
@@ -97,7 +97,7 @@ public final class ToolkitOperationRegressionTest {
             @Override String runProgram(ToolchainStore.Launcher launcher, List<String> args, boolean temp, int timeout, int epoch) { return output[0]; }
         };
         ToolkitTool target = new ToolkitTool(failing, store, project.getPath(), temporary, "arm64-v8a");
-        store.configure("objection", new File(root, "objection").getPath(), null);
+        ToolchainFixtures.configure(store, "objection", new File(root, "objection").getPath(), null);
         for (String override : new String[]{"--host=192.0.2.1", "-h192.0.2.1", "--port=1234", "-P1234", "--network",
                 "-N", "--local", "-L", "--serial=remote", "-Sremote", "-dN"}) {
             JSONObject response = new JSONObject(target.run(request("objection", override, "-n", "sample.running.app", "run", "memory list modules")));
@@ -122,7 +122,7 @@ public final class ToolkitOperationRegressionTest {
         }
         output[0] = "exit=0\nobjection: 1.12.5\n"; JSONObject probe = target.status("objection");
         check(probe.getBoolean("ready") && "version".equals(probe.getString("probe_type")) && probe.getString("probe_scope").contains("实际 run"),
-                "Version probe implied target attach/Java hook compatibility"); store.clear("objection");
+                "Version probe implied target attach/Java hook compatibility"); ToolchainFixtures.clear(store, "objection");
     }
 
     private static void toolCatalogOffersConcreteCorrectParameterShapes() throws Exception {
@@ -137,7 +137,7 @@ public final class ToolkitOperationRegressionTest {
         root = Files.createTempDirectory("backcast-toolkit-operation-tests-").toFile(); project = new File(root, "project"); project.mkdir();
         input = new File(project, "sample.so"); Files.copy(new File("/bin/ls").toPath(), input.toPath());
         temporary = new TemporaryWorkspace(project.getPath(), false, new File(root, "private/materials"), 1); temporary.beginTurn();
-        store = new ToolchainStore(new File(root, "private/toolchains")); toolkit = new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a");
+        store = new ToolchainStore(new File(root, "private/toolchains"), null, "", 0); toolkit = new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a");
         int passed = 0;
         try {
             for (String test : new String[]{"rabinInfoImportsAndEntrypointsAreDistinctFromRadareScripts", "radareAnalysisAndFiltersAreAllowedWhileExecutionAndWritingAreRejected",

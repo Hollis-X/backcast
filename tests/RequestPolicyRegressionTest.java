@@ -27,9 +27,6 @@ public final class RequestPolicyRegressionTest {
         final List<String> details = new ArrayList<String>();
         @Override public void record(long sid, Message value) { messages.add(value); }
         @Override public void replace(long sid, List<Message> values) { }
-        @Override public void recordRequest(long sid, String purpose, long ms, String outcome, String reason, int count) {
-            recordRequest(sid, purpose, ms, outcome, reason, count, "");
-        }
         @Override public void recordRequest(long sid, String purpose, long ms, String outcome, String reason, int count, String detail) {
             if (failDiagnostics) throw new IllegalStateException("diagnostic database unavailable");
             diagnostics.add(sid + ":" + purpose + ":" + outcome + ":" + count + ":" + reason);
@@ -43,7 +40,7 @@ public final class RequestPolicyRegressionTest {
         final List<String> errors = new ArrayList<String>();
         final List<LlmClient.Reply> responses = new ArrayList<LlmClient.Reply>();
         final AgentLoop loop;
-        int calls, executions, retries;
+        int calls, executions;
         final List<String> phases = new ArrayList<String>();
         boolean cancelDuringRequest, queueResumeDuringRequest;
         Fixture(LlmClient.Reply... script) {
@@ -68,9 +65,9 @@ public final class RequestPolicyRegressionTest {
             };
             loop = new AgentLoop(client, tools, new AgentLoop.Quiet() {
                 @Override public void onError(int gen, String error) { errors.add(error); }
-                @Override public void onRetry(int gen) { retries++; }
-                @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
-                    phases.add(phase); check(attempt == 0, "A request failure invented a retry count");
+
+                @Override public void onProgress(int gen, String phase, String name, String detail) {
+                    phases.add(phase);
                 }
             });
             loop.bindSession(7L); loop.reset("fixture"); loop.setRecorder(records);
@@ -89,7 +86,7 @@ public final class RequestPolicyRegressionTest {
                 "HTTP 400: invalid model; connection reset HTTP 503",
                 "模型工具调用参数不完整或无效，未执行。"}) {
             Fixture f = new Fixture(reply("", error)); f.loop.setGoal("inspect fixture"); f.run();
-            check(f.calls == 1 && f.retries == 0 && f.errors.size() == 1, "Permanent error retried");
+            check(f.calls == 1 && f.errors.size() == 1, "Permanent error retried");
             check(Goal.ACTIVE.equals(f.loop.goalStatus()) && !f.loop.busy(), "Failed goal was completed or restarted");
             check(!f.records.diagnostics.toString().contains("bad-secret"), "Provider text entered diagnostics");
         }
@@ -108,7 +105,7 @@ public final class RequestPolicyRegressionTest {
             Fixture f = new Fixture(error, reply("must not be requested", null));
             if (goal) { f.loop.setGoal("inspect fixture"); f.queueResumeDuringRequest = true; }
             f.run();
-            check(f.calls == 1 && f.retries == 0 && !f.phases.contains("retry") && f.errors.size() == 1 && !f.loop.busy(),
+            check(f.calls == 1 && !f.phases.contains("retry") && f.errors.size() == 1 && !f.loop.busy(),
                     "Network/server failure retried instead of ending its first request: " + cause);
             check(f.errors.get(0).equals(error.userMessage) && !f.errors.get(0).contains("echoed-secret"),
                     "Terminal notification lost the short transport classification or exposed provider data");
@@ -128,15 +125,15 @@ public final class RequestPolicyRegressionTest {
         call.toolCalls = new JSONArray().put(new JSONObject().put("id", "fixture-call").put("type", "function")
                 .put("function", new JSONObject().put("name", "probe").put("arguments", "{}")));
         Fixture f = new Fixture(call, reply("", "SocketException: connection reset"), reply("done", null)); f.run();
-        check(f.calls == 2 && f.executions == 1 && f.retries == 0 && f.errors.size() == 1,
+        check(f.calls == 2 && f.executions == 1 && f.errors.size() == 1,
                 "Failed followup was automatically retried or repeated completed work");
         check(f.records.diagnostics.get(0).contains(":success:0:") && f.records.diagnostics.get(1).contains(":retryable_error:0:")
-                        && Message.TOOL.equals(f.loop.history().get(f.loop.history().size() - 1).role)
-                        && "verified".equals(f.loop.history().get(f.loop.history().size() - 1).content),
+                        && Message.TOOL.equals(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).role)
+                        && "verified".equals(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).content),
                 "Completed tool history was discarded when the next request failed");
         f.loop.resume(7L, 2);
-        check(f.calls == 3 && f.executions == 1 && f.retries == 0 && f.records.diagnostics.get(2).contains(":success:0:")
-                        && "done".equals(f.loop.history().get(f.loop.history().size() - 1).content),
+        check(f.calls == 3 && f.executions == 1 && f.records.diagnostics.get(2).contains(":success:0:")
+                        && "done".equals(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).content),
                 "Explicit user resume failed or re-executed an already completed tool");
         pass("failedFollowupPreservesWorkUntilExplicitResume");
     }
@@ -145,16 +142,16 @@ public final class RequestPolicyRegressionTest {
         Fixture f = new Fixture(error, error, error);
         f.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
         f.loop.compactNow(7L, f.loop.generation(), 1);
-        check(f.calls == 1 && f.errors.size() == 1 && f.retries == 0 && !f.phases.contains("retry") && !f.loop.busy(), "Compaction outage retried");
+        check(f.calls == 1 && f.errors.size() == 1 && !f.phases.contains("retry") && !f.loop.busy(), "Compaction outage retried");
         for (String value : f.records.diagnostics) check(value.contains(":compact:retryable_error:"), "Compaction misclassified");
-        check(f.loop.history().get(f.loop.history().size() - 1).content.equals("answer"), "Failed compression destroyed window");
+        check(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).content.equals("answer"), "Failed compression destroyed window");
         Fixture automatic = new Fixture(error, reply("must not be requested", null));
         automatic.loop.setGoal("inspect fixture"); automatic.loop.setContextBudget(1, .9f);
         automatic.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
         automatic.run();
-        check(automatic.calls == 1 && automatic.errors.size() == 1 && automatic.retries == 0 && !automatic.loop.busy()
+        check(automatic.calls == 1 && automatic.errors.size() == 1 && !automatic.loop.busy()
                         && automatic.records.diagnostics.get(0).contains(":compact:retryable_error:0:")
-                        && Goal.ACTIVE.equals(automatic.loop.goalStatus()) && automatic.loop.history().get(1).content.equals("previous"),
+                        && Goal.ACTIVE.equals(automatic.loop.goalStatus()) && automatic.loop.historySnapshot().get(1).content.equals("previous"),
                 "Automatic compaction outage retried, sent a generation request, lost the old window or closed the goal");
         pass("compactionOutagesStopWithoutChangingTheWindow");
     }
@@ -190,14 +187,14 @@ public final class RequestPolicyRegressionTest {
                 @Override public boolean approve(String name, JSONObject args) { throw new AssertionError("Failed API review fell through to approval"); }
             });
             f.run();
-            check(f.calls == 2 && f.executions == 0 && f.retries == 0 && f.errors.equals(Arrays.asList(failure.userMessage))
+            check(f.calls == 2 && f.executions == 0 && f.errors.equals(Arrays.asList(failure.userMessage))
                             && !f.phases.contains("tool_approval") && !f.phases.contains("retry") && !f.loop.busy()
                             && Goal.ACTIVE.equals(f.loop.goalStatus()),
                     "Review failure triggered another API call, weaker authorization, tool execution or a completed goal");
             check(f.records.diagnostics.size() == 2 && f.records.diagnostics.get(1).contains(":review:")
-                            && Message.TOOL.equals(f.loop.history().get(f.loop.history().size() - 1).role)
-                            && "fixture-call".equals(f.loop.history().get(f.loop.history().size() - 1).toolCallId)
-                            && !f.loop.history().get(f.loop.history().size() - 1).content.contains("provider secret"),
+                            && Message.TOOL.equals(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).role)
+                            && "fixture-call".equals(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).toolCallId)
+                            && !f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).content.contains("provider secret"),
                     "Stopped review lost its diagnostic or left an unpaired tool call for the next explicit turn");
         }
         pass("reviewFailuresStopBeforeApprovalOrExecution");
@@ -208,9 +205,9 @@ public final class RequestPolicyRegressionTest {
             failed.loop.setGoal("inspect fixture");
             failed.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
             if (compact) failed.loop.compactNow(7L, failed.loop.generation(), 1); else failed.run();
-            check(failed.calls == 1 && failed.retries == 0 && failed.errors.size() == 1 && !failed.phases.contains("retry")
+            check(failed.calls == 1 && failed.errors.size() == 1 && !failed.phases.contains("retry")
                             && Goal.ACTIVE.equals(failed.loop.goalStatus()) && !failed.loop.busy()
-                            && failed.loop.history().get(1).content.equals("previous")
+                            && failed.loop.historySnapshot().get(1).content.equals("previous")
                             && failed.records.diagnostics.size() == 1
                             && failed.records.diagnostics.get(0).contains(compact ? ":compact:error:0:" : ":model:error:0:"),
                     "Context error issued an automatic repair request or replaced the uncompressed window");

@@ -437,7 +437,7 @@ public final class AgentLoopRegressionTest {
             check(served[0] == 1 && aborts[0] == 1 && oldTool.aborts == 1 && oldTool.finishes == 1,
                     "Cancellation did not stop and clean original compaction materials");
             check(newTool.begins == 0 && newTool.aborts == 0 && newTool.finishes == 0, "Cancelled compaction touched replacement materials");
-            check(loop.history().get(loop.history().size() - 1).content.equals("original answer") && recorder.saved.isEmpty(),
+            check(loop.historySnapshot().get(loop.historySnapshot().size() - 1).content.equals("original answer") && recorder.saved.isEmpty(),
                     "Cancelled compaction replaced or persisted history");
         } finally { stopped.countDown(); worker.join(5000); }
     }
@@ -598,7 +598,7 @@ public final class AgentLoopRegressionTest {
     }
     /** 找出历史里注入的目标说明全文。 */
     private static String steerContaining(AgentLoop loop, String needle) {
-        for (Message message : loop.history()) {
+        for (Message message : loop.historySnapshot()) {
             if (message != null && message.content != null && Goal.isSteer(message.content)
                     && message.content.contains(needle)) {
                 return message.content;
@@ -776,7 +776,7 @@ public final class AgentLoopRegressionTest {
         loop.renameGoal("new objective");
         loop.submit("go", 1, loop.generation(), 1);
         int retargets = 0, continuations = 0;
-        for (Message message : loop.history()) {
+        for (Message message : loop.historySnapshot()) {
             if (message == null || message.content == null || !Goal.isSteer(message.content)) {
                 continue;
             }

@@ -11,7 +11,6 @@ import org.json.JSONObject;
 public final class ToolkitTool implements Tool {
     private final ShellTool shell;
     private final ToolchainStore store;
-    private final ToolchainInstaller installer;
     private final String abi;
     private String workDir;
     private TemporaryWorkspace temporary;
@@ -19,13 +18,9 @@ public final class ToolkitTool implements Tool {
 
     public ToolkitTool(ShellTool shell, ToolchainStore store, String workDir,
             TemporaryWorkspace temporary, String abi) {
-        this(shell, store, new ToolchainInstaller(store), abi);
-        this.workDir = workDir; this.temporary = temporary;
-    }
-
-    ToolkitTool(ShellTool shell, ToolchainStore store, ToolchainInstaller installer, String abi) {
         if (shell == null || store == null) throw new IllegalArgumentException("工具运行器和私有配置不能为空。");
-        this.shell = shell; this.store = store; this.installer = installer; this.abi = abi;
+        this.shell = shell; this.store = store; this.abi = abi;
+        this.workDir = workDir; this.temporary = temporary;
     }
 
     @Override public String name() { return "toolkit"; }
@@ -66,7 +61,7 @@ public final class ToolkitTool implements Tool {
         } catch (Exception failure) { return new JSONObject(); }
     }
 
-    @Override public void abort() { epoch++; installer.abort(); shell.abort(); }
+    @Override public void abort() { epoch++; shell.abort(); }
 
     @Override public String run(JSONObject args) throws Exception {
         final int mine = epoch;
@@ -85,31 +80,8 @@ public final class ToolkitTool implements Tool {
             }
             String id = args.optString("tool", "");
             if ("status".equals(action) || "diagnose".equals(action) || "run".equals(action)) requireTool(id, action);
-            if ("configure".equals(action)) {
-                checkEpoch(mine);
-                if ("binutils".equals(id)) return new JSONObject().put("configured", store.configureBinutilsDirectory(args.optString("path", ""),
-                        new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } }))
-                        .put("state", "configured_not_probed").toString();
-                synchronized (store.toolLock(id)) {
-                    checkEpoch(mine); store.configure(id, args.optString("path", ""), args.optString("runtime", ""));
-                }
-                return status(id, mine, shellMine).toString();
-            }
-            if ("clear".equals(action)) {
-                synchronized (store.toolLock(id)) { checkEpoch(mine); store.clear(id); }
-                return new JSONObject().put("tool", id).put("state", "unconfigured").toString();
-            }
             if ("status".equals(action)) return status(id, mine, shellMine).toString();
             if ("diagnose".equals(action)) return diagnose(id, mine, shellMine).toString();
-            if ("install".equals(action)) {
-                installer.install(id, abi, new ToolchainInstaller.Cancellation() {
-                    @Override public void check() throws Exception {
-                        if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("工具安装已取消。");
-                    }
-                });
-                checkEpoch(mine);
-                return status(id, mine, shellMine).put(store.bundled(id) ? "prepared_from_apk" : "download_verified", true).toString();
-            }
             if ("run".equals(action)) {
                 ToolCatalog.get(id);
                 JSONArray raw = args.optJSONArray("arguments");
@@ -171,10 +143,6 @@ public final class ToolkitTool implements Tool {
         return new JSONObject().put("storage", store.root().getPath()).put("abi", abi).put("tools", tools).put("package", visibleBundle);
     }
 
-    public JSONObject packageStatus() throws Exception { return store.packageStatus(); }
-    public JSONObject installBundled() throws Exception {
-        return installBundled(null);
-    }
     public JSONObject installBundled(EmbeddedToolchain.ProgressListener listener) throws Exception {
         final int mine = epoch;
         return store.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } }, listener);

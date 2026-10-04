@@ -39,8 +39,6 @@ public final class SubAgentManager {
     public static final class Record {
         public String id, parentId, name, task, status, result = "", error = "", inFlight = "";
         public String phase = QUEUED, activeTool = "", progress = "";
-        public int retryAttempt;
-        public String retryReason = "";
         public String inFlightRequest = "", inFlightReference = "";
         public long sessionId, revision, tokensUsed, collectedRevision, acknowledgedRevision;
         public long lastActivityAt, progressRevision, inboxRevision;
@@ -63,7 +61,6 @@ public final class SubAgentManager {
                     .put("acknowledgedChildren", acknowledgedChildren).put("deliveredInbox", deliveredInbox)
                     .put("managerCancelled", managerCancelled).put("phase", phase).put("activeTool", activeTool)
                     .put("progress", progress).put("lastActivityAt", lastActivityAt).put("progressRevision", progressRevision)
-                    .put("retryAttempt", retryAttempt).put("retryReason", retryReason)
                     .put("inboxRevision", inboxRevision)
                     .put("inFlightRequest", inFlightRequest).put("inFlightReference", inFlightReference);
         }
@@ -85,8 +82,6 @@ public final class SubAgentManager {
             task.managerCancelled = json.optBoolean("managerCancelled", false);
             task.phase = json.optString("phase", task.status); task.activeTool = json.optString("activeTool", "");
             task.progress = json.optString("progress", ""); task.lastActivityAt = json.optLong("lastActivityAt", 0L);
-            task.retryAttempt = Math.max(0, json.optInt("retryAttempt", 0));
-            task.retryReason = clipped(json.optString("retryReason", ""), 600);
             task.progressRevision = json.optLong("progressRevision", 0L);
             task.inboxRevision = json.optLong("inboxRevision", 0L);
             task.inFlightRequest = json.optString("inFlightRequest", "");
@@ -286,10 +281,6 @@ public final class SubAgentManager {
         return result;
     }
 
-    public JSONObject list(String owner) throws Exception {
-        return list(owner, 0);
-    }
-
     public boolean hasInbox(String owner) {
         synchronized (lock) { return requireSlot(owner).task.inbox.length() > 0; }
     }
@@ -345,11 +336,12 @@ public final class SubAgentManager {
         }
     }
 
-    /** Wait for a selected task or for all work, yielding a child's execution slot. */
+    /** Wait for descendants to finish, yielding the caller's execution slot. */
     public JSONObject waitFor(String owner, String target, long timeoutMs) throws Exception {
         return waitInternal(owner, target, timeoutMs, false, -1L);
     }
 
+    /** Wait for task progress or completion, yielding a child's execution slot. */
     public JSONObject waitForUpdate(String owner, String target, long timeoutMs, long cursor) throws Exception {
         return waitInternal(owner, target, timeoutMs, true, cursor);
     }
@@ -391,7 +383,7 @@ public final class SubAgentManager {
             }
             long next = progressCursorLocked(owner, target);
             caller.observedProgress.put(key, Long.valueOf(next));
-            return snapshotLocked(owner, target, false).put("cursor", next);
+            return snapshotLocked(owner, target).put("cursor", next);
         }
     }
 
@@ -402,11 +394,6 @@ public final class SubAgentManager {
                 && (target == null || target.length() == 0 || target.equals(slot.task.id))
                 && (ROOT.equals(owner) || descendantLocked(slot.task.id, owner))) cursor += slot.task.revision;
         return cursor;
-    }
-
-    public String awaitSettled(long timeoutMs) {
-        try { waitFor(ROOT, null, timeoutMs); return collectResults(); }
-        catch (Exception error) { throw new IllegalStateException(error); }
     }
 
     public String awaitSettled(long timeoutMs, LlmClient.RequestValidity validity) {
@@ -641,14 +628,6 @@ public final class SubAgentManager {
         notifyWorkChanged();
     }
 
-    public List<Record> records() throws Exception {
-        synchronized (lock) {
-            List<Record> records = new ArrayList<Record>();
-            for (Slot slot : slots.values()) records.add(copy(slot.task));
-            return records;
-        }
-    }
-
     private void closeDescendants(String parent) throws Exception {
         List<String> children = new ArrayList<String>();
         synchronized (lock) {
@@ -701,9 +680,8 @@ public final class SubAgentManager {
                     @Override public void onToolEnd(int gen, String name, String result) { reportProgress(slot, "reviewing", "", null); }
                     @Override public void onCompactStart(int gen) { reportProgress(slot, "compacting", "", null); }
                     @Override public void onCompacted(int gen, boolean followup) { reportProgress(slot, "model", "", null); }
-                    @Override public void onRetry(int gen) { reportProgress(slot, "retrying", "", null); }
-                    @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
-                        reportStage(slot, phase, name, detail, attempt);
+                    @Override public void onProgress(int gen, String phase, String name, String detail) {
+                        reportStage(slot, phase, name);
                     }
                 }, this);
                 if (loop == null) throw new IllegalStateException("Child factory returned no loop");
@@ -740,7 +718,6 @@ public final class SubAgentManager {
                     request = mail.getString("text");
                     slot.task.task = request;
                     slot.task.progress = "";
-                    slot.task.retryAttempt = 0; slot.task.retryReason = "";
                     slot.task.activeTool = "";
                     slot.task.lastActivityAt = System.currentTimeMillis();
                     slot.task.progressRevision++;
@@ -830,25 +807,16 @@ public final class SubAgentManager {
         if (save) persistQuietly(slot.task.id);
     }
 
-    private void reportStage(Slot slot, String phase, String tool, String detail, int attempt) {
+    private void reportStage(Slot slot, String phase, String tool) {
         if (phase == null || phase.length() == 0) return;
         String name = tool == null ? "" : tool;
-        boolean retry = "retry".equals(phase) || "retrying".equals(phase);
         synchronized (lock) {
             if (slot.stop || CLOSED.equals(slot.task.status)) return;
-            if (retry) {
-                int count = Math.max(0, attempt);
-                String reason = clipped(detail == null ? "" : detail, 600);
-                if (slot.task.retryAttempt != count || !slot.task.retryReason.equals(reason)) {
-                    slot.task.retryAttempt = count; slot.task.retryReason = reason;
-                    slot.task.revision++; slot.task.progressRevision++;
-                }
-            }
-            updateProgressLocked(slot, retry ? "retrying" : phase, name, null);
+            updateProgressLocked(slot, phase, name, null);
             slot.lastProgressPersist = System.currentTimeMillis();
         }
         // Tool detail is often a complete script/JSON payload; it belongs to
-        // history, never to the compact progress or retry explanation.
+        // history, never to the compact progress.
         persistQuietly(slot.task.id);
     }
 
@@ -876,7 +844,7 @@ public final class SubAgentManager {
 
     private boolean pendingForOwner(String owner) { synchronized (lock) { return pendingLocked(owner, null); } }
 
-    private JSONObject snapshotLocked(String owner, String target, boolean consumeInbox) throws Exception {
+    private JSONObject snapshotLocked(String owner, String target) throws Exception {
         JSONArray agents = new JSONArray(); int chars = 0;
         for (Slot slot : slots.values()) {
             if (ROOT.equals(slot.task.id)) continue;
@@ -888,7 +856,6 @@ public final class SubAgentManager {
         }
         Slot caller = requireSlot(owner);
         JSONArray inbox = inboxPreview(caller.task.inbox);
-        if (consumeInbox && inbox.length() > 0) { caller.task.inbox = new JSONArray(); caller.task.revision++; }
         return new JSONObject().put("agents", agents).put("inbox", inbox)
                 .put("pending", pendingLocked(owner, target)).put("cancelled", cancelled)
                 .put("persistenceError", persistenceError.length() == 0 ? JSONObject.NULL : persistenceError);
@@ -899,7 +866,6 @@ public final class SubAgentManager {
         return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", clipped(task.name, 256))
                 .put("task", clipped(task.task, 2000)).put("status", task.status)
                 .put("phase", task.phase).put("activeTool", task.activeTool).put("progress", task.progress)
-                .put("retryAttempt", task.retryAttempt).put("retryReason", task.retryReason)
                 .put("lastActivityAt", task.lastActivityAt).put("progressRevision", task.progressRevision)
                 .put("result", slot.executing || QUEUED.equals(task.status) ? "" : clipped(task.result, 8000))
                 .put("resultTruncated", !slot.executing && !QUEUED.equals(task.status) && task.result.length() > 8000)

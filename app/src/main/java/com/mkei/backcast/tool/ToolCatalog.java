@@ -5,7 +5,7 @@ import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Sources are fixed here; model input cannot turn installation into an arbitrary download. */
+/** Sources and invocation examples for the APK's built-in tools. */
 public final class ToolCatalog {
     public static final class Entry {
         public final String id, name, group, source, requirements;
@@ -23,17 +23,6 @@ public final class ToolCatalog {
                     .put("source", source).put("requirements", requirements).put("commands", commands)
                     .put("bundled", true).put("download_available", false)
                     .put("usage", usage(id)).put("argument_examples", examples(id));
-        }
-    }
-
-    public static final class Artifact {
-        public final String id, version, abi, url, sha256, format, prefix;
-        public final long maxBytes;
-
-        Artifact(String id, String version, String abi, String url, String sha256,
-                String format, String prefix, long maxBytes) {
-            this.id = id; this.version = version; this.abi = abi; this.url = url;
-            this.sha256 = sha256; this.format = format; this.prefix = prefix; this.maxBytes = maxBytes;
         }
     }
 
@@ -95,21 +84,4 @@ public final class ToolCatalog {
         return result;
     }
 
-    public static Artifact artifact(String id, String abi) {
-        if ("apktool".equals(id)) return new Artifact(id, "3.0.3", "any",
-                "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar",
-                "dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423", "jar", "", 32L * 1024 * 1024);
-        if ("radare2".equals(id)) {
-            String suffix, digest;
-            if ("arm64-v8a".equals(abi) || "aarch64".equals(abi)) {
-                suffix = "aarch64"; digest = "228bf58c44fbd9f3afd37ba545ef73155415150849dbd576ad1fd89789082c9f";
-            } else if ("armeabi-v7a".equals(abi) || "armeabi".equals(abi) || "arm".equals(abi)) {
-                suffix = "arm"; digest = "1ecca02220f0309a7a6d5349fc914e1d930b73dca09a27567abc862dd9df6c2b";
-            } else throw new IllegalArgumentException("官方固定 radare2 Android 包没有当前 ABI：" + abi + "。请绑定兼容的已有安装。");
-            return new Artifact(id, "6.2.2", suffix,
-                    "https://github.com/radareorg/radare2/releases/download/6.2.2/radare2-6.2.2-android-" + suffix + ".tar.gz",
-                    digest, "tar.gz", "data/data/org.radare.radare2installer/radare2/", 48L * 1024 * 1024);
-        }
-        throw new IllegalArgumentException(get(id).requirements + " 本工具没有经验证的自动下载包。");
-    }
 }

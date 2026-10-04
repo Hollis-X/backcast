@@ -72,7 +72,11 @@ public final class SubAgentProgressRegressionTest {
                             if (request == 1) return call("spawn_agent", new JSONObject().put("name", "nested").put("task", "hold nested work").put("fork", false));
                             if (request == 2) {
                                 await(nextRequest);
-                                for (SubAgentManager.Record record : shared.records()) if (task.id.equals(record.parentId)) nestedId = record.id;
+                                JSONArray children = shared.list(task.id, 0).getJSONArray("agents");
+                                for (int i = 0; i < children.length(); i++) {
+                                    JSONObject record = children.getJSONObject(i);
+                                    if (task.id.equals(record.getString("parentId"))) nestedId = record.getString("id");
+                                }
                                 return call("wait_agent", new JSONObject().put("target", nestedId).put("timeout_ms", 5000));
                             }
                             return text("wait completed");
@@ -116,10 +120,10 @@ public final class SubAgentProgressRegressionTest {
                     "Waiting for permission was shown as running a tool or exposed arguments");
             f.releaseApproval.countDown(); await(f.tool); SubAgentManager.Record executing = f.manager.find(id);
             check("tool".equals(executing.phase) && f.toolsExecuted.get() == 1, "Permission-approved tool did not move into execution");
-            JSONObject view = f.manager.list("main").getJSONArray("agents").getJSONObject(0);
-            check("tool".equals(view.getString("phase")) && view.getInt("retryAttempt") == 0
+            JSONObject view = f.manager.list("main", 0).getJSONArray("agents").getJSONObject(0);
+            check("tool".equals(view.getString("phase"))
                     && !view.getString("progress").contains(SCRIPT), "Parent sees different or unbounded child stage data");
-            check(f.manager.find("main").retryAttempt == 0, "Child stage changed parent's retry status");
+            check(f.manager.find("main").phase.equals(SubAgentManager.QUEUED), "Child stage changed parent's state");
         } finally { f.release(); f.finish(); }
     }
 
@@ -140,14 +144,13 @@ public final class SubAgentProgressRegressionTest {
             check(f.requestsIssued.get() == 1 && f.toolsExecuted.get() == 0 && SubAgentManager.FAILED.equals(record.status)
                             && "failed".equals(record.phase) && record.result.isEmpty() && record.error.equals("接口返回 HTTP 503"),
                     "Provider outage retried, executed work, lost the safe failure or returned a successful child result");
-            check(record.retryAttempt == 0 && record.retryReason.isEmpty() && !record.error.contains(SCRIPT)
-                            && f.manager.find("main").retryAttempt == 0 && f.manager.find("main").error.isEmpty(),
+            check(!record.error.contains(SCRIPT) && f.manager.find("main").error.isEmpty(),
                     "Child failure invented retries, leaked provider echoes or changed the parent state");
             SubAgentManager.Record saved = f.store.find(id);
-            check(saved.retryAttempt == 0 && saved.error.equals(record.error) && SubAgentManager.FAILED.equals(saved.status),
+            check(saved.error.equals(record.error) && SubAgentManager.FAILED.equals(saved.status),
                     "First failure was not persisted with the stopped child state");
-            JSONObject view = f.manager.list("main").getJSONArray("agents").getJSONObject(0);
-            check(view.getInt("retryAttempt") == 0 && view.getString("error").equals(record.error)
+            JSONObject view = f.manager.list("main", 0).getJSONArray("agents").getJSONObject(0);
+            check(view.getString("error").equals(record.error)
                             && view.getString("status").equals(SubAgentManager.FAILED), "Parent cannot inspect the stopped child's actual failure");
         } finally { f.release(); f.finish(); }
     }
@@ -164,19 +167,22 @@ public final class SubAgentProgressRegressionTest {
         } finally { f.release(); f.finish(); }
     }
 
-    private static void legacySavedRecordsLoadWithZeroRetriesAndNewFieldsRoundTrip() throws Exception {
-        JSONObject old = new JSONObject().put("id", "legacy").put("parentId", "main").put("status", "idle").put("phase", "completed");
+    private static void legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips() throws Exception {
+        JSONObject old = new JSONObject().put("id", "legacy").put("parentId", "main").put("status", "idle").put("phase", "completed")
+                .put("retryAttempt", 3).put("retryReason", "old retry text");
         SubAgentManager.Record record = SubAgentManager.Record.fromJson(old);
-        check(record.retryAttempt == 0 && record.retryReason.length() == 0, "Legacy records invented retries");
-        record.retryAttempt = 3; record.retryReason = "等待模型响应超时";
+        check(record.phase.equals("completed") && !record.toJson().has("retryAttempt") && !record.toJson().has("retryReason"),
+                "Legacy retry metadata escaped into the current runtime record");
+        record.phase = "tool"; record.activeTool = "read"; record.progress = "Inspecting task evidence";
         SubAgentManager.Record restored = SubAgentManager.Record.fromJson(record.toJson());
-        check(restored.retryAttempt == 3 && restored.retryReason.equals(record.retryReason), "Retry fields disappeared from saved record copies");
+        check(restored.phase.equals("tool") && restored.activeTool.equals("read") && restored.progress.equals(record.progress),
+                "Live task progress disappeared from saved record copies");
     }
 
     public static void main(String[] args) throws Exception {
         int passed = 0;
         for (String test : new String[]{"previewApprovalAndExecutionRemainSeparateAndDoNotExposeScripts", "guardedReviewIsNotReportedAsToolExecution",
-                "providerFailureStopsTheChildWithoutInventingRetries", "childWaitHasADistinctWaitingStage", "legacySavedRecordsLoadWithZeroRetriesAndNewFieldsRoundTrip"}) {
+                "providerFailureStopsTheChildWithoutInventingRetries", "childWaitHasADistinctWaitingStage", "legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips"}) {
             SubAgentProgressRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); passed++;
         }
         System.out.println(passed + " child progress tests passed");

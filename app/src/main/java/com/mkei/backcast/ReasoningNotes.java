@@ -39,7 +39,6 @@ public final class ReasoningNotes {
         piece.summary = "";
         piece.summaryError = "";
         piece.summaryChars = 0;
-        piece.requestedChars = 0;
         piece.summaryComplete = false;
         return true;
     }
@@ -62,7 +61,8 @@ public final class ReasoningNotes {
         final int version = piece.summaryVersion;
         final String preference = piece.summaryPreference;
         final String summaryPrompt = ReasoningSummary.prompt(mode, language);
-        final LlmClient.Config config = new LlmClient.Config(settings.baseUrl(), settings.apiKey(), settings.model());
+        Settings.AiProfile profile = settings.activeAiProfile();
+        final LlmClient.Config config = new LlmClient.Config(profile.baseUrl, profile.apiKey, profile.model);
         config.responseInstructions = ResponsePreferences.languageInstruction(language);
         config.maxTokens = ReasoningSummary.tokenLimit(mode);
         config.timeoutMs = 15000;
@@ -70,7 +70,6 @@ public final class ReasoningNotes {
         config.maxResponseChars = 128000;
         final String instructions = settings.systemPrompt(), environment = settings.environmentContext();
         piece.summaryPending = true;
-        piece.requestedChars = size;
         try {
             WORKER.execute(new Runnable() {
                 public void run() {

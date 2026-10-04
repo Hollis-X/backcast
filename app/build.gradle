@@ -39,12 +39,10 @@ android {
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.0.0'
-    implementation 'androidx.multidex:multidex:2.0.1'
     implementation 'com.openai:openai-java:4.75.1'
     // App cancellation/deadline hooks use the SDK's public transport APIs directly.
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'com.squareup.okio:okio-jvm:3.6.0'
-    implementation fileTree(dir: 'libs', include: ['*.jar'])
 }
 
 // JVM regressions use the same official SDK dependency graph as the packaged app.
@@ -54,5 +52,20 @@ tasks.register('writeAgentTestClasspath') {
         output.parentFile.mkdirs()
         output.text = configurations.debugRuntimeClasspath.files
                 .findAll { it.name.endsWith('.jar') }.collect { it.absolutePath }.join(File.pathSeparator)
+    }
+}
+
+// Symbol-level source checks use the compiler's resolved Android and SDK graph.
+tasks.register('writeProductionAuditClasspath') {
+    dependsOn 'processDebugResources'
+    doLast {
+        def compiler = tasks.named('compileDebugJavaWithJavac').get()
+        def entries = compiler.classpath.files as List
+        if (compiler.options.bootstrapClasspath != null) {
+            entries.addAll(compiler.options.bootstrapClasspath.files)
+        }
+        def output = file("$buildDir/production-audit-classpath.txt")
+        output.parentFile.mkdirs()
+        output.text = entries.unique().collect { it.absolutePath }.join(File.pathSeparator)
     }
 }

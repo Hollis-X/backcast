@@ -191,7 +191,6 @@ public final class AndroidDependencyDexCheck {
         // This reproduces the currently pinned app/build.gradle dependencies.
         // Update these roots when production dependency versions change.
         resolve("androidx.appcompat", "appcompat", "1.0.0");
-        resolve("androidx.multidex", "multidex", "2.0.1");
         addSdkRuntime(root);
         System.out.println("Resolved " + programs.size() + " real compile/runtime artifacts from official Google Maven and Gradle's SDK graph:");
         for (var entry : programs.entrySet()) System.out.println(entry.getKey() + " " + Files.size(entry.getValue()) + " bytes");

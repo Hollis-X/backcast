@@ -21,10 +21,6 @@ public class EditTool implements Tool {
     private final TemporaryWorkspace temporary;
     private volatile int epoch;
 
-    public EditTool(String workDir, boolean useRoot) {
-        this(workDir, useRoot, null);
-    }
-
     public EditTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
         this.useRoot = useRoot;

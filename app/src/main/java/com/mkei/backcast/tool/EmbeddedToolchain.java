@@ -21,10 +21,9 @@ public final class EmbeddedToolchain {
     public interface ProgressListener { void onProgress(Progress progress); }
     public static final class Progress {
         public final String stage, artifact;
-        public final long completed, total, stageCompleted, stageTotal;
-        private Progress(String stage, String artifact, long completed, long total, long stageCompleted, long stageTotal) {
+        public final long completed, total;
+        private Progress(String stage, String artifact, long completed, long total) {
             this.stage = stage; this.artifact = artifact; this.completed = completed; this.total = total;
-            this.stageCompleted = stageCompleted; this.stageTotal = stageTotal;
         }
         public int percent() {
             if ("complete".equals(stage)) return 100;
@@ -33,32 +32,32 @@ public final class EmbeddedToolchain {
     }
     private static final class ProgressTracker {
         final ProgressListener listener;
-        long completed, total, phaseCompleted, phaseTotal, notified;
+        long completed, total, notified;
         String stage = "checking", artifact = "";
         ProgressTracker(ProgressListener listener) { this.listener = listener; }
-        void phase(String name, String id, long size) {
-            stage = name; artifact = id; phaseTotal = size; phaseCompleted = 0; emit(true);
+        void phase(String name, String id) {
+            stage = name; artifact = id; emit(true);
         }
         void advance(long bytes) {
-            completed += bytes; phaseCompleted += bytes; emit(false);
+            completed += bytes; emit(false);
         }
         void emit(boolean force) {
             if (listener == null) return;
             long now = System.nanoTime();
             if (!force && now - notified < 100000000L) return;
             notified = now;
-            listener.onProgress(new Progress(stage, artifact, completed, total, phaseCompleted, phaseTotal));
+            listener.onProgress(new Progress(stage, artifact, completed, total));
         }
-        void finish() { completed = total; phase("complete", "", 0); }
+        void finish() { completed = total; phase("complete", ""); }
     }
     private static final class PayloadPlan {
         final JSONObject artifact;
-        final String name, id;
+        final String id;
         final File destination;
         final boolean cached, gzip;
         final long archiveBytes, tarBytes;
-        PayloadPlan(JSONObject artifact, String name, String id, File destination, boolean cached, boolean gzip, long archiveBytes, long tarBytes) {
-            this.artifact = artifact; this.name = name; this.id = id; this.destination = destination;
+        PayloadPlan(JSONObject artifact, String id, File destination, boolean cached, boolean gzip, long archiveBytes, long tarBytes) {
+            this.artifact = artifact; this.id = id; this.destination = destination;
             this.cached = cached; this.gzip = gzip; this.archiveBytes = archiveBytes; this.tarBytes = tarBytes;
         }
         long work() { return cached ? 0 : archiveBytes + tarBytes + 1; }
@@ -103,14 +102,10 @@ public final class EmbeddedToolchain {
         return receipt.isFile() && digest.equals(new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8"));
     }
 
-    public synchronized File prepare(ToolchainInstaller.Cancellation cancellation) throws Exception {
-        return prepare(cancellation, null);
-    }
-
     public synchronized File prepare(ToolchainInstaller.Cancellation cancellation, ProgressListener listener) throws Exception {
         cancellation.check();
         ProgressTracker progress = new ProgressTracker(listener);
-        progress.phase("checking", "", 0);
+        progress.phase("checking", "");
         if (!supports("apktool")) throw new IllegalArgumentException("内置工具需要 Android 8.0+ 和 ARM/ARM64；当前 ABI=" + abi + "，API=" + sdk);
         JSONObject data = manifest();
         String version = data.getString("version");
@@ -124,7 +119,7 @@ public final class EmbeddedToolchain {
         File common = unpack(commonPlan, cancellation, progress);
         File nativeTools = unpack(nativePlan, cancellation, progress);
         cancellation.check();
-        progress.phase("registering", "", 1);
+        progress.phase("registering", "");
         cancellation.check();
         store.bundledInstalled(common, nativeTools, data, abi);
         preparedCommon = common;
@@ -138,7 +133,7 @@ public final class EmbeddedToolchain {
         cancellation.check();
         File destination = store.managed(new File(store.root(), name).getPath());
         boolean cached = verified(destination, artifact.getString("sha256"));
-        if (cached) return new PayloadPlan(artifact, name, artifact.getString("abi"), destination, true, false, 0, 0);
+        if (cached) return new PayloadPlan(artifact, artifact.getString("abi"), destination, true, false, 0, 0);
         if (destination.exists()) throw new IOException("内置工具目录校验记录不一致。");
         InputStream stream = openArtifact(artifact);
         boolean gzip;
@@ -149,7 +144,7 @@ public final class EmbeddedToolchain {
         long tarBytes = artifact.optLong("tar_bytes", -1);
         if (archiveBytes < 0 || archiveBytes > 512L * 1024 * 1024 || tarBytes < 0 || tarBytes > 512L * 1024 * 1024)
             throw new IOException("内置工具缺少有效的归档大小记录。");
-        return new PayloadPlan(artifact, name, artifact.getString("abi"), destination, false, gzip, archiveBytes, tarBytes);
+        return new PayloadPlan(artifact, artifact.getString("abi"), destination, false, gzip, archiveBytes, tarBytes);
     }
 
     private JSONObject manifest() throws Exception {
@@ -193,7 +188,7 @@ public final class EmbeddedToolchain {
         boolean published = false;
         try {
             File archive = new File(stage, "payload.archive"), payload = new File(stage, "payload");
-            progress.phase("verifying", plan.id, plan.archiveBytes);
+            progress.phase("verifying", plan.id);
             MessageDigest sha = MessageDigest.getInstance("SHA-256");
             long total = 0;
             boolean gzip;
@@ -222,7 +217,7 @@ public final class EmbeddedToolchain {
                 } finally { output.close(); }
             } finally { input.close(); }
             if (!payload.mkdir()) throw new IOException("无法解包内置工具。");
-            progress.phase("unpacking", plan.id, plan.tarBytes);
+            progress.phase("unpacking", plan.id);
             InputStream stored = new FileInputStream(archive);
             try {
                 if (gzip) stored = new GZIPInputStream(stored);
@@ -234,7 +229,7 @@ public final class EmbeddedToolchain {
             } finally { stored.close(); }
             ToolPaths.writeBytes(new File(payload, ".verified-sha256"), digest.getBytes("UTF-8"), false);
             cancellation.check();
-            progress.phase("publishing", plan.id, 1);
+            progress.phase("publishing", plan.id);
             cancellation.check();
             store.managed(destination.getPath());
             if (!payload.renameTo(destination)) throw new IOException("无法发布内置工具。");

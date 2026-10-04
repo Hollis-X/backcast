@@ -9,11 +9,6 @@ public final class TemporaryTool implements Tool, TemporaryCleanup {
     private final TemporaryWorkspace workspace;
     private final WorkspaceRoots roots;
 
-    public TemporaryTool(TemporaryWorkspace workspace) {
-        this.workspace = workspace;
-        roots = null;
-    }
-
     /** Capture the registry's authorization before a later settings change retargets it. */
     public TemporaryTool(TemporaryWorkspace workspace, String directory, java.util.List<String> directories) {
         this.workspace = workspace;
@@ -53,7 +48,7 @@ public final class TemporaryTool implements Tool, TemporaryCleanup {
 
     @Override public void abort() { }
     @Override public void beginTurn() {
-        if (roots == null) workspace.beginTurn(); else workspace.beginTurn(roots);
+        workspace.beginTurn(roots);
     }
     @Override public String cleanupTemporary() { return workspace.cleanup(); }
     @Override public String finishTurn() { return workspace.finishTurn(); }

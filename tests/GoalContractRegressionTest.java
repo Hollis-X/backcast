@@ -335,7 +335,7 @@ public final class GoalContractRegressionTest {
 
     private static void invalidRecoveryOnlyFinishesThePendingAnswer() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("greeting", Goal.INVALID, 3000L, 40L, 100L);
+        fixture.loop.restoreGoal("greeting", Goal.INVALID, 3000L, 40L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("greeting"));
         history.add(Message.assistant("", call("update_goal", "{\"status\":\"invalid\","
@@ -389,7 +389,7 @@ public final class GoalContractRegressionTest {
     private static void persistedTerminalBeforeItsToolResultRestoresOnlyTheAnswer() throws Exception {
         for (String status : new String[]{Goal.INVALID, Goal.COMPLETE, Goal.BLOCKED}) {
             Fixture fixture = new Fixture();
-            fixture.loop.restoreGoal("the original request", status, 3000L, 40L, 100L);
+            fixture.loop.restoreGoal("the original request", status, 3000L, 40L, 100L, null);
             List<Message> history = new ArrayList<Message>();
             history.add(Message.user("the original request"));
             LlmClient.Reply pending = call("update_goal", "{\"status\":\"" + status
@@ -426,7 +426,7 @@ public final class GoalContractRegressionTest {
 
     private static void persistedPauseBeforeItsToolResultRemainsPaused() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("paused request", Goal.PAUSED, 3000L, 40L, 100L);
+        fixture.loop.restoreGoal("paused request", Goal.PAUSED, 3000L, 40L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("pause the current goal"));
         history.add(Message.assistant("", call("update_goal", "{\"status\":\"paused\"}").toolCalls));
@@ -445,7 +445,7 @@ public final class GoalContractRegressionTest {
 
     private static void pendingOldGoalResultDoesNotRestrictLaterOrdinaryTools() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("old greeting", Goal.INVALID, 3000L, 40L, 100L);
+        fixture.loop.restoreGoal("old greeting", Goal.INVALID, 3000L, 40L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("old greeting"));
         history.add(Message.assistant("", call("update_goal", "{\"status\":\"invalid\","
@@ -477,7 +477,7 @@ public final class GoalContractRegressionTest {
 
     private static void mismatchedPendingGoalStatusIsNotReconstructed() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("greeting", Goal.INVALID, 3000L, 40L, 100L);
+        fixture.loop.restoreGoal("greeting", Goal.INVALID, 3000L, 40L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("greeting"));
         history.add(Message.assistant("", call("update_goal", "{\"status\":\"complete\"}").toolCalls));
@@ -522,7 +522,7 @@ public final class GoalContractRegressionTest {
 
     private static void rejectedUpdateDoesNotHideALaterPersistedClosure() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("the completed request", Goal.COMPLETE, 3000L, 40L, 100L);
+        fixture.loop.restoreGoal("the completed request", Goal.COMPLETE, 3000L, 40L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("the completed request"));
         LlmClient.Reply pending = call("update_goal", "{\"status\":\"invalid\"}");
@@ -615,7 +615,7 @@ public final class GoalContractRegressionTest {
 
     private static void budgetLimitTakesPrecedenceOverInvalid() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("greeting", Goal.BUDGET_LIMITED, 3000L, 100L, 100L);
+        fixture.loop.restoreGoal("greeting", Goal.BUDGET_LIMITED, 3000L, 100L, 100L, null);
         JSONObject result = new JSONObject(fixture.registry.get("update_goal").run(new JSONObject()
                 .put("status", "invalid").put("reason", "Only a greeting, no task")));
         check(Goal.BUDGET_LIMITED.equals(fixture.loop.goalStatus())
@@ -652,7 +652,7 @@ public final class GoalContractRegressionTest {
 
     private static void budgetLimitTakesPrecedenceOverPause() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("spent fixture", Goal.BUDGET_LIMITED, 3000L, 100L, 100L);
+        fixture.loop.restoreGoal("spent fixture", Goal.BUDGET_LIMITED, 3000L, 100L, 100L, null);
         String reply = fixture.registry.get("update_goal").run(new JSONObject().put("status", "paused"));
         check(Goal.BUDGET_LIMITED.equals(fixture.loop.goalStatus()), "Paused replaced budget_limited");
         JSONObject result = new JSONObject(reply);
@@ -663,7 +663,7 @@ public final class GoalContractRegressionTest {
 
     private static void completedGoalRecoveryOnlyFinishesThePendingAnswer() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("restored completed goal", Goal.COMPLETE, 5000L, 80L, 100L);
+        fixture.loop.restoreGoal("restored completed goal", Goal.COMPLETE, 5000L, 80L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("finish the restored goal"));
         history.add(Message.assistant("", call("update_goal", "{\"status\":\"complete\"}").toolCalls));
@@ -692,7 +692,7 @@ public final class GoalContractRegressionTest {
 
     private static void ordinaryChatAfterBudgetWrapUpDoesNotChargeTheOldGoal() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("spent goal", Goal.BUDGET_LIMITED, 4000L, 120L, 100L);
+        fixture.loop.restoreGoal("spent goal", Goal.BUDGET_LIMITED, 4000L, 120L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("work until the budget is spent"));
         history.add(Message.assistant("budget spent; remaining work recorded", null));
@@ -720,7 +720,7 @@ public final class GoalContractRegressionTest {
 
     private static void ordinaryToolsAfterBudgetWrapUpRunWithoutChargingTheOldGoal() throws Exception {
         Fixture fixture = new Fixture();
-        fixture.loop.restoreGoal("spent goal", Goal.BUDGET_LIMITED, 4000L, 120L, 100L);
+        fixture.loop.restoreGoal("spent goal", Goal.BUDGET_LIMITED, 4000L, 120L, 100L, null);
         List<Message> history = new ArrayList<Message>();
         history.add(Message.user("work until the budget is spent"));
         history.add(Message.assistant("budget spent; remaining work recorded", null));
@@ -759,7 +759,7 @@ public final class GoalContractRegressionTest {
     private static void pendingBudgetRecoveryWrapsUpOnceWithoutNewWork() throws Exception {
         for (int withTool = 0; withTool < 2; withTool++) {
             final Fixture fixture = new Fixture();
-            fixture.loop.restoreGoal("pending budget wrap-up", Goal.BUDGET_LIMITED, 4000L, 120L, 100L);
+            fixture.loop.restoreGoal("pending budget wrap-up", Goal.BUDGET_LIMITED, 4000L, 120L, 100L, null);
             List<Message> history = new ArrayList<Message>();
             history.add(Message.user("work until the budget is spent"));
             if (withTool == 1) {
@@ -902,7 +902,7 @@ public final class GoalContractRegressionTest {
     private static void userResumeReopensToolsAfterAnOldGoalStatusResult() throws Exception {
         for (String status : new String[]{Goal.COMPLETE, Goal.BLOCKED, Goal.INVALID}) {
             Fixture fixture = new Fixture();
-            fixture.loop.restoreGoal("goal explicitly resumed by user", status, 4000L, 90L, 1000L);
+            fixture.loop.restoreGoal("goal explicitly resumed by user", status, 4000L, 90L, 1000L, null);
             List<Message> history = new ArrayList<Message>();
             history.add(Message.user("finish the prior goal"));
             history.add(Message.assistant("", call("update_goal", "{\"status\":\"" + status + "\"}").toolCalls));

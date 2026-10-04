@@ -26,7 +26,7 @@ public final class ProgramArgumentRegressionTest {
         String marker = new File(temporary.directory(), "injected").getPath();
         String value = "quote'\"; $(touch " + marker + ") `touch " + marker + "`";
         String program = "import json,sys\nprint(json.dumps(sys.argv[1:]))\n";
-        String output = shell.runProgram(python("objection", program), Arrays.asList("version", value), true, 5);
+        String output = shell.runProgram(python("objection", program), Arrays.asList("version", value), true, 5, shell.cancellationEpoch());
         JSONArray actual = new JSONArray(text(output));
         check(actual.length() == 2 && "version".equals(actual.getString(0)) && value.equals(actual.getString(1)),
                 "Structured argument was split or changed: " + output);
@@ -34,7 +34,7 @@ public final class ProgramArgumentRegressionTest {
     }
     private static void registeredObjectionBootstrapRunsBeforeVersion() throws Exception {
         File common = new File(root, "common"), nativeTools = new File(root, "native");
-        ToolchainStore store = new ToolchainStore(new File(root, "registry"));
+        ToolchainStore store = new ToolchainStore(new File(root, "registry"), null, "", 0);
         store.bundledInstalled(common, nativeTools, new JSONObject().put("version", "fixture"), "arm64-v8a");
         JSONArray prefix = store.configuration("objection").getJSONArray("prefix");
         String bootstrap = prefix.getString(1);
@@ -50,7 +50,7 @@ public final class ProgramArgumentRegressionTest {
                 + " print(json.dumps({'args':args,'program':prog_name}))\n").getBytes("UTF-8"));
         ToolchainStore.Launcher launcher = python("objection", bootstrap);
         launcher.environment.put("PYTHONPATH", modules.getPath());
-        JSONObject actual = new JSONObject(text(shell.runProgram(launcher, Collections.singletonList("version"), true, 5)));
+        JSONObject actual = new JSONObject(text(shell.runProgram(launcher, Collections.singletonList("version"), true, 5, shell.cancellationEpoch())));
         check("objection".equals(actual.getString("program")), "Production CLI bootstrap was not invoked");
         check("version".equals(actual.getJSONArray("args").getString(5)), "Version argument did not reach CLI");
     }
@@ -61,7 +61,7 @@ public final class ProgramArgumentRegressionTest {
             if (inPrefix) launcher.prefix.set(1, launcher.prefix.get(1) + "\0");
             boolean refused = false;
             try {
-                String output = shell.runProgram(launcher, Collections.singletonList(inPrefix ? "version" : "version\0"), true, 5);
+                String output = shell.runProgram(launcher, Collections.singletonList(inPrefix ? "version" : "version\0"), true, 5, shell.cancellationEpoch());
                 refused = !inPrefix && output.startsWith("错误：工具参数不合法。");
             }
             catch (IllegalArgumentException expected) { refused = expected.getMessage().contains("NUL"); }

@@ -138,7 +138,7 @@ public final class TemporaryCleanupRegressionTest {
         rootMaterials.configure(project.getPath(), false);
         check(rootMaterials.finishTurn() == null && !rootTemp.exists(), "Initially root allocation did not clean");
         boolean refused = false;
-        try { new TemporaryWorkspace(project.getPath(), false).directory(); }
+        try { new TemporaryWorkspace(project.getPath(), false, null, -1).directory(); }
         catch (IllegalArgumentException expected) { refused = true; }
         check(refused, "Missing App private path fell back to workspace allocation");
         pass("rootAndWorkDirDoNotMovePrivateAllocation");
@@ -256,7 +256,7 @@ public final class TemporaryCleanupRegressionTest {
         byte[] original = Files.readAllBytes(marker.toPath());
         Files.write(marker.toPath(), "foreign".getBytes("UTF-8"));
         ToolRegistry registry = new ToolRegistry();
-        registry.register(new TemporaryTool(materials));
+        registry.register(new TemporaryTool(materials, project.getPath(), java.util.Collections.singletonList(project.getPath())));
         AgentLoop loop = new AgentLoop(null, registry, new AgentLoop.Quiet());
         loop.setGoal("deliver the fixture");
         check(loop.closeGoal(Goal.COMPLETE, "").startsWith(ERROR), "Goal completed despite failed cleanup");
@@ -276,7 +276,7 @@ public final class TemporaryCleanupRegressionTest {
             public boolean stop() { retries.incrementAndGet(); return stopped.get(); }
         });
         Files.write(new File(temp, "live.py").toPath(), new byte[]{1});
-        ToolRegistry registry = new ToolRegistry(); registry.register(new TemporaryTool(materials));
+        ToolRegistry registry = new ToolRegistry(); registry.register(new TemporaryTool(materials, project.getPath(), java.util.Collections.singletonList(project.getPath())));
         AgentLoop loop = new AgentLoop(null, registry, new AgentLoop.Quiet()); loop.setGoal("deliver fixture");
         check(loop.closeGoal(Goal.COMPLETE, "").startsWith(ERROR), "Goal completed while a process could still recreate temporary files");
         check(Goal.ACTIVE.equals(loop.goalStatus()) && new File(temp, "live.py").isFile(), "Failed process check deleted files or closed goal");
@@ -354,7 +354,7 @@ public final class TemporaryCleanupRegressionTest {
         final File[] allocated = new File[1];
         final CountDownLatch requested = new CountDownLatch(1);
         ToolRegistry registry = new ToolRegistry();
-        registry.register(new TemporaryTool(materials));
+        registry.register(new TemporaryTool(materials, project.getPath(), java.util.Collections.singletonList(project.getPath())));
         registry.register(new ShellTool(false, project.getPath(), materials));
         LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
             @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
@@ -429,7 +429,7 @@ public final class TemporaryCleanupRegressionTest {
         final File[] allocated = new File[1];
         final AgentLoop[] loopBox = new AgentLoop[1];
         ToolRegistry registry = new ToolRegistry();
-        registry.register(new TemporaryTool(materials));
+        registry.register(new TemporaryTool(materials, project.getPath(), java.util.Collections.singletonList(project.getPath())));
         LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
             @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
                 try {

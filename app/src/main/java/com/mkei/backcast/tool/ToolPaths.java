@@ -113,11 +113,6 @@ final class ToolPaths {
         return base.equals(path) || path.startsWith(base.endsWith("/") ? base : base + "/");
     }
 
-    static boolean organizedTest(String workDir, File file) throws Exception {
-        File root = workDir == null ? null : new File(workDir).getCanonicalFile();
-        return organizedTest(root, file);
-    }
-
     static boolean organizedTest(String workDir, File file, TemporaryWorkspace temporary) throws Exception {
         File root = temporary == null ? workDir == null ? null : new File(workDir).getCanonicalFile()
                 : temporary.projectRoots(workDir).rootFor(file);
@@ -148,14 +143,6 @@ final class ToolPaths {
      * 这是尽力而为的检查，不是系统级沙箱：脚本内部自己拼出来的路径拦不住，
      * 目的只是把「写错目录还读回来」这类常见越界挡在调用前。
      */
-    static void checkCommand(String workDir, String command) {
-        checkCommand(workDir, command, null);
-    }
-
-    static void checkCommand(String workDir, String command, TemporaryWorkspace temporary) {
-        checkCommand(workDir, command, temporary, false);
-    }
-
     static void checkCommand(String workDir, String command, TemporaryWorkspace temporary, boolean temporaryCommand) {
         if (command == null || command.indexOf('\0') >= 0) {
             throw new IllegalArgumentException("命令不合法。");
@@ -763,10 +750,6 @@ final class ToolPaths {
         return Probe.missing();
     }
 
-    static byte[] readBytes(File file, int max) throws Exception {
-        return readBytes(file, max, false);
-    }
-
     static byte[] readBytes(File file, int max, boolean useRoot) throws Exception {
         if (file.canRead()) {
             try {
@@ -780,14 +763,6 @@ final class ToolPaths {
             throw new IllegalArgumentException("没有权限读取：" + file.getAbsolutePath());
         }
         return RootShell.readAll("cat " + RootShell.quote(file.getAbsolutePath()), max);
-    }
-
-    static String readString(File file, int max) throws Exception {
-        return new String(readBytes(file, max), "UTF-8");
-    }
-
-    static void writeString(File file, String content) throws Exception {
-        writeBytes(file, content.getBytes("UTF-8"), false);
     }
 
     static void writeBytes(File file, byte[] data, boolean useRoot) throws Exception {

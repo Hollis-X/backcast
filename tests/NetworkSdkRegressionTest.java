@@ -88,13 +88,13 @@ public final class NetworkSdkRegressionTest {
     }
     private static void serverFailureStopsLoopWithoutRetryOrProbe() throws Exception {
         Route route = new Route(); NetworkRouting.install((endpoint, valid) -> route);
-        AtomicInteger errors = new AtomicInteger(), retries = new AtomicInteger();
+        AtomicInteger errors = new AtomicInteger();
         try (Server server = new Server(503, "{\"error\":{\"message\":\"unavailable\"}}")) {
             AgentLoop loop = new AgentLoop(server.client(), new ToolRegistry(), new AgentLoop.Quiet() {
                 @Override public void onError(int gen, String text) { check(text.contains("无法处理"), "Raw HTTP error reached notification"); errors.incrementAndGet(); }
-                @Override public void onRetry(int gen) { retries.incrementAndGet(); }
+
             }); loop.bindSession(7); loop.reset("fixture"); loop.setGoal("inspect"); loop.submit("inspect", 7, loop.generation(), 1);
-            check(server.posts.get() == 1 && route.probe.get() == 0 && errors.get() == 1 && retries.get() == 0
+            check(server.posts.get() == 1 && route.probe.get() == 0 && errors.get() == 1
                     && !loop.busy() && Goal.ACTIVE.equals(loop.goalStatus()), "503 retried/probed needlessly or falsely completed the goal");
         } finally { NetworkRouting.install(null); }
         pass("serverFailureStopsLoopWithoutRetryOrProbe");

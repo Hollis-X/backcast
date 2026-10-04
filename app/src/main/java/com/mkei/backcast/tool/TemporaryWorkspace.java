@@ -43,10 +43,6 @@ public final class TemporaryWorkspace {
     private final ArrayList<Allocation> allocations = new ArrayList<Allocation>();
     private final ThreadLocal<String> turn = new ThreadLocal<String>();
     private String loadError;
-    public TemporaryWorkspace(String workDir, boolean useRoot) {
-        this(workDir, useRoot, null, -1);
-    }
-
     public TemporaryWorkspace(String workDir, boolean useRoot, File stateDir, long sessionId) {
         configure(workDir, useRoot);
         this.stateDir = canonical(stateDir);

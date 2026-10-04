@@ -17,8 +17,6 @@
     <string name="agent_panel_activity_tab">活动</string>
     <string name="agent_panel_result_tab">结果</string>
     <string name="agent_panel_assigned">派发的任务</string>
-    <string name="agent_panel_stage">当前阶段</string>
-    <string name="agent_panel_tool">执行工具</string>
     <string name="agent_panel_progress">最近进展</string>
     <string name="agent_panel_failure">执行错误</string>
     <string name="agent_panel_parent">派发者</string>
@@ -37,5 +35,4 @@
     <string name="agent_panel_role_message">协作消息</string>
     <string name="agent_panel_phase_starting">正在准备</string>
     <string name="agent_panel_stopped">已停止</string>
-    <string name="agent_panel_read_error">无法读取子任务：%1$s</string>
 </resources>

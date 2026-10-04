@@ -40,8 +40,8 @@ public final class FileToolRegressionTest {
         Files.deleteIfExists(file.toPath());
     }
     private static void run(File dir) throws Exception {
-        WriteTool writer = new WriteTool(dir.getAbsolutePath(), false);
-        EditTool editor = new EditTool(dir.getAbsolutePath(), false);
+        WriteTool writer = new WriteTool(dir.getAbsolutePath(), false, null);
+        EditTool editor = new EditTool(dir.getAbsolutePath(), false, null);
         File target = new File(dir, "nested/sample.txt");
         check(!writer.run(write("nested/sample.txt", "alpha beta gamma")).startsWith(ERROR), "Create failed");
         check(read(target).equals("alpha beta gamma"), "Create wrote incorrect content");
@@ -75,9 +75,9 @@ public final class FileToolRegressionTest {
 
     /** 工作目录之外的路径必须被拒绝，不能靠绝对路径或 .. 绕出去。 */
     private static void escapesAreRefused(File dir) throws Exception {
-        WriteTool writer = new WriteTool(dir.getAbsolutePath(), false);
-        EditTool editor = new EditTool(dir.getAbsolutePath(), false);
-        ReadTool reader = new ReadTool(dir.getAbsolutePath(), false);
+        WriteTool writer = new WriteTool(dir.getAbsolutePath(), false, null);
+        EditTool editor = new EditTool(dir.getAbsolutePath(), false, null);
+        ReadTool reader = new ReadTool(dir.getAbsolutePath(), false, null);
         File outside = new File(dir.getParentFile(), "backcast-outside-" + dir.getName() + ".txt");
 
         check(writer.run(write(outside.getAbsolutePath(), "escaped")).startsWith(ERROR),
@@ -91,7 +91,7 @@ public final class FileToolRegressionTest {
                 .startsWith(ERROR), "Read accepted a path outside the working directory");
         pass("pathsOutsideWorkDirAreRefused");
 
-        ShellTool shell = new ShellTool(false, dir.getAbsolutePath());
+        ShellTool shell = new ShellTool(false, dir.getAbsolutePath(), null);
         check(shell.run(new JSONObject().put("command", "echo hi > /tmp/backcast-escape.txt"))
                 .startsWith(ERROR), "Shell redirect wrote outside the working directory");
         check(!new File("/tmp/backcast-escape.txt").exists(), "Shell created an outside file");

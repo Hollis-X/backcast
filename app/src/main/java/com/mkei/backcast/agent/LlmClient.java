@@ -122,7 +122,6 @@ public class LlmClient {
         private JSONObject lastDisplayPart;
         /** 思考模型的推理内容，回放历史时必须原样带回。 */
         public String reasoning;
-        public String raw;
         public String error;
         /** Private failure evidence for the request recorder, never a model/UI message. */
         public JSONObject diagnostic;
@@ -205,11 +204,9 @@ public class LlmClient {
 
     /** Safe live timing only; never exposes endpoint, credentials, request body, or provider text. */
     public static final class RequestActivity {
-        public final long elapsedMs, quietMs;
-        public final boolean responseStarted, hasProgress;
-        private RequestActivity(long elapsedMs, long quietMs, boolean responseStarted, boolean hasProgress) {
-            this.elapsedMs = elapsedMs; this.quietMs = quietMs;
-            this.responseStarted = responseStarted; this.hasProgress = hasProgress;
+        public final long quietMs;
+        private RequestActivity(long quietMs) {
+            this.quietMs = quietMs;
         }
     }
 
@@ -326,9 +323,7 @@ public class LlmClient {
         if (current == null || current.dead || current.finished) return null;
         long now = System.nanoTime(), progress = current.lastProgressNanos;
         RequestActivity snapshot = new RequestActivity(
-                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - current.startedNanos)),
-                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - (progress == 0L ? current.startedNanos : progress))),
-                current.responseStarted, progress != 0L);
+                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - (progress == 0L ? current.startedNanos : progress))));
         return current.dead || current.finished ? null : snapshot;
     }
 
@@ -465,7 +460,7 @@ public class LlmClient {
             if (jsonResponse) {
                 mine.stage = "json_body";
                 String text = sdk.options.jsonMapper().readTree(response.body()).toString();
-                reply.raw = text; parseInto(reply, text); emitFull(reply, sink);
+                parseInto(reply, text); emitFull(reply, sink);
             } else {
                 mine.stage = "stream_body";
                 stream = response.parse();
@@ -773,7 +768,6 @@ public class LlmClient {
         reply.applyUsage(root.optJSONObject("usage"));
         JSONArray choices = root.optJSONArray("choices");
         if (choices == null || choices.length() == 0) {
-            if (reply.finishReason != null && root.optJSONObject("usage") != null) reply.finalUsage = true;
             return;
         }
         JSONObject choice = choices.optJSONObject(0);
@@ -781,11 +775,8 @@ public class LlmClient {
             return;
         }
         reply.applyUsage(choice.optJSONObject("usage"));
-        boolean alreadyFinished = reply.finishReason != null;
         String finish = choice.optString("finish_reason", "");
         if (finish.length() > 0 && !"null".equals(finish)) reply.finishReason = finish;
-        // Once generation is finished, later frames may update usage only.
-        if (alreadyFinished) return;
         JSONObject delta = choice.optJSONObject("delta");
         if (delta != null) {
             absorbDelta(delta, reply, calls, sink);
@@ -991,10 +982,6 @@ public class LlmClient {
     }
 
     /** 请求 /v1/models，返回可用模型 id 列表。 */
-    public static ModelsResult fetchModels(String baseUrl, String apiKey) {
-        return fetchModels(baseUrl, apiKey, null);
-    }
-
     public static ModelsResult fetchModels(String baseUrl, String apiKey, String providerId) {
         ModelsResult result = new ModelsResult();
         SdkSession sdk = null;

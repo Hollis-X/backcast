@@ -1,140 +1,25 @@
 package com.mkei.backcast.tool;
 
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.UUID;
-import java.util.zip.GZIPInputStream;
 
-/** Installs fixed official artifacts without running archive contents or installer scripts. */
+/** Verified archive extraction shared by the offline tool bundle. */
 public final class ToolchainInstaller {
     public interface Cancellation { void check() throws Exception; }
-    interface Downloads { InputStream open(String url) throws Exception; }
     private static final long MAX_EXPANDED = 512L * 1024 * 1024;
-    private final ToolchainStore store;
-    private final Downloads downloads;
-    private volatile InputStream active;
 
-    public ToolchainInstaller(ToolchainStore store) { this(store, new HttpsDownloads()); }
-    ToolchainInstaller(ToolchainStore store, Downloads downloads) { this.store = store; this.downloads = downloads; }
-
-    public void abort() {
-        InputStream input = active;
-        if (input != null) try { input.close(); } catch (IOException ignored) { }
-    }
-
-    public File install(String id, String abi, Cancellation cancellation) throws Exception {
-        if (store.bundled(id)) return store.prepareBundled(cancellation);
-        return installArtifact(ToolCatalog.artifact(id, abi), cancellation);
-    }
-
-    File installArtifact(ToolCatalog.Artifact artifact, Cancellation cancellation) throws Exception {
-        synchronized (store.toolLock(artifact.id)) {
-            cancellation.check();
-            File destination = store.managed(new File(store.root(), artifact.id + "-" + artifact.version + "-" + artifact.abi).getPath());
-            File receipt = new File(destination, ".verified-sha256");
-            store.managed(receipt.getPath());
-            if (receipt.isFile() && artifact.sha256.equals(new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8"))) {
-                store.installed(artifact, destination); return destination;
-            }
-            if (destination.exists()) throw new IllegalArgumentException("工具版本目录已存在但校验记录不一致，请检查私有工具目录。");
-            if (!store.root().isDirectory() && !store.root().mkdirs()) throw new IOException("无法创建私有工具目录。");
-            File stage = store.managed(new File(store.root(), ".install-" + UUID.randomUUID()).getPath());
-            if (!stage.mkdir()) throw new IOException("无法创建安装暂存目录。");
-            File archive = new File(stage, ".download");
-            File extracted = new File(stage, "payload");
-            boolean published = false;
-            try {
-                download(artifact, archive, cancellation);
-                cancellation.check();
-                if (!extracted.mkdir()) throw new IOException("无法创建工具解包目录。");
-                if ("jar".equals(artifact.format)) {
-                    if (!archive.renameTo(new File(extracted, "apktool.jar"))) throw new IOException("无法保存 Apktool JAR。");
-                } else {
-                    InputStream input = new GZIPInputStream(new BufferedInputStream(new FileInputStream(archive)));
-                    try { extractTar(input, extracted, artifact.prefix, cancellation); }
-                    finally { input.close(); }
-                    if (!new File(extracted, "bin/radare2").isFile() || !new File(extracted, "bin/rabin2").isFile()) {
-                        throw new IOException("官方包缺少 radare2/rabin2 入口。");
-                    }
-                }
-                ToolPaths.writeBytes(new File(extracted, ".verified-sha256"), artifact.sha256.getBytes("UTF-8"), false);
-                cancellation.check(); store.managed(destination.getPath());
-                if (!extracted.renameTo(destination)) throw new IOException("无法发布工具版本目录。");
-                published = true;
-                cancellation.check();
-                store.installed(artifact, destination);
-                return destination;
-            } catch (Exception failure) {
-                if (published) remove(destination, store.root());
-                throw failure;
-            } finally {
-                active = null; remove(stage, store.root());
-            }
-        }
-    }
-
-    private void download(ToolCatalog.Artifact artifact, File destination, Cancellation cancellation) throws Exception {
-        InputStream input = downloads.open(artifact.url); active = input;
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        FileOutputStream output = new FileOutputStream(destination);
-        long total = 0;
-        try {
-            byte[] buffer = new byte[16384]; int count;
-            while ((count = input.read(buffer)) >= 0) {
-                cancellation.check(); if (count == 0) continue;
-                total += count;
-                if (total > artifact.maxBytes) throw new IOException("工具下载超过大小限制。");
-                digest.update(buffer, 0, count); output.write(buffer, 0, count);
-            }
-            output.getFD().sync();
-        } finally {
-            try { input.close(); } finally { output.close(); active = null; }
-        }
-        if (!artifact.sha256.equals(hex(digest.digest()))) throw new IOException("SHA-256 校验失败，下载已丢弃。");
-    }
+    private ToolchainInstaller() { }
 
     static String hex(byte[] bytes) {
         StringBuilder result = new StringBuilder();
         for (byte value : bytes) { int v = value & 255; if (v < 16) result.append('0'); result.append(Integer.toHexString(v)); }
         return result.toString();
-    }
-
-    private static final class HttpsDownloads implements Downloads {
-        @Override public InputStream open(String address) throws Exception {
-            URL url = new URL(address);
-            for (int redirects = 0; redirects <= 5; redirects++) {
-                String host = url.getHost();
-                if (!"https".equals(url.getProtocol()) || !("github.com".equals(host)
-                        || "release-assets.githubusercontent.com".equals(host) || "objects.githubusercontent.com".equals(host))) {
-                    throw new IOException("工具下载只允许官方 HTTPS 发布源。");
-                }
-                final HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                connection.setConnectTimeout(15000); connection.setReadTimeout(20000);
-                connection.setInstanceFollowRedirects(false); connection.setRequestProperty("User-Agent", "Backcast-Toolchain");
-                int code = connection.getResponseCode();
-                if (code >= 300 && code <= 399) {
-                    String location = connection.getHeaderField("Location"); connection.disconnect();
-                    if (location == null) throw new IOException("下载重定向缺少地址。");
-                    url = new URL(url, location); continue;
-                }
-                if (code != 200) { connection.disconnect(); throw new IOException("工具下载 HTTP " + code); }
-                return new FilterInputStream(connection.getInputStream()) {
-                    @Override public void close() throws IOException { try { super.close(); } finally { connection.disconnect(); } }
-                };
-            }
-            throw new IOException("工具下载重定向过多。");
-        }
     }
 
     private static final class Link {

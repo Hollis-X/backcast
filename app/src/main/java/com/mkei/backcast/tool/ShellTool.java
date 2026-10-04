@@ -38,10 +38,6 @@ public class ShellTool implements Tool {
     /** 每次停止加一。正在跑的命令记下旧值，对不上就退出。 */
     private volatile int epoch;
 
-    public ShellTool(boolean useRoot, String workDir) {
-        this(useRoot, workDir, null);
-    }
-
     public ShellTool(boolean useRoot, String workDir, TemporaryWorkspace temporary) {
         this.useRoot = useRoot;
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
@@ -152,14 +148,9 @@ public class ShellTool implements Tool {
         return output;
     }
 
-    /** Trusted launcher paths come from the private registry; user arguments stay structured. */
-    public String runProgram(ToolchainStore.Launcher launcher, List<String> arguments,
-            boolean temporaryCommand, int timeoutSec) throws Exception {
-        return runProgram(launcher, arguments, temporaryCommand, timeoutSec, epoch);
-    }
-
     int cancellationEpoch() { return epoch; }
 
+    /** Trusted launcher paths come from the private registry; user arguments stay structured. */
     String runProgram(ToolchainStore.Launcher launcher, List<String> arguments,
             boolean temporaryCommand, int timeoutSec, final int mine) throws Exception {
         if (mine != epoch || Thread.currentThread().isInterrupted()) return "已停止。";

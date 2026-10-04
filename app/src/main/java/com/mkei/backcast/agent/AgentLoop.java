@@ -62,21 +62,15 @@ public class AgentLoop {
         void onFinish(int gen);
 
         /**
-         * 这一次请求没成功，准备原样再问一次。
-         * 界面把这次没写进历史的半截预览撤掉，避免重试后再画一份。
-         */
-        void onRetry(int gen);
-
-        /**
          * 目标还没完成，准备再问一轮。
          * 界面先收起上一轮，再显示分隔，不要把新结果贴在上一条用户消息下面。
          */
         void onSteer(int gen);
     }
 
-    /** Optional stage metadata; old listeners retain the same callback contract. */
+    /** Stage metadata uses the same turn and snapshot boundary as streamed output. */
     public interface ProgressListener {
-        void onProgress(int gen, String phase, String name, String detail, int attempt);
+        void onProgress(int gen, String phase, String name, String detail);
     }
 
     /** 没界面时用的空监听。换会话不会把事件画到另一个会话上。 */
@@ -92,9 +86,8 @@ public class AgentLoop {
         @Override public void onCompactStart(int gen) { }
         @Override public void onCompacted(int gen, boolean followup) { }
         @Override public void onFinish(int gen) { }
-        @Override public void onRetry(int gen) { }
         @Override public void onSteer(int gen) { }
-        @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) { }
+        @Override public void onProgress(int gen, String phase, String name, String detail) { }
     }
 
     /** 把已经进入历史的消息落库。由界面注入，循环本身不碰数据库。 */
@@ -106,12 +99,7 @@ public class AgentLoop {
     }
 
     /** Transport diagnostics stay outside model messages. */
-    public interface RequestRecorder {
-        void recordRequest(long sessionId, String purpose, long elapsedMs, String outcome,
-                String reason, int retryCount);
-    }
-
-    public interface DetailedRequestRecorder extends RequestRecorder {
+    public interface DetailedRequestRecorder {
         void recordRequest(long sessionId, String purpose, long elapsedMs, String outcome,
                 String reason, int retryCount, String diagnostic);
     }
@@ -130,15 +118,6 @@ public class AgentLoop {
         void save(long sessionId, boolean running, String goal, String status, long elapsedMs,
                 long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget,
                 boolean budgetWrapFinished);
-    }
-
-    /** 钩子：pi 的扩展点在同样位置。返回非 null 可改写结果，返回 null 表示放行。 */
-    public interface Hook {
-        /** 工具执行前。返回字符串则直接作为结果，不再真正执行。 */
-        String beforeTool(String name, JSONObject args);
-
-        /** 工具执行后。返回非 null 则替换结果。 */
-        String afterTool(String name, JSONObject args, String result);
     }
 
     public interface UsageObserver {
@@ -183,7 +162,6 @@ public class AgentLoop {
     private int requestToken, requestGeneration;
     private ToolRegistry registry;
     private final List<Message> history = new ArrayList<Message>();
-    private final List<Hook> hooks = new ArrayList<Hook>();
     private final Object uiLock = new Object();
     private final Object listenerLock = new Object();
     private volatile Listener uiListener;
@@ -289,16 +267,6 @@ public class AgentLoop {
         this.client = client;
         this.registry = registry;
         this.uiListener = listener == null ? new Quiet() : listener;
-    }
-
-    public void addHook(Hook hook) {
-        if (hook != null) {
-            hooks.add(hook);
-        }
-    }
-
-    public List<Message> history() {
-        return history;
     }
 
     /** Detached checkpoint for background child-agent persistence and bounded forks. */
@@ -407,8 +375,6 @@ public class AgentLoop {
             this.data = data; this.sequence = sequence; this.generation = generation;
             this.uiToken = uiToken; this.pending = pending;
         }
-
-        public int pendingCount() { return pending.size(); }
     }
 
     /** Read the bounded transcript and attach its listener at one event boundary. */
@@ -483,7 +449,7 @@ public class AgentLoop {
 
         @Override public void onRequestStart(int gen) {
             emit(event(UiEventBuffer.REQUEST, gen, ""));
-            onProgress(gen, "model", "", "", 0);
+            onProgress(gen, "model", "", "");
         }
         @Override public void onAssistantText(int gen, String value) { emit(event(UiEventBuffer.TEXT, gen, value)); }
         @Override public void onReasoning(int gen, String value) { emit(event(UiEventBuffer.REASONING, gen, value)); }
@@ -514,12 +480,10 @@ public class AgentLoop {
             UiEventBuffer.Event event = event(UiEventBuffer.COMPACTED, gen, ""); event.flag = followup; emit(event);
         }
         @Override public void onFinish(int gen) { emit(event(UiEventBuffer.FINISH, gen, "")); }
-        @Override public void onRetry(int gen) { emit(event(UiEventBuffer.RETRY, gen, "")); }
         @Override public void onSteer(int gen) { emit(event(UiEventBuffer.STEER, gen, "")); }
-        @Override public void onProgress(int gen, String phase, String name, String detail, int attempt) {
+        @Override public void onProgress(int gen, String phase, String name, String detail) {
             UiEventBuffer.Event event = event(UiEventBuffer.PROGRESS, gen, detail);
             event.name = phase; event.arguments = name;
-            event.first = Math.max(0, attempt);
             emit(event);
         }
     }
@@ -550,12 +514,6 @@ public class AgentLoop {
             if (!busy || cancelled || requestClient == null || requestLease == null
                     || requestToken != runToken || requestGeneration != generation) return null;
             return requestClient.requestActivity();
-        }
-    }
-
-    public void clearGate(ApprovalGate target) {
-        if (gate == target) {
-            gate = null;
         }
     }
 
@@ -612,21 +570,12 @@ public class AgentLoop {
         return gen == generation && uiToken == acceptedUi && !cancelled;
     }
 
-    public void restoreGoal(String text, String status, long elapsedMs) {
-        restoreGoal(text, status, elapsedMs, 0L, 0L);
-    }
-
     /**
      * 恢复目标，连同预算记账。
      *
      * 对齐 Codex 的 thread goal 持久化：tokens_used 与 token_budget 跟状态一起存，
      * 重启后接着算，避免每次都从头给一份新预算。
      */
-    public void restoreGoal(String text, String status, long elapsedMs, long tokensUsed,
-            long tokenBudget) {
-        restoreGoal(text, status, elapsedMs, tokensUsed, tokenBudget, null);
-    }
-
     public void restoreGoal(String text, String status, long elapsedMs, long tokensUsed,
             long tokenBudget, Boolean budgetWrapFinished) {
         synchronized (lock) {
@@ -1112,10 +1061,6 @@ public class AgentLoop {
         return limited;
     }
 
-    public void accountExternalUsage(long tokens) {
-        accountExternalUsage(tokens, -1L);
-    }
-
     public void accountExternalUsage(long tokens, long expectedLease) {
         if (tokens <= 0) return;
         accountGoalUsage(tokens, 0, expectedLease);
@@ -1124,10 +1069,6 @@ public class AgentLoop {
 
     public int contextLimit() {
         return contextLimit;
-    }
-
-    public float compactRatio() {
-        return compactRatio;
     }
 
     /** 更新后续请求的客户端和下一轮工具；当前轮的工具快照保持不变。 */
@@ -1191,10 +1132,6 @@ public class AgentLoop {
                 && (last.toolCalls == null || last.toolCalls.length() == 0);
     }
 
-    public void setSystemPrompt(String prompt) {
-        reset(prompt);
-    }
-
     /** Refresh changing environment facts without resetting the running turn. */
     public void setEnvironment(String prompt, String directory) {
         synchronized (lock) {
@@ -1255,19 +1192,16 @@ public class AgentLoop {
             LlmClient.Reply reply = current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
                 @Override public boolean isCurrent() { return !stale(token, gen); }
             });
-            if (requestRecorder instanceof RequestRecorder && requestSession >= 0 && reply != null) {
+            if (requestRecorder instanceof DetailedRequestRecorder && requestSession >= 0 && reply != null) {
                 boolean cancelledRequest = stale(token, gen);
                 try {
                     long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - started);
                     String outcome = cancelledRequest ? "cancelled" : reply.error == null ? "success"
                             : isTransient(reply.error) ? "retryable_error" : "error";
                     String reason = cancelledRequest || reply.error == null ? "" : failureReason(reply.error);
-                    if (requestRecorder instanceof DetailedRequestRecorder) {
-                        ((DetailedRequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
-                                elapsed, outcome, reason, 0,
-                                reply.diagnostic == null ? "" : Diagnostics.boundedJson(reply.diagnostic));
-                    } else ((RequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
-                            elapsed, outcome, reason, 0);
+                    ((DetailedRequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
+                            elapsed, outcome, reason, 0,
+                            reply.diagnostic == null ? "" : Diagnostics.boundedJson(reply.diagnostic));
                 } catch (RuntimeException diagnosticFailure) {
                     // A full or unavailable diagnostic store must not discard a valid model response.
                 }
@@ -1588,51 +1522,48 @@ public class AgentLoop {
             request.add(Message.user(Compactor.PROMPT));
         }
 
-        while (!stale(token, gen)) {
+        if (stale(token, gen)) return false;
+        LlmClient.Reply reply = sendRequest(request, null, null, token, gen, "compact");
+        if (stale(token, gen)) {
+            return false;
+        }
+        if (reply.error != null) {
+            stopAfterRequestFailure(token, gen, reply.error, reply.userMessage);
+            return false;
+        }
+        accountGoalUsage(reply.promptTokens, reply.completionTokens);
 
-            LlmClient.Reply reply = sendRequest(request, null, null, token, gen, "compact");
+        String summary = reply.content == null ? "" : reply.content;
+        if (summary.trim().length() == 0 || reply.hasToolCalls()) {
+            listener.onError(gen, "压缩没有返回摘要。");
+            return false;
+        }
+
+        Message handoff = Message.user(Compactor.wrap(summary));
+        handoff.resumeAfterCompaction = followup;
+        handoff.delegationAuthorized = Boolean.valueOf(explicitDelegationAuthorized());
+        handoff.delegationForbidden = delegationForbidden();
+        handoff.goalFinalReply = followup && lastToolsClosedGoal();
+        List<Message> fresh;
+        synchronized (lock) {
             if (stale(token, gen)) {
                 return false;
             }
-            if (reply.error != null) {
-                stopAfterRequestFailure(token, gen, reply.error, reply.userMessage);
-                return false;
+            // 先按旧历史拼出新窗口，再整体换上：rebuild 读的就是 history，
+            // 顺序反了它只能看到空列表，系统提示词和这一轮用户消息都会被丢掉。
+            fresh = rebuild(handoff);
+            history.clear();
+            history.addAll(fresh);
+            resetContextUsageLocked();
+            if (followup && goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)) {
+                budgetWrappedUp = false;
             }
-            accountGoalUsage(reply.promptTokens, reply.completionTokens);
-
-            String summary = reply.content == null ? "" : reply.content;
-            if (summary.trim().length() == 0 || reply.hasToolCalls()) {
-                listener.onError(gen, "压缩没有返回摘要。");
-                return false;
-            }
-
-            Message handoff = Message.user(Compactor.wrap(summary));
-            handoff.resumeAfterCompaction = followup;
-            handoff.delegationAuthorized = Boolean.valueOf(explicitDelegationAuthorized());
-            handoff.delegationForbidden = delegationForbidden();
-            handoff.goalFinalReply = followup && lastToolsClosedGoal();
-            List<Message> fresh;
-            synchronized (lock) {
-                if (stale(token, gen)) {
-                    return false;
-                }
-                // 先按旧历史拼出新窗口，再整体换上：rebuild 读的就是 history，
-                // 顺序反了它只能看到空列表，系统提示词和这一轮用户消息都会被丢掉。
-                fresh = rebuild(handoff);
-                history.clear();
-                history.addAll(fresh);
-                resetContextUsageLocked();
-                if (followup && goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus)) {
-                    budgetWrappedUp = false;
-                }
-            }
-            // Persist the checkpoint; the original conversation remains append-only.
-            replace(sessionId, fresh);
-            listener.onCompacted(gen, followup);
-            listener.onContextUsage(gen, contextUsed(), contextLimit);
-            return true;
         }
-        return false;
+        // Persist the checkpoint; the original conversation remains append-only.
+        replace(sessionId, fresh);
+        listener.onCompacted(gen, followup);
+        listener.onContextUsage(gen, contextUsed(), contextLimit);
+        return true;
     }
 
     /**
@@ -1694,57 +1625,6 @@ public class AgentLoop {
         int at = tail ? text.length() - low : low;
         if (at < text.length() && Character.isLowSurrogate(text.charAt(at))) at += tail ? 1 : -1;
         return tail ? text.substring(at) : text.substring(0, Math.max(0, at));
-    }
-
-    /** 切在下一条真实用户消息之前，整轮工具调用和结果一起移除。 */
-    private static List<Message> dropOldestTurns(List<Message> base, int turns) {
-        int seen = 0;
-        int cut = 0;
-        for (int i = 0; i < base.size(); i++) {
-            Message m = base.get(i);
-            if (!Message.USER.equals(m.role) || Compactor.PROMPT.equals(m.content)
-                    || Goal.isSteer(m.content) || Goal.isNote(m.content) || Compactor.isSummary(m)) {
-                continue;
-            }
-            if (seen++ == turns) {
-                cut = i;
-                break;
-            }
-        }
-        List<Message> out = new ArrayList<Message>();
-        for (int i = 0; i < base.size(); i++) {
-            Message m = base.get(i);
-            if (i < cut && !Message.SYSTEM.equals(m.role)) {
-                continue;
-            }
-            out.add(m);
-        }
-        return out;
-    }
-
-    private static List<Message> trimCompactionRequest(List<Message> request) {
-        List<Message> trimmed = dropOldestTurns(request, 1);
-        if (trimmed.size() < request.size()) return trimmed;
-        // 单个长任务也可剪去旧工具批次，保留最新用户要求和压缩指令。
-        for (int i = 0; i < request.size() - 1; i++) {
-            Message old = request.get(i);
-            if (Message.SYSTEM.equals(old.role) || Message.USER.equals(old.role)) continue;
-            List<String> ids = new ArrayList<String>();
-            if (old.toolCalls != null) {
-                for (int c = 0; c < old.toolCalls.length(); c++) {
-                    JSONObject call = old.toolCalls.optJSONObject(c);
-                    if (call != null) ids.add(call.optString("id", ""));
-                }
-            }
-            trimmed = new ArrayList<Message>();
-            for (int j = 0; j < request.size(); j++) {
-                Message m = request.get(j);
-                if (j == i || (Message.TOOL.equals(m.role) && ids.contains(m.toolCallId))) continue;
-                trimmed.add(m);
-            }
-            return trimmed;
-        }
-        return request;
     }
 
     /** Classify temporary failures for local diagnostics; they never trigger another request. */
@@ -1812,7 +1692,7 @@ public class AgentLoop {
         synchronized (uiLock) {
             // Failed partial text/arguments are not committed history. A later
             // explicit resume must not replay them or need a fake retry event.
-            uiEvents.clearOutputPreservingRetry();
+            uiEvents.clear();
         }
         listener.onError(gen, userMessage == null || userMessage.trim().length() == 0
                 ? failureReason(error) : userMessage);
@@ -2071,7 +1951,7 @@ public class AgentLoop {
             if (!reply.hasToolCalls() && !finishingGoal && children != null
                     && (children.hasPendingWork() || children.hasUncollectedResults())) {
                 // A provisional final cannot be delivered before delegated evidence is available.
-                listener.onProgress(gen, "children", "", "", 0);
+                listener.onProgress(gen, "children", "", "");
                 collectDelegatedResults(children, true, token, gen);
                 if (stale(token, gen)) return;
                 continue;
@@ -2280,7 +2160,7 @@ public class AgentLoop {
                 recordToolResult(sessionId, stopped, gen, token, name);
                 return;
             }
-            listener.onProgress(gen, "tool_ready", name, argsRaw, 0);
+            listener.onProgress(gen, "tool_ready", name, argsRaw);
 
             // 受限 / 限制访问下先过放行；模型自查这一步也要能被打断。
             String denied = checkApproval(name, args, token, gen);
@@ -2340,7 +2220,7 @@ public class AgentLoop {
         if (ApprovalGate.ACCESS_STRICT.equals(access)) {
             askUser = true;
         } else if (ApprovalGate.ACCESS_GUARDED.equals(access)) {
-            listener.onProgress(gen, "tool_review", name, String.valueOf(args), 0);
+            listener.onProgress(gen, "tool_review", name, String.valueOf(args));
             risk = reviewCall(name, args, token, gen);
             if (risk == null) {
                 // 这一轮已经停了或换了会话，交给上层按 stale 收场。
@@ -2356,7 +2236,7 @@ public class AgentLoop {
         }
 
         if (askUser) {
-            listener.onProgress(gen, "tool_approval", name, String.valueOf(args), 0);
+            listener.onProgress(gen, "tool_approval", name, String.valueOf(args));
             APPROVAL_SOURCE.set(this);
             try {
                 if (!g.approve(name, args)) {
@@ -2426,7 +2306,7 @@ public class AgentLoop {
             if (recorder != null && sessionId >= 0) recorder.record(sessionId, message);
             if (Message.USER.equals(message.role)) uiEvents.clear();
             else if (Message.ASSISTANT.equals(message.role) || Message.TOOL.equals(message.role))
-                uiEvents.clearOutputPreservingRetry();
+                uiEvents.clear();
         }
     }
 
@@ -2573,13 +2453,6 @@ public class AgentLoop {
         if (cancelled) {
             return "已停止。";
         }
-        for (Hook h : hooks) {
-            String shortCircuit = h.beforeTool(name, args);
-            if (shortCircuit != null) {
-                return shortCircuit;
-            }
-        }
-
         ToolRegistry tools = currentTools();
         Tool tool = tools == null ? null : tools.get(name);
         if (tool == null) {
@@ -2600,12 +2473,6 @@ public class AgentLoop {
             if (runningTool == tool) runningTool = null;
         }
 
-        for (Hook h : hooks) {
-            String replaced = h.afterTool(name, args, result);
-            if (replaced != null) {
-                result = replaced;
-            }
-        }
         return result;
     }
 
