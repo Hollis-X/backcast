@@ -11,7 +11,6 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 执行系统命令。
@@ -24,9 +23,6 @@ public class ShellTool implements Tool {
 
     private static final int DEFAULT_TIMEOUT_SEC = 60;
     private static final int MAX_OUTPUT = 20000;
-
-    /** root 探测结果缓存：一次进程内只探一次，避免每条命令都等 su。 */
-    private static volatile Boolean rootAvailable;
 
     private final boolean useRoot;
     /** 工作目录。命令里的相对路径按它解析。 */
@@ -135,7 +131,11 @@ public class ShellTool implements Tool {
             timeoutSec = DEFAULT_TIMEOUT_SEC;
         }
 
-        boolean wantRoot = useRoot && rootAvailable();
+        boolean wantRoot = useRoot && RootShell.available(new ToolchainInstaller.Cancellation() {
+            @Override public void check() throws InterruptedException {
+                if (mine != epoch || Thread.currentThread().isInterrupted()) throw new InterruptedException("命令已停止。");
+            }
+        });
         String output = exec(command, timeoutSec, wantRoot, args.optBoolean("temporary", false), mine);
 
         if (!wantRoot) {
@@ -149,6 +149,56 @@ public class ShellTool implements Tool {
     }
 
     int cancellationEpoch() { return epoch; }
+
+    /** A zero exit cannot substitute for the explicit Apktool output contract. */
+    String verifyApktoolOutput(List<String> arguments, final int mine) throws Exception {
+        if (arguments.isEmpty()) return "";
+        String mode = arguments.get(0);
+        boolean decoded = "d".equals(mode) || "decode".equals(mode);
+        if (!decoded && !"b".equals(mode) && !"build".equals(mode)) return "";
+        String output = null;
+        for (int i = 1; i < arguments.size(); i++) {
+            String argument = arguments.get(i);
+            if ("-o".equals(argument) || "--output".equals(argument)) output = ++i < arguments.size() ? arguments.get(i) : null;
+            else if (argument.startsWith("--output=")) output = argument.substring(9);
+        }
+        if (output == null || temporary == null) return "Apktool 未提供可核验的本轮输出路径。";
+        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
+            @Override public void check() throws InterruptedException {
+                if (mine != epoch || Thread.currentThread().isInterrupted()) throw new InterruptedException("输出核验已停止。");
+            }
+        };
+        boolean root = useRoot && RootShell.available(cancellation);
+        File file = new File(output);
+        if (!file.isAbsolute()) file = new File(temporary.directory(), output);
+        file = ToolPaths.resolve(workDir, file.getPath(), temporary, root, cancellation);
+        ToolPaths.Probe probe = ToolPaths.probe(file, root, cancellation);
+        if (!probe.exists || probe.denied || decoded != probe.directory)
+            return "Apktool 返回成功，但指定输出" + (decoded ? "目录" : "文件") + "不存在或无法核验。";
+        if (decoded) {
+            for (String name : new String[]{"AndroidManifest.xml", "apktool.yml"}) {
+                File child = ToolPaths.resolve(workDir, new File(file, name).getPath(), temporary, root, cancellation);
+                ToolPaths.Probe entry = ToolPaths.probe(child, root, cancellation);
+                if (!entry.exists || entry.directory || entry.denied || entry.length <= 0)
+                    return "Apktool 返回成功，但解码输出缺少有效的 " + name + "。";
+            }
+        } else {
+            if (probe.length < 22) return "Apktool 返回成功，但构建输出为空或不是完整 ZIP/APK。";
+            byte[] magic = new byte[4];
+            if (root) {
+                magic = RootShell.readAll("head -c 4 " + RootShell.quote(file.getPath()), 8, cancellation);
+            } else {
+                java.io.InputStream input = new java.io.FileInputStream(file);
+                try { for (int offset = 0; offset < magic.length;) {
+                    cancellation.check(); int count = input.read(magic, offset, magic.length - offset);
+                    if (count < 0) break; offset += count;
+                } } finally { input.close(); }
+            }
+            if (magic.length < 4 || magic[0] != 'P' || magic[1] != 'K' || magic[2] != 3 || magic[3] != 4)
+                return "Apktool 返回成功，但构建输出没有有效的 APK/ZIP 文件头。";
+        }
+        cancellation.check(); return "";
+    }
 
     /** Trusted launcher paths come from the private registry; user arguments stay structured. */
     String runProgram(ToolchainStore.Launcher launcher, List<String> arguments,
@@ -187,36 +237,13 @@ public class ShellTool implements Tool {
                 && ("b".equals(arguments.get(0)) || "build".equals(arguments.get(0)))) {
             command.append(" --use-aapt2 -a ").append(RootShell.quote(launcher.aapt2));
         }
-        boolean withRoot = useRoot && rootAvailable();
+        boolean withRoot = useRoot && RootShell.available(new ToolchainInstaller.Cancellation() {
+            @Override public void check() throws InterruptedException {
+                if (mine != epoch || Thread.currentThread().isInterrupted()) throw new InterruptedException("命令已停止。");
+            }
+        });
         String result = exec(command.toString(), Math.min(600, Math.max(1, timeoutSec)), withRoot, temporaryCommand, mine, true);
         return useRoot && !withRoot ? "注意：root 不可用，本次按普通权限执行。\n" + result : result;
-    }
-
-    /** root 是否真的可用。探测失败即视为不可用，不再反复尝试。 */
-    private static boolean rootAvailable() {
-        Boolean cached = rootAvailable;
-        if (cached != null) {
-            return cached;
-        }
-        boolean ok = false;
-        try {
-            Process p = new ProcessBuilder("su", "-c", "id")
-                    .redirectErrorStream(true).start();
-            BufferedReader r = new BufferedReader(
-                    new InputStreamReader(p.getInputStream(), "UTF-8"));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = r.readLine()) != null) {
-                sb.append(line);
-            }
-            r.close();
-            boolean finished = p.waitFor(10, TimeUnit.SECONDS);
-            ok = finished && p.exitValue() == 0 && sb.indexOf("uid=0") >= 0;
-        } catch (Exception e) {
-            ok = false;
-        }
-        rootAvailable = ok;
-        return ok;
     }
 
     private String exec(String command, int timeoutSec, boolean withRoot, boolean temporaryCommand, final int mine) throws Exception {
@@ -251,12 +278,15 @@ public class ShellTool implements Tool {
         // cannot be reused before Java kills background writers. No command runs
         // until Java has registered the supervisor identity and acknowledged it.
         String supervisor = supervisorScript(userCommand, pidPrefix, donePrefix, token);
-        String full = "if command -v setsid >/dev/null 2>&1; then exec setsid sh -c "
-                + quoteScript(supervisor) + "; else exec sh -c "
+        String full = "if command -v setsid >/dev/null 2>&1; then setsid sh -c "
+                + quoteScript(supervisor) + "; else sh -c "
                 + quoteScript(supervisor) + "; fi";
-        String[] shell = withRoot
-                ? new String[]{"su", "-c", full}
-                : new String[]{"sh", "-c", full};
+        // Keep the direct Java child alive even if su/setsid forks its work.
+        // Close only this owner's stdout/stderr after launch; detached children
+        // retain theirs. Java's pipe reaper cannot discard their later output.
+        String owner = (withRoot ? "su -c " + quoteScript(full) : full)
+                + "; exec >/dev/null 2>&1; while :; do sleep 1; done";
+        String[] shell = new String[]{"sh", "-c", owner};
 
         ProcessBuilder pb = new ProcessBuilder(shell);
         pb.redirectErrorStream(true);
@@ -287,6 +317,9 @@ public class ShellTool implements Tool {
         final StringBuilder sb = new StringBuilder();
         final java.util.concurrent.atomic.AtomicInteger result =
                 new java.util.concurrent.atomic.AtomicInteger(Integer.MIN_VALUE);
+        final java.util.concurrent.atomic.AtomicBoolean acknowledged = new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean ended = new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicReference<String> protocolError = new java.util.concurrent.atomic.AtomicReference<String>();
         Thread reader = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -296,15 +329,20 @@ public class ShellTool implements Tool {
                     String line;
                     while ((line = in.readLine()) != null) {
                         if (line.startsWith(pidPrefix)) {
-                            if (tree.observeSupervisor(line.substring(pidPrefix.length())) && epoch == mine) {
+                            if (!acknowledged.get() && tree.observeSupervisor(line.substring(pidPrefix.length())) && epoch == mine) {
                                 process.getOutputStream().write((token + "\n").getBytes("UTF-8"));
                                 process.getOutputStream().flush();
-                            }
+                                acknowledged.set(true);
+                            } else if (epoch == mine) protocolError.compareAndSet(null, "执行进程身份握手失败，命令未获准执行。");
                             continue;
                         }
                         if (line.startsWith(donePrefix)) {
-                            try { result.set(Integer.parseInt(line.substring(donePrefix.length()))); }
-                            catch (NumberFormatException ignored) { }
+                            try {
+                                int code = Integer.parseInt(line.substring(donePrefix.length()));
+                                if (!acknowledged.get() || code < 0 || code > 255) throw new NumberFormatException();
+                                result.set(code);
+                            }
+                            catch (NumberFormatException invalid) { protocolError.compareAndSet(null, "执行完成状态无效，无法确认命令结果。"); }
                             break;
                         }
                         synchronized (sb) {
@@ -314,8 +352,10 @@ public class ShellTool implements Tool {
                         }
                     }
                     in.close();
-                } catch (Exception ignored) {
-                }
+                } catch (Exception failure) {
+                    if (epoch == mine && result.get() == Integer.MIN_VALUE)
+                        protocolError.compareAndSet(null, "执行输出通道中断，无法确认命令结果（" + failure.getClass().getSimpleName() + "）。");
+                } finally { ended.set(true); }
             }
         });
         reader.setDaemon(true);
@@ -323,11 +363,15 @@ public class ShellTool implements Tool {
 
         try {
             long deadline = System.nanoTime() + timeoutSec * 1000000000L;
+            long startupDeadline = System.nanoTime() + Math.min(timeoutSec, 5) * 1000000000L;
             while (epoch == mine) {
                 tree.sample();
                 if (result.get() != Integer.MIN_VALUE) break;
-                if (finished(process)) {
-                    break;
+                // su and setsid may detach: the launcher can exit 0 while the
+                // supervisor still owns the pipes. Only its protocol proves work.
+                if (protocolError.get() != null || ended.get()) break;
+                if (!acknowledged.get() && System.nanoTime() - startupDeadline >= 0) {
+                    protocolError.compareAndSet(null, "执行进程身份握手超时，命令未确认执行。"); break;
                 }
                 if (System.nanoTime() - deadline >= 0) {
                     kill(process);
@@ -339,13 +383,15 @@ public class ShellTool implements Tool {
                 kill(process);
                 return cleanupWarning() + "已停止。\n" + textOf(sb);
             }
-            int exit;
-            if (result.get() != Integer.MIN_VALUE) {
-                exit = result.get();
-                kill(process);
-            } else {
-                exit = process.exitValue();
+            if (result.get() == Integer.MIN_VALUE) {
+                kill(process); reader.join(400);
+                String error = protocolError.get();
+                if (error == null) error = acknowledged.get() ? "执行进程结束但未返回命令退出状态，无法确认命令结果。"
+                        : "执行进程未返回身份握手，命令未确认执行。";
+                return cleanupWarning() + "错误：" + error + "\n输出片段：\n" + textOf(sb);
             }
+            int exit = result.get();
+            kill(process);
             reader.join(400);
             String body = textOf(sb);
             if (body.length() == 0) {

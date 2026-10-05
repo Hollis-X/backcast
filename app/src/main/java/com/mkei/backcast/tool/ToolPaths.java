@@ -7,12 +7,25 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.LinkOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
 
 /** 文件工具共用的路径、整篇读写，以及应用读不到时改走 root。 */
 final class ToolPaths {
+
+    private static final ToolchainInstaller.Cancellation LIVE = new ToolchainInstaller.Cancellation() {
+        @Override public void check() throws Exception {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
+        }
+    };
 
     static final class Probe {
         final boolean exists;
@@ -50,8 +63,8 @@ final class ToolPaths {
 
         @Override
         public void close() throws IOException {
-            super.close();
-            process.destroy();
+            try { super.close(); }
+            finally { process.destroy(); }
         }
     }
 
@@ -106,6 +119,125 @@ final class ToolPaths {
             throw new IllegalArgumentException(failure.getMessage(), failure);
         }
         return file;
+    }
+
+    /** Root can see links hidden from the App; validate its real path against the same captured scope. */
+    static File resolve(String workDir, String path, TemporaryWorkspace temporary, boolean useRoot,
+            ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        File target;
+        try {
+            target = resolve(workDir, path, temporary);
+        } catch (IllegalArgumentException inaccessible) {
+            if (!useRoot) throw inaccessible;
+            target = lexicalAuthorized(workDir, path, temporary);
+        }
+        if (!useRoot || !RootShell.available(cancellation)) return target;
+        RootShell.Out out = RootShell.exec(rootCanonical(target), null, 8192, 15000, cancellation);
+        if (out.exit != 0) throw new IllegalArgumentException("无法用 root 确认路径：" + target.getPath());
+        String real = new String(out.stdout, "UTF-8");
+        if (real.endsWith("\n")) real = real.substring(0, real.length() - 1);
+        if (!new File(real).isAbsolute()) throw new IllegalArgumentException("无法确认 root 路径：" + target.getPath());
+        try {
+            return resolve(workDir, real, temporary);
+        } catch (IllegalArgumentException inaccessible) {
+            // Java's canonical lookup can fail on a directory readable only by
+            // root. The root command already returned readlink -f; validate that
+            // absolute result lexically against the captured roots and keep the
+            // same symlink boundary.
+            return lexicalAuthorized(workDir, real, temporary);
+        }
+    }
+
+    private static File lexicalAuthorized(String workDir, String path, TemporaryWorkspace temporary) {
+        if (path == null || path.length() == 0 || path.indexOf('\0') >= 0
+                || path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0)
+            throw new IllegalArgumentException("路径不合法。");
+        File target = new File(path);
+        if (!target.isAbsolute()) {
+            if (workDir == null || workDir.length() == 0) throw new IllegalArgumentException("路径必须是绝对路径。");
+            target = new File(workDir, path);
+        }
+        target = Paths.get(target.getAbsolutePath()).normalize().toFile();
+        if (temporary != null && temporary.isPrivateStorageLexical(target))
+            throw new IllegalArgumentException("App 私有临时存储只允许访问本轮登记目录，不能访问其他会话或登记文件。");
+        List<File> roots = temporary == null
+                ? new WorkspaceRoots(workDir, null).directories() : temporary.projectRoots(workDir).directories();
+        for (File root : roots) {
+            String base = root.getAbsolutePath(), value = target.getAbsolutePath();
+            if (value.equals(base) || value.startsWith(base.endsWith(File.separator) ? base : base + File.separator)) return target;
+        }
+        throw new IllegalArgumentException("路径超出工作目录：" + path + "。允许目录：" + roots + "。");
+    }
+
+    /** Resolve even a new file through the nearest existing ancestor, as seen by root. */
+    private static String rootCanonical(File file) {
+        return "p=" + RootShell.quote(file.getAbsolutePath()) + "; suffix=''; while [ ! -e \"$p\" ] && [ ! -L \"$p\" ]; do "
+                + "[ \"$p\" = / ] && exit 1; suffix=/\"${p##*/}\"\"$suffix\"; p=${p%/*}; "
+                + "[ -n \"$p\" ] || p=/; done; real=$(readlink -f \"$p\") || exit 1; "
+                + "[ -n \"$real\" ] || exit 1; printf '%s%s\\n' \"$real\" \"$suffix\"";
+    }
+
+    /** Recheck captured canonical paths immediately before a root operation. */
+    private static String rootPathGuard(File file) {
+        return "actual=$(" + rootCanonical(file) + ") || exit 1; [ \"$actual\" = "
+                + RootShell.quote(file.getAbsolutePath()) + " ] || exit 1; ";
+    }
+
+    static List<File> searchRoots(String workDir, TemporaryWorkspace temporary) {
+        if (temporary != null) return temporary.projectRoots(workDir).directories();
+        if (workDir == null || workDir.length() == 0) return Collections.emptyList();
+        return new WorkspaceRoots(workDir, null).directories();
+    }
+
+    static final class DirectoryEntry {
+        final File file;
+        final boolean directory;
+        final boolean rooted;
+        DirectoryEntry(File file, boolean directory, boolean rooted) {
+            this.file = file; this.directory = directory; this.rooted = rooted;
+        }
+    }
+
+    /** Immediate children only, with explicit types; never follow a directory symlink. */
+    static List<DirectoryEntry> listDirectory(File directory, boolean useRoot,
+            ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        if (!useRoot || !RootShell.available(cancellation)) {
+            try (DirectoryStream<Path> files = Files.newDirectoryStream(directory.toPath())) {
+                List<DirectoryEntry> entries = new ArrayList<DirectoryEntry>();
+                for (Path childPath : files) {
+                    cancellation.check();
+                    File child = childPath.toFile();
+                    BasicFileAttributes attrs = Files.readAttributes(childPath, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                    if (attrs.isSymbolicLink() || !attrs.isDirectory() && !attrs.isRegularFile()) continue;
+                    entries.add(new DirectoryEntry(child, attrs.isDirectory(), false));
+                    if (entries.size() > 20000) throw new IllegalArgumentException("单个目录文件数超过搜索上限。");
+                }
+                return entries;
+            } catch (IOException | SecurityException | java.nio.file.DirectoryIteratorException denied) {
+                throw new IllegalArgumentException("没有权限列出目录：" + directory.getPath(), denied);
+            }
+        }
+        String q = RootShell.quote(directory.getPath());
+        String command = rootPathGuard(directory) + "[ -d " + q + " ] && [ -r " + q + " ] && [ -x " + q + " ] || exit 1; "
+                + "for f in " + q + "/* " + q + "/.[!.]* " + q + "/..?*; do "
+                + "[ -L \"$f\" ] && continue; if [ -d \"$f\" ]; then printf 'D\\0%s\\0' \"$f\"; "
+                + "elif [ -f \"$f\" ]; then printf 'F\\0%s\\0' \"$f\"; fi; done";
+        RootShell.Out out = RootShell.exec(command, null, 2 * 1024 * 1024, 15000, cancellation);
+        if (out.exit != 0) throw new IllegalArgumentException("root 无法列出目录：" + directory.getPath());
+        String[] fields = new String(out.stdout, "UTF-8").split("\\u0000", -1);
+        List<DirectoryEntry> entries = new ArrayList<DirectoryEntry>();
+        for (int i = 0; i + 1 < fields.length; i += 2) {
+            if (!"D".equals(fields[i]) && !"F".equals(fields[i])) throw new IllegalArgumentException("root 目录结果不完整。");
+            File child = new File(fields[i + 1]);
+            if (!directory.getPath().equals(child.getParent())) throw new IllegalArgumentException("root 目录结果越界。");
+            entries.add(new DirectoryEntry(child, "D".equals(fields[i]), true));
+            if (entries.size() > 20000) throw new IllegalArgumentException("单个目录文件数超过搜索上限。");
+        }
+        if (fields.length % 2 == 0 || fields.length > 0 && !fields[fields.length - 1].isEmpty())
+            throw new IllegalArgumentException("root 目录结果不完整。");
+        return entries;
     }
 
     private static boolean inside(File root, File target) {
@@ -725,6 +857,14 @@ final class ToolPaths {
      * 开了 root 就再问一次，避免把没权限说成文件不在。
      */
     static Probe probe(File file, boolean useRoot) {
+        try { return probe(file, useRoot, LIVE); }
+        catch (Exception failure) { return Probe.denied(); }
+    }
+
+    static Probe probe(File file, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        // Android can expose a name while returning a misleading zero size to the App uid.
+        if (useRoot && RootShell.available(cancellation)) return rootProbe(file, cancellation);
         boolean direct = false;
         try {
             direct = file.exists();
@@ -741,9 +881,6 @@ final class ToolPaths {
                 // 看得到名字却读不了，下面改走 root。
             }
         }
-        if (useRoot && RootShell.available()) {
-            return rootProbe(file);
-        }
         if (!direct && storageHidden(file)) {
             return Probe.denied();
         }
@@ -751,30 +888,33 @@ final class ToolPaths {
     }
 
     static byte[] readBytes(File file, int max, boolean useRoot) throws Exception {
-        if (file.canRead()) {
-            try {
-                return readDirect(file, max);
-            } catch (Exception e) {
-                if (!useRoot || !RootShell.available()) {
-                    throw e;
-                }
-            }
-        } else if (!useRoot || !RootShell.available()) {
-            throw new IllegalArgumentException("没有权限读取：" + file.getAbsolutePath());
+        return readBytes(file, max, useRoot, LIVE);
+    }
+
+    static byte[] readBytes(File file, int max, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        try { return readDirect(file, max, cancellation); }
+        catch (IOException | SecurityException failure) {
+            if (!useRoot || !RootShell.available(cancellation)) throw failure;
         }
-        return RootShell.readAll("cat " + RootShell.quote(file.getAbsolutePath()), max);
+        return RootShell.readAll(rootPathGuard(file) + "cat " + RootShell.quote(file.getAbsolutePath()), max, cancellation);
     }
 
     static void writeBytes(File file, byte[] data, boolean useRoot) throws Exception {
+        writeBytes(file, data, useRoot, LIVE);
+    }
+
+    static void writeBytes(File file, byte[] data, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
         Exception directError = null;
         try {
-            writeDirect(file, data);
+            writeDirect(file, data, cancellation);
             return;
         } catch (Exception e) {
             directError = e;
         }
-        if (useRoot && RootShell.available()) {
-            writeRoot(file, data);
+        if (useRoot && RootShell.available(cancellation)) {
+            writeRoot(file, data, cancellation);
             return;
         }
         if (directError instanceof IllegalArgumentException) {
@@ -783,23 +923,16 @@ final class ToolPaths {
         throw new IllegalArgumentException("没有权限写入：" + file.getAbsolutePath());
     }
 
-    static boolean sniffNul(File file, boolean useRoot) {
-        try {
-            byte[] head = readHead(file, 4096, useRoot);
-            for (int i = 0; i < head.length; i++) {
-                if (head[i] == 0) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (Exception e) {
-            return false;
-        }
+    static boolean sniffNul(File file, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        byte[] head = readHead(file, 4096, useRoot, cancellation);
+        for (int i = 0; i < head.length; i++) if (head[i] == 0) return true;
+        return false;
     }
 
     /** 只取开头。文件更长也不算失败。 */
-    private static byte[] readHead(File file, int max, boolean useRoot) throws Exception {
-        if (file.canRead()) {
+    private static byte[] readHead(File file, int max, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        try {
             FileInputStream in = new FileInputStream(file);
             try {
                 byte[] buf = new byte[max];
@@ -816,41 +949,32 @@ final class ToolPaths {
             } finally {
                 in.close();
             }
-        }
-        if (!useRoot || !RootShell.available()) {
-            throw new IllegalArgumentException("没有权限读取：" + file.getAbsolutePath());
+        } catch (IOException | SecurityException failure) {
+            if (!useRoot || !RootShell.available(cancellation)) throw failure;
         }
         return RootShell.readAll(
-                "head -c " + max + " " + RootShell.quote(file.getAbsolutePath()), max);
+                rootPathGuard(file) + "head -c " + max + " " + RootShell.quote(file.getAbsolutePath()), max, cancellation);
     }
 
-    static boolean endsWithNewline(File file, boolean useRoot) {
-        if (file.canRead()) {
-            return endsDirect(file);
-        }
-        if (!useRoot || !RootShell.available()) {
-            return false;
-        }
+    static boolean endsWithNewline(File file, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
+        try { return endsDirect(file); }
+        catch (IOException | SecurityException failure) { if (!useRoot || !RootShell.available(cancellation)) throw failure; }
+        byte[] tail = RootShell.readAll(rootPathGuard(file) + "tail -c 1 " + RootShell.quote(file.getAbsolutePath()), 8, cancellation);
+        return tail.length > 0 && tail[tail.length - 1] == '\n';
+    }
+
+    static BufferedReader openText(File file, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
+        cancellation.check();
         try {
-            byte[] tail = RootShell.readAll(
-                    "tail -c 1 " + RootShell.quote(file.getAbsolutePath()), 8);
-            return tail.length > 0 && tail[tail.length - 1] == '\n';
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    static BufferedReader openText(File file, boolean useRoot) throws Exception {
-        if (file.canRead()) {
             return new BufferedReader(new InputStreamReader(new FileInputStream(file), "UTF-8"));
+        } catch (IOException | SecurityException failure) {
+            if (!useRoot || !RootShell.available(cancellation)) throw failure;
         }
-        if (!useRoot || !RootShell.available()) {
-            throw new IllegalArgumentException("没有权限读取：" + file.getAbsolutePath());
-        }
-        return new ProcessReader(RootShell.start("cat " + RootShell.quote(file.getAbsolutePath())));
+        return new ProcessReader(RootShell.start(rootPathGuard(file) + "cat " + RootShell.quote(file.getAbsolutePath()), cancellation));
     }
 
-    private static byte[] readDirect(File file, int max) throws Exception {
+    private static byte[] readDirect(File file, int max, ToolchainInstaller.Cancellation cancellation) throws Exception {
         FileInputStream in = new FileInputStream(file);
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -858,6 +982,7 @@ final class ToolPaths {
             int total = 0;
             int n;
             while ((n = in.read(buf)) >= 0) {
+                cancellation.check();
                 if (n == 0) {
                     continue;
                 }
@@ -873,15 +998,18 @@ final class ToolPaths {
         }
     }
 
-    private static void writeDirect(File file, byte[] data) throws Exception {
+    private static void writeDirect(File file, byte[] data, ToolchainInstaller.Cancellation cancellation) throws Exception {
         File parent = file.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IllegalArgumentException("无法创建目录：" + parent.getAbsolutePath());
         }
         FileOutputStream out = new FileOutputStream(file);
         try {
-            if (data != null && data.length > 0) {
-                out.write(data);
+            if (data != null) {
+                for (int offset = 0; offset < data.length; offset += 8192) {
+                    cancellation.check();
+                    out.write(data, offset, Math.min(8192, data.length - offset));
+                }
             }
             out.flush();
         } finally {
@@ -889,20 +1017,20 @@ final class ToolPaths {
         }
     }
 
-    private static void writeRoot(File file, byte[] data) throws Exception {
+    private static void writeRoot(File file, byte[] data, ToolchainInstaller.Cancellation cancellation) throws Exception {
         String path = file.getAbsolutePath();
         File parent = file.getParentFile();
         String tmp = parent == null
                 ? path + ".backcast-tmp"
                 : new File(parent, ".backcast-" + System.nanoTime() + ".tmp").getAbsolutePath();
-        String cmd = "cat > " + RootShell.quote(tmp) + " && mv " + RootShell.quote(tmp) + " "
+        String cmd = rootPathGuard(file) + "cat > " + RootShell.quote(tmp) + " && " + rootPathGuard(file) + "mv " + RootShell.quote(tmp) + " "
                 + RootShell.quote(path);
         if (parent != null) {
-            cmd = "mkdir -p " + RootShell.quote(parent.getAbsolutePath()) + " && " + cmd;
+            cmd = rootPathGuard(file) + "mkdir -p " + RootShell.quote(parent.getAbsolutePath()) + " && " + cmd;
         }
         boolean moved = false;
         try {
-            RootShell.Out out = RootShell.exec(cmd, data == null ? new byte[0] : data, 2048, 60000);
+            RootShell.Out out = RootShell.exec(cmd, data == null ? new byte[0] : data, 2048, 60000, cancellation);
             if (out.exit != 0) {
                 throw new IllegalArgumentException(trimErr(out.stderr, "没有权限写入：" + path));
             }
@@ -915,44 +1043,23 @@ final class ToolPaths {
         }
     }
 
-    private static Probe rootProbe(File file) {
+    private static Probe rootProbe(File file, ToolchainInstaller.Cancellation cancellation) throws Exception {
         String q = RootShell.quote(file.getAbsolutePath());
-        String cmd = "if [ -d " + q + " ]; then echo DIR; elif [ -f " + q
-                + " ]; then echo FILE; wc -c < " + q + "; elif [ -e " + q
+        String cmd = rootPathGuard(file) + "if [ -d " + q + " ]; then echo DIR; elif [ -f " + q
+                + " ]; then echo FILE; wc -c < " + q + " || exit 1; elif [ -e " + q
                 + " ]; then echo OTHER; else echo MISSING; fi";
-        try {
-            RootShell.Out out = RootShell.exec(cmd, null, 200, 15000);
-            String text = new String(out.stdout, "UTF-8").trim();
-            if (text.startsWith("DIR")) {
-                return Probe.of(true, 0);
-            }
-            if (text.startsWith("FILE")) {
-                long len = 0;
-                int nl = text.indexOf('\n');
-                String num = nl >= 0 ? text.substring(nl + 1).trim() : "";
-                if (num.length() > 0) {
-                    int cut = 0;
-                    while (cut < num.length() && num.charAt(cut) != ' ' && num.charAt(cut) != '\t') {
-                        cut++;
-                    }
-                    try {
-                        len = Long.parseLong(num.substring(0, cut));
-                    } catch (NumberFormatException ignored) {
-                        len = 0;
-                    }
-                }
-                return Probe.of(false, len);
-            }
-            if (text.startsWith("OTHER")) {
-                return Probe.of(false, 0);
-            }
-            if (out.exit != 0 && text.length() == 0) {
-                return Probe.denied();
-            }
-            return Probe.missing();
-        } catch (Exception e) {
-            return Probe.denied();
+        RootShell.Out out = RootShell.exec(cmd, null, 200, 15000, cancellation);
+        if (out.exit != 0) return Probe.denied();
+        String text = new String(out.stdout, "UTF-8").trim();
+        if (text.equals("DIR")) return Probe.of(true, 0);
+        if (text.startsWith("FILE\n")) {
+            String num = text.substring(5).trim();
+            try {
+                long length = Long.parseLong(num);
+                return length >= 0 ? Probe.of(false, length) : Probe.denied();
+            } catch (NumberFormatException invalid) { return Probe.denied(); }
         }
+        return text.equals("MISSING") ? Probe.missing() : Probe.denied();
     }
 
     private static boolean storageHidden(File file) {
@@ -972,25 +1079,14 @@ final class ToolPaths {
         }
     }
 
-    private static boolean endsDirect(File file) {
-        long len = file.length();
-        if (len <= 0) {
-            return false;
-        }
+    private static boolean endsDirect(File file) throws IOException {
         FileInputStream in = null;
         try {
             in = new FileInputStream(file);
-            long skip = len - 1;
-            while (skip > 0) {
-                long n = in.skip(skip);
-                if (n <= 0) {
-                    break;
-                }
-                skip -= n;
-            }
+            long len = in.getChannel().size();
+            if (len == 0) return false;
+            in.getChannel().position(len - 1);
             return in.read() == '\n';
-        } catch (Exception e) {
-            return false;
         } finally {
             if (in != null) {
                 try {

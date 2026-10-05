@@ -71,7 +71,12 @@ public class WriteTool implements Tool {
 
     @Override
     public String run(JSONObject args) throws Exception {
-        int mine = epoch;
+        final int mine = epoch;
+        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
+            @Override public void check() throws Exception {
+                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
+            }
+        };
         String path = args.optString("path", "");
         if (path.length() == 0) {
             return "错误：path 为空。";
@@ -90,7 +95,7 @@ public class WriteTool implements Tool {
                 if (temporary == null) return "错误：当前没有临时材料管理器。";
                 file = temporary.resolveTemporary(path);
             } else {
-                file = ToolPaths.resolve(workDir, path, temporary);
+                file = ToolPaths.resolve(workDir, path, temporary, useRoot, cancellation);
                 if (temporary != null && temporary.contains(file)) {
                     return "错误：专用临时目录只能存放 purpose=temporary 的材料。";
                 }
@@ -100,7 +105,7 @@ public class WriteTool implements Tool {
                 }
             }
         } catch (Exception error) { return "错误：" + error.getMessage(); }
-        ToolPaths.Probe probe = ToolPaths.probe(file, useRoot);
+        ToolPaths.Probe probe = ToolPaths.probe(file, useRoot, cancellation);
         if (probe.directory) {
             return "错误：这是目录：" + file.getAbsolutePath();
         }
@@ -109,7 +114,9 @@ public class WriteTool implements Tool {
                 return "已停止。";
             }
             try {
-                ToolPaths.writeBytes(file, content.getBytes("UTF-8"), useRoot);
+                if (!file.equals(ToolPaths.resolve(workDir, file.getPath(), temporary, useRoot, cancellation)))
+                    return "错误：文件路径在写入前发生变化。";
+                ToolPaths.writeBytes(file, content.getBytes("UTF-8"), useRoot, cancellation);
             } catch (IllegalArgumentException e) {
                 return "错误：" + e.getMessage();
             }

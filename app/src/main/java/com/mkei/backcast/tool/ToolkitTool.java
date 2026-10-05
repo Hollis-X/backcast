@@ -110,7 +110,14 @@ public final class ToolkitTool implements Tool {
                 } } finally { use.close(); }
                 checkEpoch(mine);
                 JSONObject response = new JSONObject().put("tool", id).put("output", result).put("success", succeeded(result));
-                if (!succeeded(result)) describeFailure(id, result, response);
+                if (!succeeded(result)) {
+                    response.put("state", "error").put("error", "工具执行未成功。");
+                    describeFailure(id, result, response);
+                } else if ("apktool".equals(id)) {
+                    String artifactError = shell.verifyApktoolOutput(arguments, shellMine);
+                    if (artifactError.length() > 0) response.put("state", "error").put("error", artifactError)
+                            .put("failure_kind", "output_artifact_missing").put("success", false);
+                }
                 return response.toString();
             }
             throw new IllegalArgumentException("未知 toolkit action：" + action);
@@ -281,7 +288,10 @@ public final class ToolkitTool implements Tool {
             phase = failed.length() > 0 ? failed : active;
             if (evidence.length() > 0) result.put("frida_phase", phase).put("frida_evidence", evidence);
         }
-        if ("objection".equals(id) && output.contains("Unable to find target application")) {
+        if (output.contains("身份握手") || output.contains("命令退出状态") || output.contains("输出通道中断") || output.contains("执行完成状态无效")) {
+            result.put("failure_kind", "execution_channel_failed").put("hint", "命令执行通道没有返回可验证的实际进程或完成状态。"
+                    + "不能以启动器 exit=0、无输出或已安装认定执行成功。");
+        } else if ("objection".equals(id) && output.contains("Unable to find target application")) {
             result.put("failure_kind", "target_not_running").put("hint", "目标应用没有可附加的运行进程。先确认包名和运行状态，"
                     + "再指定实际 PID 或运行中的包名；版本探测成功不代表目标正在运行。");
         } else if ("objection".equals(id) && ("attach".equals(phase)

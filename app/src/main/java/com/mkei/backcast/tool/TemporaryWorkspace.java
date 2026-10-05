@@ -183,6 +183,13 @@ public final class TemporaryWorkspace {
         return path.equals(base) || path.startsWith(base + File.separator);
     }
 
+    /** Lexical fallback used only after root has confirmed the real path. */
+    synchronized boolean isPrivateStorageLexical(File file) {
+        if (stateDir == null || file == null) return false;
+        String base = stateDir.getPath(), path = file.getAbsolutePath();
+        return path.equals(base) || path.startsWith(base + File.separator);
+    }
+
     public synchronized boolean contains(File file) throws Exception {
         String target = file.getCanonicalPath();
         for (Allocation allocation : allocations) {

@@ -132,6 +132,38 @@ public final class ToolkitOperationRegressionTest {
         }
     }
 
+    private static void apktoolDecodeRequiresItsActualManifestAndMetadataWithoutRequiringSmali() throws Exception {
+        File executable = new File(root, "apktool");
+        ToolchainFixtures.configure(store, "apktool", executable.getPath(), null);
+        for (String body : new String[]{"exit 0", "mkdir -p \"$4\"; printf metadata > \"$4/apktool.yml\"",
+                "mkdir -p \"$4\"; printf metadata > \"$4/apktool.yml\"; printf manifest > \"$4/AndroidManifest.xml\""}) {
+            Files.write(executable.toPath(), ("#!/bin/sh\n" + body + "\n").getBytes("UTF-8")); executable.setExecutable(true);
+            String output = "decode-" + System.nanoTime();
+            JSONObject result = run("apktool", "d", input.getPath(), "-o", output);
+            boolean complete = body.contains("AndroidManifest.xml");
+            check(result.getBoolean("success") == complete && (complete || "error".equals(result.optString("state"))
+                    && "output_artifact_missing".equals(result.optString("failure_kind")) && result.getString("error").length() > 0),
+                    "Exit zero bypassed decode artifact checks or no-smali decoding was rejected: " + result);
+        }
+        ToolchainFixtures.clear(store, "apktool");
+    }
+
+    private static void apktoolBuildRequiresANonemptyZipHeader() throws Exception {
+        File executable = new File(root, "apktool"), archive = new File(project, "fixture.apk");
+        try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(archive))) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("AndroidManifest.xml")); zip.write("fixture".getBytes("UTF-8")); zip.closeEntry();
+        }
+        ToolchainFixtures.configure(store, "apktool", executable.getPath(), null);
+        String[] bodies = {"touch \"$4\"", "printf 'plain file pretending to be a built apk' > \"$4\"", "cp " + RootShell.quote(archive.getPath()) + " \"$4\""};
+        for (int i = 0; i < bodies.length; i++) {
+            Files.write(executable.toPath(), ("#!/bin/sh\n" + bodies[i] + "\n").getBytes("UTF-8")); executable.setExecutable(true);
+            JSONObject result = run("apktool", "b", project.getPath(), "-o", "build-" + i + ".apk");
+            check(result.getBoolean("success") == (i == 2) && (i == 2 || "output_artifact_missing".equals(result.optString("failure_kind"))),
+                    "Empty/non-ZIP build became successful or real ZIP was rejected: " + result);
+        }
+        ToolchainFixtures.clear(store, "apktool");
+    }
+
     private static void remove(File file) throws Exception { File[] children = file.listFiles(); if (children != null) for (File child : children) remove(child); Files.deleteIfExists(file.toPath()); }
     public static void main(String[] args) throws Exception {
         root = Files.createTempDirectory("backcast-toolkit-operation-tests-").toFile(); project = new File(root, "project"); project.mkdir();
@@ -143,7 +175,8 @@ public final class ToolkitOperationRegressionTest {
             for (String test : new String[]{"rabinInfoImportsAndEntrypointsAreDistinctFromRadareScripts", "radareAnalysisAndFiltersAreAllowedWhileExecutionAndWritingAreRejected",
                     "radareRequestsExitWithoutWaitingForConsoleInput", "invalidAddr2lineCallsReturnCorrectExamplesBeforeStartingAProgram", "correctAddr2lineAddressesRunTheActualGnuProgram",
                     "objcopyDiscardSymbolsWritesAnExplicitTemporaryOutput", "archiveListingReadsProjectArchivesAndExplainsSharedObjectMisuse", "dynamicFailuresKeepRealOutputAndDoNotImplyWorkingJavaHooks",
-                    "toolCatalogOffersConcreteCorrectParameterShapes"}) {
+                    "toolCatalogOffersConcreteCorrectParameterShapes", "apktoolDecodeRequiresItsActualManifestAndMetadataWithoutRequiringSmali",
+                    "apktoolBuildRequiresANonemptyZipHeader"}) {
                 ToolkitOperationRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); passed++;
             }
             System.out.println(passed + " toolkit operation tests passed");

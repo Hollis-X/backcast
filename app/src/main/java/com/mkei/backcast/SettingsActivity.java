@@ -8,6 +8,9 @@ import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.mcp.McpServer;
+import com.mkei.backcast.mcp.McpStore;
+import java.io.File;
 
 /** Settings navigation; each editor saves only its own configuration. */
 public final class SettingsActivity extends AppCompatActivity {
@@ -24,6 +27,7 @@ public final class SettingsActivity extends AppCompatActivity {
         entry(R.id.settings_preferences_row, R.id.settings_preferences_icon, R.id.settings_preferences_arrow,
                 Icons.SETTINGS, UserPreferencesActivity.class);
         entry(R.id.settings_tools_row, R.id.settings_tools_icon, R.id.settings_tools_arrow, Icons.TERMINAL, ToolConfigActivity.class);
+        entry(R.id.settings_mcp_row, R.id.settings_mcp_icon, R.id.settings_mcp_arrow, Icons.TERMINAL, McpConfigActivity.class);
     }
 
     @Override protected void onResume() {
@@ -43,6 +47,14 @@ public final class SettingsActivity extends AppCompatActivity {
         ((TextView) findViewById(R.id.settings_tools_summary)).setText(
                 getString(R.string.settings_tools_summary, getString(access),
                         getString(settings.useRoot() ? R.string.settings_root_on : R.string.settings_root_off)));
+        int enabled = 0;
+        try {
+            for (McpServer server : new McpStore(new File(getFilesDir(), "mcp")).servers()) if (server.enabled) enabled++;
+        } catch (IllegalStateException storage) {
+            ((TextView) findViewById(R.id.settings_mcp_summary)).setText(R.string.settings_mcp_storage_error);
+            return;
+        }
+        ((TextView) findViewById(R.id.settings_mcp_summary)).setText(getString(R.string.settings_mcp_summary, enabled));
     }
 
     private void entry(int rowId, int iconId, int arrowId, int icon, final Class<?> destination) {

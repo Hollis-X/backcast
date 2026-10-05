@@ -11,7 +11,16 @@ import java.util.Map;
 /** 工具注册表：持有全部工具，并产出请求体里的 tools 字段。 */
 public class ToolRegistry {
 
+    /** Dynamic sources expose cached schemas only; UI reads must never connect to a server. */
+    public interface Source {
+        List<Tool> tools();
+        void abort();
+    }
+
     private final Map<String, Tool> tools = new LinkedHashMap<String, Tool>();
+    private final List<Source> sources = new ArrayList<Source>();
+
+    public void addSource(Source source) { sources.add(source); }
 
     public void register(Tool tool) {
         if (tool != null) {
@@ -20,15 +29,21 @@ public class ToolRegistry {
     }
 
     public Tool get(String name) {
-        return tools.get(name);
+        Tool local = tools.get(name);
+        if (local != null) return local;
+        for (Source source : sources) for (Tool tool : source.tools())
+            if (name.equals(tool.name())) return tool;
+        return null;
     }
 
     public List<Tool> all() {
-        return new ArrayList<Tool>(tools.values());
+        List<Tool> result = new ArrayList<Tool>(tools.values());
+        for (Source source : sources) result.addAll(source.tools());
+        return result;
     }
 
     public boolean isEmpty() {
-        return tools.isEmpty();
+        return all().isEmpty();
     }
 
     public void beginTurn() {
@@ -54,6 +69,10 @@ public class ToolRegistry {
                 errors.append(error);
             }
         }
+        // Remote sessions belong to this turn, including a registry pinned before retarget.
+        if (finishing) for (Source source : sources) {
+            try { source.abort(); } catch (Exception ignored) { }
+        }
         return errors.length() == 0 ? null : errors.toString();
     }
 
@@ -65,11 +84,14 @@ public class ToolRegistry {
             } catch (Exception ignored) {
             }
         }
+        for (Source source : sources) {
+            try { source.abort(); } catch (Exception ignored) { }
+        }
     }
 
     public JSONArray toSchema() {
         JSONArray arr = new JSONArray();
-        for (Tool t : tools.values()) {
+        for (Tool t : all()) {
             try {
                 JSONObject fn = new JSONObject();
                 fn.put("name", t.name());

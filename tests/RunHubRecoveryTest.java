@@ -144,10 +144,12 @@ public final class RunHubRecoveryTest {
                 + "public java.io.File directory;public int binds,removes;public FileSubAgentStore(java.io.File d){directory=d;}"
                 + "public void bindDirectory(java.io.File d){directory=d;binds++;}public void remove(){removes++;} }");
         add(files, "com.mkei.backcast.agent.ToolRegistry", "public class ToolRegistry { public java.util.List<String> names=new java.util.ArrayList<String>();public java.util.List<Object> tools=new java.util.ArrayList<Object>(); public void register(Object tool) { names.add(tool.getClass().getSimpleName());tools.add(tool); } }");
-        for (String name : Arrays.asList("EditTool", "GoalTool", "GetGoalTool", "ReadTool", "ShellTool", "WriteTool", "TemporaryTool", "ToolkitTool")) {
+        for (String name : Arrays.asList("EditTool", "GoalTool", "GetGoalTool", "ReadTool", "FindFilesTool", "ShellTool", "WriteTool", "TemporaryTool", "ToolkitTool")) {
             add(files, "com.mkei.backcast.tool." + name, "public class " + name + " {public Object[] args;public int aborts; public " + name + "(Object... args) {this.args=args;}public void abort(){aborts++;} }");
         }
         add(files, "com.mkei.backcast.tool.SubAgentTools", "public class SubAgentTools {public static void register(com.mkei.backcast.agent.ToolRegistry r,com.mkei.backcast.agent.SubAgentManager m,String owner){r.register(new Coordination(m,owner));}public static class Coordination{public Object manager;public String owner;Coordination(Object m,String o){manager=m;owner=o;}} }");
+        add(files, "com.mkei.backcast.mcp.McpStore", "public class McpStore{public java.io.File directory;public McpStore(java.io.File directory){this.directory=directory;}}");
+        add(files, "com.mkei.backcast.mcp.McpTools", "public class McpTools{public static void register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store){registry.register(new McpTools());}}");
         add(files, "com.mkei.backcast.tool.EmbeddedToolchain", "public class EmbeddedToolchain {public interface Assets {java.io.InputStream open(String name) throws Exception;}}");
         add(files, "com.mkei.backcast.tool.ToolchainStore", "public class ToolchainStore {public java.io.File directory;public EmbeddedToolchain.Assets assets;public String abi;public int sdk;public ToolchainStore(java.io.File d,EmbeddedToolchain.Assets a,String b,int s){directory=d;assets=a;abi=b;sdk=s;}}");
         add(files, "com.mkei.backcast.tool.TemporaryWorkspace", "public class TemporaryWorkspace {public Object[] args;public long sessionId;public String directory;public boolean root;"
@@ -276,7 +278,7 @@ public final class RunHubRecoveryTest {
         tools.setAccessible(true);
         Object registry = tools.invoke(hub, loop);
         Object names = registry.getClass().getField("names").get(registry);
-        check(names.equals(Arrays.asList("ReadTool", "ShellTool", "EditTool", "WriteTool", "TemporaryTool", "ToolkitTool", "GoalTool", "GetGoalTool", "Coordination")),
+        check(names.equals(Arrays.asList("ReadTool", "FindFilesTool", "ShellTool", "EditTool", "WriteTool", "TemporaryTool", "ToolkitTool", "McpTools", "GoalTool", "GetGoalTool", "Coordination")),
                 "registry contains a removed tool or is missing a current tool");
     }
 
@@ -450,7 +452,8 @@ public final class RunHubRecoveryTest {
         Object registry=field(child,"registry");
         @SuppressWarnings("unchecked") List<String> names=(List<String>)field(registry,"names");
         check(!names.contains("GoalTool") && !names.contains("GetGoalTool") && names.contains("Coordination")
-                && names.contains("ToolkitTool"),"Child tools exposed parent goal controls or lost coordination/toolkit");
+                && names.contains("ToolkitTool") && names.contains("FindFilesTool") && names.contains("McpTools"),
+                "Child tools exposed parent goal controls or lost coordination/toolkit/search/MCP");
         @SuppressWarnings("unchecked") List<Object> tools=(List<Object>)field(registry,"tools");
         Object coordination=tools.get(tools.size()-1);
         check(field(coordination,"manager")==manager && "child_fixture".equals(field(coordination,"owner")),

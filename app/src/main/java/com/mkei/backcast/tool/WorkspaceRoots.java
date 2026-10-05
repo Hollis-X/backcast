@@ -60,4 +60,6 @@ final class WorkspaceRoots {
     }
 
     boolean isRoot(File file) throws IOException { return roots.contains(file.getCanonicalFile()); }
+
+    List<File> directories() { return roots; }
 }

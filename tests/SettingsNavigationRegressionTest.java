@@ -56,24 +56,26 @@ public final class SettingsNavigationRegressionTest {
                 }
             }
         }
-        String fixture = "import java.util.*; class Host { protected void onCreate(SettingsActivity.Bundle b){} protected void onResume(){} }"
+        String fixture = "import java.util.*; import java.io.File; class Host { protected void onCreate(SettingsActivity.Bundle b){} protected void onResume(){} }"
                 + "public class SettingsActivity extends Host {"
                 + "static class Bundle{} static class View{interface OnClickListener{void onClick(View v);}OnClickListener click;"
                 + "void setOnClickListener(OnClickListener c){click=c;}void click(){click.onClick(this);}}"
-                + "static class TextView extends View{String value;void setText(String s){value=s;}}"
+                + "static class TextView extends View{String value;void setText(String s){value=s;}void setText(int id){value=\"res\"+id;}}"
                 + "static class ImageView extends View{void setImageDrawable(Object d){}}"
                 + "static class Toolbar extends View{OnClickListener back;void setNavigationIcon(Object d){}"
                 + "void setNavigationOnClickListener(OnClickListener l){back=l;}}"
                 + "static class Intent{Class<?> destination;Intent(SettingsActivity a,Class<?> c){destination=c;}}"
-                + "static class AiConfigActivity{}static class UserPreferencesActivity{}static class ToolConfigActivity{}"
+                + "static class AiConfigActivity{}static class UserPreferencesActivity{}static class ToolConfigActivity{}static class McpConfigActivity{}"
+                + "static class McpServer{boolean enabled;}static class McpStore{McpStore(File dir){}List<McpServer> servers(){McpServer s=new McpServer();s.enabled=true;return Arrays.asList(s,new McpServer());}}"
                 + "static class Icons{static final int BACK=1,CHAT=2,SETTINGS=3,TERMINAL=4,CHEVRON_RIGHT=5;"
                 + "static Object tinted(SettingsActivity a,int r,int c,int s){return r;}}"
                 + "static class R{static class layout{static final int activity_settings=1;}static class array{static final int output_language_labels=1;}"
                 + "static class id{static final int toolbar=1,settings_ai_row=2,settings_ai_icon=3,settings_ai_arrow=4,"
                 + "settings_preferences_row=5,settings_preferences_icon=6,settings_preferences_arrow=7,settings_tools_row=8,"
-                + "settings_tools_icon=9,settings_tools_arrow=10,settings_ai_summary=11,settings_preferences_summary=12,settings_tools_summary=13;}"
+                + "settings_tools_icon=9,settings_tools_arrow=10,settings_ai_summary=11,settings_preferences_summary=12,settings_tools_summary=13,"
+                + "settings_mcp_row=14,settings_mcp_icon=15,settings_mcp_arrow=16,settings_mcp_summary=17;}"
                 + "static class string{static final int status_no_model=1,settings_preferences_summary=2,access_full=3,access_guarded=4,"
-                + "access_strict=5,settings_tools_summary=6,settings_root_on=7,settings_root_off=8;}}"
+                + "access_strict=5,settings_tools_summary=6,settings_root_on=7,settings_root_off=8,settings_mcp_summary=9,settings_mcp_storage_error=10;}}"
                 + "static class Resources{String[] getStringArray(int id){return new String[]{\"zh\",\"tw\",\"en\",\"ja\",\"ko\",\"es\",\"fr\",\"de\"};}"
                 + "Metrics getDisplayMetrics(){return new Metrics();}}static class Metrics{float density=2;}"
                 + "static class Settings{static final String ACCESS_FULL=\"full\",ACCESS_GUARDED=\"guarded\";static String model=\"\",language=\"zh-CN\",effort=\"max\",access=\"full\";"
@@ -81,7 +83,8 @@ public final class SettingsNavigationRegressionTest {
                 + "String reasoningEffort(){return effort;}String accessLevel(){return access;}boolean useRoot(){return root;}}"
                 + "Map<Integer,View> views=new HashMap<Integer,View>();List<Class<?>> opened=new ArrayList<Class<?>>();int finishes;"
                 + "SettingsActivity(){views.put(1,new Toolbar());for(int i=2;i<=10;i++)views.put(i,(i==2||i==5||i==8)?new View():new ImageView());"
-                + "for(int i=11;i<=13;i++)views.put(i,new TextView());}"
+                + "for(int i=11;i<=13;i++)views.put(i,new TextView());views.put(14,new View());views.put(15,new ImageView());views.put(16,new ImageView());views.put(17,new TextView());}"
+                + "File getFilesDir(){return new File(\"private\");}"
                 + "View findViewById(int id){return views.get(id);}void setContentView(int id){}void setSupportActionBar(Toolbar t){}"
                 + "Resources getResources(){return new Resources();}void startActivity(Intent i){opened.add(i.destination);}void finish(){finishes++;}"
                 + "String getString(int id,Object...args){return id+Arrays.toString(args);}void create(){onCreate(new Bundle());}"
@@ -100,12 +103,13 @@ public final class SettingsNavigationRegressionTest {
             java.lang.reflect.Constructor<?> constructor = type.getDeclaredConstructor(); constructor.setAccessible(true);
             Object activity = constructor.newInstance(); call(activity, "create");
             @SuppressWarnings("unchecked") Map<Integer, Object> views = (Map<Integer, Object>) field(activity, "views");
-            for (int id : new int[]{2, 5, 8}) call(views.get(id), "click");
+            for (int id : new int[]{2, 5, 8, 14}) call(views.get(id), "click");
             @SuppressWarnings("unchecked") List<Class<?>> opened = (List<Class<?>>) field(activity, "opened");
-            check(opened.size() == 3 && opened.get(0).getSimpleName().equals("AiConfigActivity")
+            check(opened.size() == 4 && opened.get(0).getSimpleName().equals("AiConfigActivity")
                     && opened.get(1).getSimpleName().equals("UserPreferencesActivity")
-                    && opened.get(2).getSimpleName().equals("ToolConfigActivity"), "Settings rows did not open separate editor pages");
-            System.out.println("PASS settingsRowsOpenThreeIndependentEditors");
+                    && opened.get(2).getSimpleName().equals("ToolConfigActivity")
+                    && opened.get(3).getSimpleName().equals("McpConfigActivity"), "Settings rows did not open separate editor pages");
+            System.out.println("PASS settingsRowsOpenFourIndependentEditors");
             call(activity, "onResume"); check(field(views.get(11), "value").equals("1[]"), "Missing model state was not displayed");
             Class<?> settings = loader.loadClass("SettingsActivity$Settings");
             for (String[] change : new String[][]{{"model", "chosen-model"}, {"language", "en"}, {"effort", "ultra"}, {"access", "strict"}}) {
@@ -114,7 +118,8 @@ public final class SettingsNavigationRegressionTest {
             Field rootField = settings.getDeclaredField("root"); rootField.setAccessible(true); rootField.set(null, true);
             call(activity, "onResume");
             check(field(views.get(11), "value").equals("chosen-model") && field(views.get(12), "value").equals("2[en, ultra]")
-                    && field(views.get(13), "value").equals("6[5[], 7[]]"), "Returning from an editor kept stale settings summaries");
+                    && field(views.get(13), "value").equals("6[5[], 7[]]")
+                    && field(views.get(17), "value").equals("9[1]"), "Returning from an editor kept stale settings summaries");
             System.out.println("PASS returningFromEditorsRefreshesCurrentConfiguration");
             Object toolbar = views.get(1), back = field(toolbar, "back");
             Class<?> click = loader.loadClass("SettingsActivity$View$OnClickListener"), view = loader.loadClass("SettingsActivity$View");
@@ -131,9 +136,9 @@ public final class SettingsNavigationRegressionTest {
                             && node.getAttributeNS(ANDROID, "layout_height").equals("wrap_content"), "Settings row cannot be focused or grow for large text");
                 }
             }
-            check(rows == 3, "Home categories missing");
+            check(rows == 4, "Home categories missing");
             Element manifest = xml(root.resolve("app/src/main/AndroidManifest.xml"));
-            for (String name : new String[]{"AiConfigActivity", "UserPreferencesActivity", "ToolConfigActivity"}) {
+            for (String name : new String[]{"AiConfigActivity", "UserPreferencesActivity", "ToolConfigActivity", "McpConfigActivity"}) {
                 boolean registered = false; NodeList activities = manifest.getElementsByTagName("activity");
                 for (int i = 0; i < activities.getLength(); i++) {
                     Element declared = (Element) activities.item(i);

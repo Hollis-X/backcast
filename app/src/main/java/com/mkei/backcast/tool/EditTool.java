@@ -35,6 +35,7 @@ public class EditTool implements Tool {
     @Override
     public String description() {
         return "按原文替换项目文件或本轮 temporary 登记的 App 私有临时文件（使用返回的绝对路径）。其他目录会被拒绝。edits 是数组，每项有 oldText 和 newText。"
+                + "不知道具体文件路径或用户省略扩展名时先用 find_files，再传候选的绝对路径；edit 不会根据近似名字自行换文件。"
                 + "每一处都对着调用前的原文匹配，不是对着前一处替换之后的文本。"
                 + "oldText 不能为空，必须唯一，且各处互不重叠。对不上、不唯一、重叠、或替换后没有变化，都不会写盘。"
                 + "同一文件里分开的几处修改放进同一次 edits，不要连着调用多次。"
@@ -92,7 +93,12 @@ public class EditTool implements Tool {
 
     @Override
     public String run(JSONObject args) throws Exception {
-        int mine = epoch;
+        final int mine = epoch;
+        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
+            @Override public void check() throws Exception {
+                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
+            }
+        };
         String path = args.optString("path", "");
         if (path.length() == 0) {
             return "错误：path 为空。";
@@ -120,16 +126,20 @@ public class EditTool implements Tool {
 
         File file;
         try {
-            file = ToolPaths.resolve(workDir, path, temporary);
+            file = ToolPaths.resolve(workDir, path, temporary, useRoot, cancellation);
             if (temporary != null && temporary.isOwnershipMarker(file)) {
                 return "错误：不能修改临时目录所有权标记。";
             }
         }
         catch (Exception error) { return "错误：" + error.getMessage(); }
-        ToolPaths.Probe probe = ToolPaths.probe(file, useRoot);
+        ToolPaths.Probe probe = ToolPaths.probe(file, useRoot, cancellation);
         if (!probe.exists) {
             if (probe.denied) {
                 return "错误：没有权限读取：" + file.getAbsolutePath();
+            }
+            if (path.indexOf('/') < 0 && !".".equals(path) && !"..".equals(path)) {
+                FindFilesTool.Search search = new FindFilesTool(workDir, useRoot, temporary).search(path, "", 8, 16, cancellation);
+                return "错误：不存在：" + file.getAbsolutePath() + "。先用 find_files 选择正确文件，再传绝对路径；不会自动改其他文件。\n" + search.json();
             }
             return "错误：不存在：" + file.getAbsolutePath();
         }
@@ -142,7 +152,7 @@ public class EditTool implements Tool {
             }
             byte[] previous;
             try {
-                previous = ToolPaths.readBytes(file, MAX_LOAD, useRoot);
+                previous = ToolPaths.readBytes(file, MAX_LOAD, useRoot, cancellation);
             } catch (IllegalArgumentException e) {
                 return "错误：" + e.getMessage();
             }
@@ -158,7 +168,9 @@ public class EditTool implements Tool {
                 return "已停止。";
             }
             try {
-                ToolPaths.writeBytes(file, outcome.content.getBytes("UTF-8"), useRoot);
+                if (!file.equals(ToolPaths.resolve(workDir, file.getPath(), temporary, useRoot, cancellation)))
+                    return "错误：文件路径在编辑期间发生变化。";
+                ToolPaths.writeBytes(file, outcome.content.getBytes("UTF-8"), useRoot, cancellation);
             } catch (IllegalArgumentException e) {
                 return "错误：" + e.getMessage();
             }

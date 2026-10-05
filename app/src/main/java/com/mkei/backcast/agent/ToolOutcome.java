@@ -12,6 +12,15 @@ public final class ToolOutcome {
                 || text.startsWith("\u7528\u6237\u62d2\u7edd\u6267\u884c")
                 || text.startsWith("\u5f53\u524d\u6ca1\u6709\u754c\u9762")
                 || text.contains("\u547d\u4ee4\u8d85\u65f6")) return true;
+        if ("toolkit".equals(name) || (name != null && name.startsWith("mcp_"))) {
+            try {
+                org.json.JSONObject resultJson = new org.json.JSONObject(text);
+                if (name.startsWith("mcp_")) return resultJson.optBoolean("isError", false);
+                String state = resultJson.optString("state");
+                return "error".equals(state) || "cancelled".equals(state)
+                        || (resultJson.has("success") && Boolean.FALSE.equals(resultJson.opt("success")));
+            } catch (Exception notJson) { return false; }
+        }
         if (!"shell".equals(name)) return false;
         int at = text.startsWith("\u6ce8\u610f\uff1a") ? text.indexOf('\n') + 1 : 0;
         if (!text.startsWith("exit=", at)) return false;

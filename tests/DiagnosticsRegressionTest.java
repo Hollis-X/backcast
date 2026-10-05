@@ -131,10 +131,41 @@ public final class DiagnosticsRegressionTest {
         check(store.messages.size() == 4 && Message.TOOL.equals(store.messages.get(2).role), "Diagnostics changed model tool protocol");
         pass("toolFailuresEnterDedicatedDiagnostics");
     }
+    private static void structuredToolFailuresEnterDedicatedDiagnostics() throws Exception {
+        String[] names = {"toolkit", "toolkit", "toolkit", "mcp_fixture_tool"};
+        String[] outputs = {"{\"state\":\"error\",\"error\":\"missing executable\"}",
+                "{\"state\":\"cancelled\"}", "{\"success\":false,\"output\":\"failed\"}",
+                "{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"failed\"}]}"};
+        for (int i = 0; i < names.length; i++) {
+            final String name = names[i], output = outputs[i];
+            check(ToolOutcome.failed(name, output), "Structured error was treated as successful progress");
+            Store store = new Store(); ToolRegistry tools = new ToolRegistry();
+            tools.register(new Tool() {
+                public String name() { return name; }
+                public String description() { return "fixture"; }
+                public JSONObject parameters() { return new JSONObject(); }
+                public String run(JSONObject args) { return output; }
+                public void abort() { }
+            });
+            LlmClient.Reply call = reply("", null);
+            call.toolCalls = new JSONArray().put(new JSONObject().put("id", "structured")
+                    .put("type", "function").put("function", new JSONObject().put("name", name).put("arguments", "{}")));
+            AgentLoop loop = loop(store, tools, call, reply("failed", null)); loop.submit("inspect", 7, loop.generation(), 1);
+            check(store.errors.size() == 1 && store.errors.get(0).contains("tool:" + name)
+                    && store.errors.get(0).contains("structured"), "Structured failure missing queryable database diagnostic");
+            check(store.messages.get(2).content.equals(output), "Model lost exact structured tool feedback");
+        }
+        check(!ToolOutcome.failed("read", "{\"state\":\"error\"}")
+                && !ToolOutcome.failed("find_files", "{\"complete\":false,\"matches\":[]}")
+                && !ToolOutcome.failed("toolkit", "{\"state\":\"ready\",\"success\":true}")
+                && !ToolOutcome.failed("mcp_fixture_tool", "{\"isError\":false,\"content\":[]}"),
+                "Normal file/search/success JSON mistaken for execution failure");
+        pass("structuredToolFailuresEnterDedicatedDiagnostics");
+    }
     public static void main(String[] args) throws Exception {
         scrubsExactSecretsAndCredentials(); structuredProviderErrorsStayUseful(); providerObjectKeysAreAlsoRedacted(); hugeDiagnosticsRemainValidAndBounded();
         throwableEvidenceOmitsExceptionPayloads(); detailedRequestIsRecordedOnceOutsideHistory(); diagnosticFailuresKeepValidReplies();
-        childCheckpointAndDiagnosticsAreIndependent(); toolFailuresEnterDedicatedDiagnostics();
+        childCheckpointAndDiagnosticsAreIndependent(); toolFailuresEnterDedicatedDiagnostics(); structuredToolFailuresEnterDedicatedDiagnostics();
         System.out.println(passed + " diagnostic storage tests passed");
     }
 }

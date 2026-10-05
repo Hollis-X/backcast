@@ -55,6 +55,11 @@
             android:exported="false"
             android:windowSoftInputMode="stateAlwaysHidden|adjustResize"/>
 
+        <activity android:name=".McpConfigActivity"
+            android:label="@string/settings_mcp_title"
+            android:exported="false"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize"/>
+
         <service
             android:name=".AgentService"
             android:exported="false"

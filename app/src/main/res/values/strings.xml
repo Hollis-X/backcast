@@ -89,6 +89,9 @@
     <string name="settings_preferences_title">用户偏好</string>
     <string name="settings_tools_title">工具配置</string>
     <string name="settings_tool_detail_title">工具详情</string>
+    <string name="settings_mcp_title">MCP 配置</string>
+    <string name="settings_mcp_summary">%1$d 个已启用的服务</string>
+    <string name="settings_mcp_storage_error">配置读取失败，点击检查</string>
     <string name="settings_preferences_summary">%1$s · %2$s</string>
     <string name="settings_tools_summary">%1$s · %2$s</string>
     <string name="settings_root_on">root 已开启</string>

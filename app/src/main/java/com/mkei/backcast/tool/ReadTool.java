@@ -23,7 +23,6 @@ public class ReadTool implements Tool {
     private final boolean useRoot;
     private final TemporaryWorkspace temporary;
     private volatile int epoch;
-    private volatile int runEpoch;
 
     public ReadTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
@@ -38,12 +37,14 @@ public class ReadTool implements Tool {
 
     @Override
     public String description() {
-        return "读取项目工作目录内的文本文件，也可读取本轮 temporary 登记的 App 私有临时文件（使用返回的绝对路径）。相对路径按工作目录解析。"
+        return "读取已授权工作目录内的文本文件，也可读取本轮 temporary 登记的 App 私有临时文件（使用返回的绝对路径）。相对路径按主工作目录解析。"
                 + "目录外路径会被拒绝。"
                 + "一次最多 " + MAX_LINES + " 行或 " + (MAX_BYTES / 1024)
                 + "KB，以先到的为准，不截断半行。"
                 + "大文件用 offset（从 1 开始的行号）和 limit 接着读，没读完就按结果里的 offset 继续。"
                 + "应用自己读不了的路径会改用 root 读，不要把文件复制到临时目录再读。"
+                + "只给文件名或省略扩展名时，原位置不存在会搜索所有授权目录；完整扫描只有一个候选才会明确显示解析路径后读取，重名返回候选，不猜文件。"
+                + "不清楚名字或路径时先用 find_files，可搜索带版本号、不同大小写或扩展名的文件。"
                 + "不要用 cat 或 sed 读文件。目录用 shell 的 ls，不要用这个工具。";
     }
 
@@ -84,8 +85,12 @@ public class ReadTool implements Tool {
 
     @Override
     public String run(JSONObject args) throws Exception {
-        int mine = epoch;
-        runEpoch = mine;
+        final int mine = epoch;
+        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
+            @Override public void check() throws Exception {
+                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
+            }
+        };
         String path = args.optString("path", "");
         if (path.length() == 0) {
             return "错误：path 为空。";
@@ -105,21 +110,28 @@ public class ReadTool implements Tool {
             }
         }
         try {
-            File file = ToolPaths.resolve(workDir, path, temporary);
-            return readFile(file, path, offset, limit, new Stop() {
-                @Override
-                public boolean stopped() {
-                    return epoch != runEpoch;
+            File file = ToolPaths.resolve(workDir, path, temporary, useRoot, cancellation);
+            ToolPaths.Probe probe = ToolPaths.probe(file, useRoot, cancellation);
+            if (!probe.exists && !probe.denied && path.indexOf('/') < 0 && !".".equals(path) && !"..".equals(path)) {
+                FindFilesTool.Search search = new FindFilesTool(workDir, useRoot, temporary).search(path, "", 8, 16, cancellation);
+                if (search.complete && search.matches.size() == 1) {
+                    file = ToolPaths.resolve(workDir, search.matches.get(0).file.getPath(), temporary, useRoot, cancellation);
+                    return "[按文件名解析为：" + file.getPath() + "]\n" + readFile(file, file.getPath(), offset, limit, cancellation, useRoot);
                 }
-            }, useRoot);
+                return "错误：没有找到唯一可读取的文件。请用 find_files 缩小范围或选择候选绝对路径，不要猜路径。\n" + search.json();
+            }
+            return readFile(file, path, offset, limit, cancellation, useRoot);
+        } catch (InterruptedException stopped) {
+            return "已停止。";
         } catch (IllegalArgumentException e) {
             return "错误：" + e.getMessage();
         }
     }
 
-    private static String readFile(File file, String displayPath, int offset, int limit, Stop stop,
+    private static String readFile(File file, String displayPath, int offset, int limit, ToolchainInstaller.Cancellation cancellation,
                                    boolean useRoot) throws Exception {
-        ToolPaths.Probe probe = ToolPaths.probe(file, useRoot);
+        cancellation.check();
+        ToolPaths.Probe probe = ToolPaths.probe(file, useRoot, cancellation);
         if (!probe.exists) {
             if (probe.denied) {
                 return "错误：没有权限读取：" + file.getAbsolutePath();
@@ -132,11 +144,8 @@ public class ReadTool implements Tool {
         if (isImage(file.getName())) {
             return "这是图片（" + extension(file.getName()) + "），不会把像素交给模型。";
         }
-        if (probe.length == 0) {
-            return "(空文件)";
-        }
         if (probe.length <= MAX_LOAD) {
-            byte[] data = ToolPaths.readBytes(file, MAX_LOAD, useRoot);
+            byte[] data = ToolPaths.readBytes(file, MAX_LOAD, useRoot, cancellation);
             if (containsNul(data)) {
                 return "这是二进制文件，不按文本读。用 shell 查看。";
             }
@@ -146,10 +155,10 @@ public class ReadTool implements Tool {
             }
             return formatText(text, displayPath, offset, limit);
         }
-        if (ToolPaths.sniffNul(file, useRoot)) {
+        if (ToolPaths.sniffNul(file, useRoot, cancellation)) {
             return "这是二进制文件，不按文本读。用 shell 查看。";
         }
-        return formatStream(file, displayPath, offset, limit, stop, useRoot);
+        return formatStream(file, displayPath, offset, limit, cancellation, useRoot);
     }
 
     /** 小文件整篇载入后的分页。行数按换行切，末尾换行单独算一行。 */
@@ -186,11 +195,11 @@ public class ReadTool implements Tool {
         return window.content;
     }
 
-    private static String formatStream(File file, String displayPath, int offset, int limit, Stop stop,
+    private static String formatStream(File file, String displayPath, int offset, int limit, ToolchainInstaller.Cancellation cancellation,
                                        boolean useRoot) throws Exception {
-        boolean endsNl = ToolPaths.endsWithNewline(file, useRoot);
+        boolean endsNl = ToolPaths.endsWithNewline(file, useRoot, cancellation);
         int start = offset > 0 ? offset - 1 : 0;
-        BufferedReader reader = ToolPaths.openText(file, useRoot);
+        BufferedReader reader = ToolPaths.openText(file, useRoot, cancellation);
         try {
             StringBuilder body = new StringBuilder();
             int collected = 0;
@@ -203,9 +212,7 @@ public class ReadTool implements Tool {
             boolean pastUser = false;
             String line;
             while ((line = reader.readLine()) != null) {
-                if (stop != null && stop.stopped()) {
-                    return "已停止。";
-                }
+                cancellation.check();
                 if (seen == 0 && line.length() > 0 && line.charAt(0) == '\uFEFF') {
                     line = line.substring(1);
                 }
@@ -218,9 +225,7 @@ public class ReadTool implements Tool {
                     pastUser = true;
                     seen++;
                     while ((line = reader.readLine()) != null) {
-                        if (stop != null && stop.stopped()) {
-                            return "已停止。";
-                        }
+                        cancellation.check();
                         seen++;
                     }
                     break;
@@ -231,6 +236,7 @@ public class ReadTool implements Tool {
                     firstBytes = lineBytes;
                     seen++;
                     while (reader.readLine() != null) {
+                        cancellation.check();
                         seen++;
                     }
                     break;
@@ -241,9 +247,7 @@ public class ReadTool implements Tool {
                     truncatedBy = collected >= MAX_LINES ? "lines" : "bytes";
                     seen++;
                     while (reader.readLine() != null) {
-                        if (stop != null && stop.stopped()) {
-                            return "已停止。";
-                        }
+                        cancellation.check();
                         seen++;
                     }
                     break;
@@ -430,10 +434,6 @@ public class ReadTool implements Tool {
 
     private static String shellQuote(String path) {
         return "'" + path.replace("'", "'\\''") + "'";
-    }
-
-    private interface Stop {
-        boolean stopped();
     }
 
     private static final class Window {

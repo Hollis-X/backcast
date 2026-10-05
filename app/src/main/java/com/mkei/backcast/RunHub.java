@@ -14,6 +14,7 @@ import com.mkei.backcast.tool.EditTool;
 import com.mkei.backcast.tool.GoalTool;
 import com.mkei.backcast.tool.GetGoalTool;
 import com.mkei.backcast.tool.ReadTool;
+import com.mkei.backcast.tool.FindFilesTool;
 import com.mkei.backcast.tool.ShellTool;
 import com.mkei.backcast.tool.WriteTool;
 import com.mkei.backcast.tool.TemporaryTool;
@@ -22,6 +23,8 @@ import com.mkei.backcast.tool.SubAgentTools;
 import com.mkei.backcast.tool.ToolkitTool;
 import com.mkei.backcast.tool.ToolchainStore;
 import com.mkei.backcast.tool.EmbeddedToolchain;
+import com.mkei.backcast.mcp.McpStore;
+import com.mkei.backcast.mcp.McpTools;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -46,6 +49,7 @@ public final class RunHub {
     private final Map<AgentLoop, FileSubAgentStore> childStores = new ConcurrentHashMap<AgentLoop, FileSubAgentStore>();
     private final Map<AgentLoop, ChildOwner> childOwners = new ConcurrentHashMap<AgentLoop, ChildOwner>();
     private final ToolchainStore toolchains;
+    private final McpStore mcp;
     private final TemporaryWorkspace uiMaterials;
     private final ConcurrentHashMap<Long, Object> sessionPreparations = new ConcurrentHashMap<Long, Object>();
     private final AgentLoop.Recorder recorder;
@@ -99,6 +103,7 @@ public final class RunHub {
         app = context.getApplicationContext();
         store = new ChatStore(app);
         settings = new Settings(app);
+        mcp = new McpStore(new java.io.File(app.getFilesDir(), "mcp"));
         toolchains = new ToolchainStore(new java.io.File(app.getFilesDir(), "toolchains"),
                 new EmbeddedToolchain.Assets() {
                     @Override public java.io.InputStream open(String name) throws Exception {
@@ -453,12 +458,17 @@ public final class RunHub {
         materials.configure(dir, root);
         materials.configureWorkDirs(roots);
         next.register(new ReadTool(dir, root, materials));
+        next.register(new FindFilesTool(dir, root, materials));
         ShellTool shell = new ShellTool(root, dir, materials);
         next.register(shell);
         next.register(new EditTool(dir, root, materials));
         next.register(new WriteTool(dir, root, materials));
         next.register(new TemporaryTool(materials, dir, roots));
         next.register(new ToolkitTool(shell, toolchains, dir, materials, android.os.Build.CPU_ABI));
+        try { McpTools.register(next, mcp); }
+        catch (RuntimeException invalid) {
+            store.recordDiagnostic(loop.sessionKey(), "mcp", "MCP 配置读取失败", "请检查 MCP 私有配置或重新保存连接");
+        }
         ChildOwner owner = childOwners.get(loop);
         if (owner != null) {
             loop.setDelegationParent(owner.root);
