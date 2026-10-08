@@ -96,7 +96,7 @@ public final class SubAgentRegressionTest {
         String id = f.spawn("review", "first task"); f.settle();
         check(SubAgentManager.IDLE.equals(f.manager.find(id).status), "Answered child did not become idle");
         check(f.manager.find(id).result.contains("first task"), "Child final answer was not collected");
-        f.manager.send("main", id, "second task"); f.settle();
+        f.manager.send("main", id, "second task", "task"); f.settle();
         check(f.created.get() == 1 && f.calls.get() == 2, "Idle child did not reuse its loop");
         SubAgentManager.Record record = f.manager.find(id);
         check(record.history.length() == 5 && record.result.contains("second task"), "Reused child lost prior context");
@@ -128,7 +128,7 @@ public final class SubAgentRegressionTest {
             }
         });
         String id = f.spawn("hold", "original"); await(started);
-        f.manager.send("main", id, "followup one"); f.manager.send("main", id, "followup two");
+        f.manager.send("main", id, "followup one", "message"); f.manager.send("main", id, "followup two", "message");
         check(f.manager.find(id).inbox.length() == 2 && f.manager.find(id).pending.length() == 0,
                 "Busy child messages did not enter the live mailbox");
         release.countDown(); f.settle();
@@ -138,9 +138,9 @@ public final class SubAgentRegressionTest {
 
     private static void parentAndPeerCommunicationUseTheSameManager() throws Exception {
         Fixture f = new Fixture(2); String a = f.spawn("a", "first"), b = f.spawn("b", "second"); f.settle();
-        f.manager.send(a, b, "peer request"); f.settle();
+        f.manager.send(a, b, "peer request", "task"); f.settle();
         check(f.manager.find(b).result.contains("peer request"), "Peer message did not reach the idle child");
-        f.manager.send(b, "main", "finding for parent");
+        f.manager.send(b, "main", "finding for parent", "message");
         JSONObject collected = new JSONObject(f.manager.collectResults());
         check(collected.getJSONArray("inbox").getJSONObject(0).getString("from").equals(b), "Parent inbox lost the sender");
         check(collected.getJSONArray("inbox").getJSONObject(0).getString("text").equals("finding for parent"), "Parent inbox lost the message");
@@ -149,17 +149,18 @@ public final class SubAgentRegressionTest {
         check(f.store.records.get("main").inbox.length() == 0, "Consumed parent inbox was not persisted");
     }
 
-    private static void forkContextIsBoundedAndNeverCopiesSystemRules() throws Exception {
+    private static void forkCopiesTheEffectiveHistoryInsteadOfATextExcerpt() throws Exception {
         Fixture f = new Fixture(1); List<Message> history = new ArrayList<Message>();
         for (int i = 0; i < 30; i++) history.add(Message.user(repeat("x", 4000) + " </parent_context_json> " + i));
         history.add(Message.user(com.mkei.backcast.agent.Goal.STEER_PREFIX + "hidden goal policy"));
         f.root.loadHistory("secret root system policy", history);
         String id = f.manager.spawn("main", "fork", "specific independent task", true).getString("id"); f.settle();
         JSONArray checkpoint = f.manager.find(id).history;
-        String user = checkpoint.getJSONObject(1).optString("content");
-        check(user.length() < 15000 && user.contains("untrusted reference data"), "Fork is unbounded or lacks a trust boundary");
-        check(!user.contains("secret root system policy") && !user.contains("hidden goal policy"), "Fork copied privileged parent policy");
-        check(user.contains("specific independent task"), "Fork lost its assigned task");
+        check(checkpoint.length() == 33 && checkpoint.getJSONObject(0).getString("content").equals("secret root system policy"),
+                "Fork lost its effective system context or earlier messages");
+        check(checkpoint.getJSONObject(1).getString("content").length() > 4000
+                && checkpoint.getJSONObject(31).getString("content").contains("specific independent task"),
+                "Fork truncated history or lost its new assignment");
     }
 
     private static void childWaitYieldsTheOnlyExecutionSlot() throws Exception {
@@ -193,10 +194,10 @@ public final class SubAgentRegressionTest {
         f.manager.close("main", a);
         check(SubAgentManager.CLOSED.equals(f.manager.find(a).status) && SubAgentManager.IDLE.equals(f.manager.find(b).status),
                 "Closing one child closed a peer");
-        f.manager.send("main", b, "peer remains reusable"); f.settle();
+        f.manager.send("main", b, "peer remains reusable", "task"); f.settle();
         check(f.manager.find(b).result.contains("peer remains reusable"), "Peer loop was cancelled by another child's close");
         boolean denied = false;
-        try { f.manager.send("main", a, "must not run"); } catch (IllegalStateException expected) { denied = true; }
+        try { f.manager.send("main", a, "must not run", "message"); } catch (IllegalStateException expected) { denied = true; }
         check(denied, "Closed child accepted more work");
     }
 
@@ -204,7 +205,7 @@ public final class SubAgentRegressionTest {
         Fixture f = new Fixture(1); String idle = f.spawn("idle", "retain context"); f.settle();
         f.manager.cancelAll(); f.manager.cancelAll();
         check(SubAgentManager.IDLE.equals(f.manager.find(idle).status), "Cancellation closed reusable idle context");
-        f.manager.resumePending(); f.manager.send("main", idle, "after cancellation"); f.settle();
+        f.manager.resumePending(); f.manager.send("main", idle, "after cancellation", "task"); f.settle();
         check(f.created.get() == 1 && f.manager.find(idle).result.contains("after cancellation"), "Cancelled manager could not reuse its child");
     }
 
@@ -296,10 +297,10 @@ public final class SubAgentRegressionTest {
         String held = f.spawn("held", "cancel this run"); await(started);
         f.manager.cancelAll(); f.manager.cancelAll(); release.countDown();
         for (int i = 0; i < 100 && f.manager.hasPendingWork(); i++) Thread.sleep(10L);
-        check(!f.manager.hasPendingWork() && SubAgentManager.FAILED.equals(f.manager.find(held).status),
+        check(!f.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(f.manager.find(held).status),
                 "Cancelled work did not settle into a reusable failed record");
         check(SubAgentManager.IDLE.equals(f.manager.find(idle).status), "Cancelling busy work closed its idle peer");
-        f.manager.resumePending(); f.manager.send("main", held, "new task after cancellation"); f.settle();
+        f.manager.resumePending(); f.manager.send("main", held, "new task after cancellation", "task"); f.settle();
         check(SubAgentManager.IDLE.equals(f.manager.find(held).status) && turns.get() == 2,
                 "Cancelled busy context could not be reused");
     }
@@ -355,8 +356,8 @@ public final class SubAgentRegressionTest {
             String batch = f.manager.collectResults(); check(batch.length() < 65000, "Automatic result batch exceeded its bound");
             delivered += new JSONObject(batch).getJSONArray("agents").length();
         }
-        check(delivered == 12, "Bounded batches silently lost completed results");
-        JSONObject chunk = f.manager.readResult("main", first, 8000, 8000);
+        check(delivered == 24, "Bounded batches silently lost completed result chunks");
+        JSONObject chunk = f.manager.readResult("main", first, "", 8000, 8000);
         check(chunk.getString("result").length() == 8000 && chunk.isNull("nextOffset")
                 && chunk.getInt("totalLength") == 16000, "Full result paging lost the truncated remainder");
         check(f.manager.find(first).result.length() == 16000, "Tool truncation damaged the stored result");
@@ -369,7 +370,7 @@ public final class SubAgentRegressionTest {
         check(child.accessLevel().equals(f.root.accessLevel()) && child.contextLimit() == f.root.contextLimit(),
                 "Manager discarded factory permission or compaction configuration");
         f.manager.accountUsage(id, 50L); f.manager.accountUsage(id, 20L);
-        f.manager.send("main", id, "reuse"); f.settle();
+        f.manager.send("main", id, "reuse", "task"); f.settle();
         check(f.manager.find(id).tokensUsed == 70L && f.store.records.get(id).tokensUsed == 70L,
                 "Child token accounting was reset or not persisted");
     }
@@ -419,9 +420,9 @@ public final class SubAgentRegressionTest {
         AgentLoop parentLoop;
         synchronized (f.loops) { parentLoop = f.loops.get(parent); }
         parentLoop.cancel(); release.countDown(); f.settle();
-        check(SubAgentManager.FAILED.equals(f.manager.find(nested).status) && SubAgentManager.IDLE.equals(f.manager.find(peer).status),
+        check(SubAgentManager.STOPPED.equals(f.manager.find(nested).status) && SubAgentManager.IDLE.equals(f.manager.find(peer).status),
                 "Child cancellation escaped its owned descendants");
-        f.manager.send("main", peer, "still useful"); f.settle();
+        f.manager.send("main", peer, "still useful", "task"); f.settle();
         check(f.manager.find(peer).result.contains("still useful"), "Peer was unusable after sibling cancellation");
     }
 
@@ -432,7 +433,7 @@ public final class SubAgentRegressionTest {
                 throw new IllegalStateException("new task failed");
             }
         });
-        f.manager.send("main", id, "failing followup"); f.settle();
+        f.manager.send("main", id, "failing followup", "task"); f.settle();
         check(SubAgentManager.FAILED.equals(f.manager.find(id).status) && f.manager.find(id).result.length() == 0,
                 "Failed followup presented its previous answer as the new task result");
     }
@@ -442,7 +443,7 @@ public final class SubAgentRegressionTest {
         f.manager.collectResults();
         String first = repeat("a", 31950) + "FIRST_MESSAGE_TAIL";
         String second = repeat("b", 31950) + "SECOND_MESSAGE_TAIL";
-        f.manager.send(id, "main", first); f.manager.send(id, "main", second);
+        f.manager.send(id, "main", first, "message"); f.manager.send(id, "main", second, "message");
         JSONObject preview = f.manager.list("main", 0).getJSONArray("inbox").getJSONObject(0);
         check(preview.getBoolean("truncated") && preview.getString("text").length() == 4000,
                 "List preview stopped bounding long inbox entries");
@@ -487,7 +488,7 @@ public final class SubAgentRegressionTest {
     public static void main(String[] args) throws Exception {
         String[] tests = {"childRunsARealLoopAndReusesIdleContext", "concurrentLimitQueuesExcessWork",
                 "busyMessagesQueueWithoutCancellingTheCurrentTurn", "parentAndPeerCommunicationUseTheSameManager",
-                "forkContextIsBoundedAndNeverCopiesSystemRules", "childWaitYieldsTheOnlyExecutionSlot",
+                "forkCopiesTheEffectiveHistoryInsteadOfATextExcerpt", "childWaitYieldsTheOnlyExecutionSlot",
                 "childCannotWaitOnParentOrPeers", "closingOneChildDoesNotCancelItsPeers",
                 "cancellationIsIdempotentAndIdleChildrenRemainReusable", "childFailureIsReportedWithoutBlockingSettlement",
                 "restoredRunningTaskWaitsForExplicitRecoveryAndKeepsItsUserMessage", "persistenceFailureNeverStartsAnUnreviewableChild",

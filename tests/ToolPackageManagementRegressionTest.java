@@ -41,8 +41,8 @@ public final class ToolPackageManagementRegressionTest {
             tar.write(new byte[1024]); byte[] raw = tar.toByteArray();
             ByteArrayOutputStream compressed = new ByteArrayOutputStream(); GZIPOutputStream zipped = new GZIPOutputStream(compressed);
             zipped.write(raw); zipped.close(); gzip = compressed.toByteArray();
-            JSONObject artifact = new JSONObject().put("asset", "toolchain/fixture.tar.gz").put("tar_asset", "toolchain/fixture.tar")
-                    .put("sha256", hash(gzip)).put("bytes", gzip.length).put("tar_sha256", hash(raw)).put("tar_bytes", raw.length);
+            JSONObject artifact = ToolchainFixtures.pin(new JSONObject().put("asset", "toolchain/fixture.tar.gz")
+                    .put("sha256", hash(gzip)).put("bytes", gzip.length).put("tar_sha256", hash(raw)).put("tar_bytes", raw.length), "fixture", gzip);
             manifest = new JSONObject().put("version", "fixture").put("artifacts", new JSONArray()
                     .put(new JSONObject(artifact.toString()).put("abi", "any"))
                     .put(new JSONObject(artifact.toString()).put("abi", "arm64-v8a")));
@@ -51,7 +51,7 @@ public final class ToolPackageManagementRegressionTest {
             opens++;
             return new ByteArrayInputStream(name.endsWith("manifest.json") ? manifest.toString().getBytes("UTF-8") : gzip);
         }
-        ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30, ANDROID_RUNTIME); }
+        ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30, ANDROID_RUNTIME, ToolchainFixtures.transport(this, manifest)); }
     }
     private static String hash(byte[] data) throws Exception { return ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(data)); }
     private static void put(byte[] target, int offset, String value) throws Exception {

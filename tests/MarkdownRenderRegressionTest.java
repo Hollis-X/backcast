@@ -85,7 +85,8 @@ public final class MarkdownRenderRegressionTest {
             frames.frame();
             check(backgroundThread[0] && applied.size() == 1, "Live Markdown waited for completion or parsed on the UI thread");
             check(applied.get(0).toString().equals("中文标题\n已经输出 abc")
-                    && span(applied.get(0), "StyleSpan") && span(applied.get(0), "CodeSpan"),
+                    && span(applied.get(0), "StyleSpan") && span(applied.get(0), "TypefaceSpan")
+                    && span(applied.get(0), "BackgroundColorSpan"),
                     "Live headings/bold/inline code did not use the actual Markdown parser");
         } finally { queue.close(); worker.shutdownNow(); }
         pass("streamingFormatsBeforeTheReplyEndsOnAWorker");
@@ -203,6 +204,18 @@ public final class MarkdownRenderRegressionTest {
                     null, sources).call(), "Actual Markdown parser did not compile");
         }
     }
+    private static void inlineCodePreservesLongPathsAndUnicode() throws Exception {
+        String path = "/storage/emulated/0/wh/mcp/s0165/很长的目录🚀/进房.md";
+        String identifier = "AccountJoinRandomFriendPreviousGameWithoutAnyWhitespace";
+        CharSequence rendered = markdown("文件：`" + path + "`\n调用：`" + identifier + "`", 11);
+        check(rendered.toString().equals("文件：" + path + "\n调用：" + identifier),
+                "Inline code changed copy text or dropped the end of a path");
+        check(span(rendered, "TypefaceSpan") && span(rendered, "BackgroundColorSpan")
+                && !span(rendered, "CodeSpan"), "Inline code cannot wrap as native text");
+        CharSequence table = markdown("| 名称 |\n| --- |\n| `" + path + "` |", 11);
+        check(table.toString().equals("名称  " + path), "A table clipped a long inline path");
+        pass("inlineCodePreservesLongPathsAndUnicode");
+    }
     public static void main(String[] args) throws Exception {
         Path build = Files.createTempDirectory("backcast-markdown-test-");
         try {
@@ -215,6 +228,7 @@ public final class MarkdownRenderRegressionTest {
                 liveReplyTakesPriorityAndEachResultNeedsItsOwnFrame();
                 renderFailureFallsBackAndDoesNotBlockOtherMessages();
                 largeCodeAndMobileTablesPreserveReadableCopyText();
+                inlineCodePreservesLongPathsAndUnicode();
             }
             System.out.println("Markdown rendering regressions: " + passed + " passed");
         } finally {

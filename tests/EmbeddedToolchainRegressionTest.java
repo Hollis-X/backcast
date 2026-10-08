@@ -5,8 +5,6 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
-import java.io.SequenceInputStream;
-import java.io.FileNotFoundException;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -19,9 +17,10 @@ import java.util.zip.GZIPOutputStream;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** These checks inspect the actual APK payloads, never downloaded fixtures. */
+/** Audits the actual release payloads and their installation through the real downloader. */
 public final class EmbeddedToolchainRegressionTest {
-    private static File repo, root, assets, project, privateFiles;
+    private static File repo, root, assets, releaseFiles, project, privateFiles;
+    private static final java.util.concurrent.atomic.AtomicInteger releaseReads = new java.util.concurrent.atomic.AtomicInteger();
     private static ToolchainStore arm64, arm;
     private static TemporaryWorkspace temporary;
     private static final ToolchainInstaller.Cancellation LIVE = new ToolchainInstaller.Cancellation() {
@@ -36,8 +35,18 @@ public final class EmbeddedToolchainRegressionTest {
     private static byte[] bytes(File file) throws Exception { return Files.readAllBytes(file.toPath()); }
     private static EmbeddedToolchain.Assets packaged() {
         return new EmbeddedToolchain.Assets() {
-            public InputStream open(String name) throws Exception { return new FileInputStream(new File(assets, name)); }
+            public InputStream open(String name) throws Exception {
+                check("toolchain/manifest.json".equals(name), "Installation attempted to read an archive from APK assets");
+                return new FileInputStream(new File(assets, name));
+            }
         };
+    }
+    private static ToolchainDownloader.Transport downloads() throws Exception {
+        JSONObject manifest = new JSONObject(new String(bytes(new File(assets, "toolchain/manifest.json")), "UTF-8"));
+        return ToolchainFixtures.transport(new EmbeddedToolchain.Assets() { public InputStream open(String name) throws Exception {
+            check(new File(releaseFiles, new File(name).getName()).isFile(), "Release fixture missing; run python3 -B tools/fetch_toolchain_test_fixtures.py explicitly");
+            releaseReads.incrementAndGet(); return new FileInputStream(new File(releaseFiles, new File(name).getName()));
+        } }, manifest);
     }
     private static ToolkitTool toolkit(ToolchainStore store) {
         return new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a");
@@ -48,14 +57,16 @@ public final class EmbeddedToolchainRegressionTest {
         return new File(launcher.prefix.get(classpath + 1));
     }
 
-    private static void packagedArtifactsMatchManifestAndGitHubSizeLimit() throws Exception {
+    private static void releaseArtifactsMatchManifestAndAreAbsentFromApk() throws Exception {
         JSONObject manifest = new JSONObject(new String(bytes(new File(assets, "toolchain/manifest.json")), "UTF-8"));
         check("2.9.3".equals(manifest.getString("apktool")) && "6.2.2".equals(manifest.getString("radare2"))
                 && "1.12.5".equals(manifest.getString("objection")), "Pinned upstream versions were lost");
         JSONArray entries = manifest.getJSONArray("artifacts");
         check(entries.length() == 3, "Missing common or Android ABI payload");
         for (int i = 0; i < entries.length(); i++) {
-            JSONObject entry = entries.getJSONObject(i); File file = new File(assets, entry.getString("asset"));
+            JSONObject entry = entries.getJSONObject(i); File file = new File(releaseFiles, entry.getString("file"));
+            check(!new File(assets, "toolchain/" + entry.getString("file")).exists() && !entry.has("asset") && !entry.has("tar_asset"), "Large release remained in APK assets or advertised an offline fallback");
+            check(entry.getString("url").equals("https://github.com/Hollis-X/backcast/releases/download/toolchain-" + manifest.getString("version") + "/" + file.getName()), "Release URL is not pinned");
             check(file.length() == entry.getLong("bytes") && file.length() < 100L * 1024 * 1024, "Payload size mismatch");
             MessageDigest digest = MessageDigest.getInstance("SHA-256"); InputStream stream = new FileInputStream(file);
             try { byte[] buffer = new byte[16384]; int read; while ((read = stream.read(buffer)) >= 0) digest.update(buffer, 0, read); }
@@ -66,7 +77,9 @@ public final class EmbeddedToolchainRegressionTest {
             try { byte[] buffer = new byte[16384]; int read; while ((read = stream.read(buffer)) >= 0) { tarDigest.update(buffer, 0, read); tarBytes += read; } }
             finally { stream.close(); }
             check(entry.getString("tar_sha256").equals(ToolchainInstaller.hex(tarDigest.digest())) && tarBytes == entry.getLong("tar_bytes"), "Uncompressed TAR digest or size mismatch");
-            check(entry.getString("tar_asset").equals(entry.getString("asset").substring(0, entry.getString("asset").length() - 3)), "Renamed TAR resource was not declared");
+            byte[] all = bytes(file); JSONObject refreshed = ToolchainFixtures.pin(new JSONObject(entry.toString()), manifest.getString("version"), all);
+            check(entry.getInt("prefix_bytes") == refreshed.getInt("prefix_bytes") && entry.getString("prefix_sha256").equals(refreshed.getString("prefix_sha256"))
+                    && entry.getInt("chunk_bytes") == 4 * 1024 * 1024 && entry.getJSONArray("chunk_sha256").toString().equals(refreshed.getJSONArray("chunk_sha256").toString()), "Pinned prefix/block digests differ from released bytes");
         }
         check(manifest.getJSONArray("sources").length() > 60, "Native and Python provenance is incomplete");
         check(new File(assets, "toolchain/licenses/Objection-GPL-3.0.txt").length() > 30000, "Objection license was omitted");
@@ -84,10 +97,14 @@ public final class EmbeddedToolchainRegressionTest {
                 && new File(assets, "toolchain/licenses/PNGJ-NOTICE.txt").length() > 200, "PNGJ provenance or license notices are incomplete");
     }
 
-    private static void firstUseOfflinePreparesBothAbisAndAllLaunchers() throws Exception {
+    private static void onlyExplicitInstallDownloadsAndPreparesBothAbis() throws Exception {
         check(toolkit(arm64).listing().getJSONArray("tools").getJSONObject(0).getBoolean("bundled"), "Before first use bundle looks absent");
         check(!arm64.root().exists(), "Listing eagerly extracted the payload");
-        arm64.prepareBundled(LIVE); arm.prepareBundled(LIVE);
+        int opened = releaseReads.get();
+        check("not_installed".equals(toolkit(arm64).status("apktool").getString("state")), "Probe did not report an uninstalled package");
+        check("not_installed".equals(new JSONObject(toolkit(arm64).run(new JSONObject().put("action", "diagnose").put("tool", "apktool"))).getString("state")), "Diagnose installed a package implicitly");
+        check("not_installed".equals(new JSONObject(toolkit(arm64).run(new JSONObject().put("action", "run").put("tool", "apktool").put("arguments", new JSONArray().put("--version")))).getString("state")) && releaseReads.get() == opened, "Model invocation downloaded release files");
+        arm64.installBundled(LIVE, null); arm.installBundled(LIVE, null);
         for (ToolchainStore preparedStore : new ToolchainStore[]{arm64, arm}) {
             List<File> packagedFiles = new ArrayList<File>(); collect(preparedStore.root(), packagedFiles);
             for (File file : packagedFiles) check(!file.getName().endsWith(".pyc") && !file.getPath().contains(File.separator + "__pycache__" + File.separator),
@@ -212,11 +229,11 @@ public final class EmbeddedToolchainRegressionTest {
         check("/system/bin/dalvikvm64".equals(migrated.launcher("apktool", ToolchainFixtures.LIVE).executable)
                 && !migrated.launcher("apktool", ToolchainFixtures.LIVE).environment.has("CLASSPATH") && apktoolJar(migrated.launcher("apktool", ToolchainFixtures.LIVE)).isFile(),
                 "Upgrade retained a previously registered app_process launcher");
-        final ToolchainStore cancelled = new ToolchainStore(new File(root, "cancelled"), packaged(), "arm64-v8a", 30);
-        final int[] checks = new int[1]; boolean interrupted = false;
-        try { cancelled.prepareBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { if (++checks[0] == 10) throw new InterruptedException("fixture"); } }); }
+        final ToolchainStore cancelled = new ToolchainStore(new File(root, "cancelled"), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME, downloads());
+        final java.util.concurrent.atomic.AtomicInteger checks = new java.util.concurrent.atomic.AtomicInteger(); boolean interrupted = false;
+        try { cancelled.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { if (checks.incrementAndGet() >= 10) throw new InterruptedException("fixture"); } }, null); }
         catch (InterruptedException expected) { interrupted = true; }
-        check(interrupted && cancelled.root().list().length == 0, "Cancelled extraction published software or leaked staging data");
+        check(interrupted && noPublishedFiles(cancelled), "Cancelled extraction published software"); checkNoStages(cancelled);
     }
 
     private static void onlyDirectBuiltInActionsAreAdvertisedToTheModel() throws Exception {
@@ -233,18 +250,22 @@ public final class EmbeddedToolchainRegressionTest {
     private static void sameVersionNewPayloadPreparesSeparatelyAndRetainsTheRunningVersion() throws Exception {
         final JSONObject updated = new JSONObject(new String(bytes(new File(assets, "toolchain/manifest.json")), "UTF-8"));
         JSONObject common = updated.getJSONArray("artifacts").getJSONObject(0);
-        MessageDigest sha = MessageDigest.getInstance("SHA-256"); InputStream stream = new FileInputStream(new File(assets, common.getString("asset")));
-        try { byte[] buffer = new byte[16384]; int read; while ((read = stream.read(buffer)) >= 0) sha.update(buffer, 0, read); }
-        finally { stream.close(); }
-        sha.update((byte) 0); common.put("bytes", common.getLong("bytes") + 1).put("sha256", ToolchainInstaller.hex(sha.digest()));
+        final byte[] nextCommon = java.util.Arrays.copyOf(bytes(new File(releaseFiles, common.getString("file"))), (int) common.getLong("bytes") + 1);
+        common.put("bytes", nextCommon.length).put("sha256", ToolchainFixtures.sha(nextCommon));
+        ToolchainFixtures.pin(common, updated.getString("version"), nextCommon);
         File oldJar = apktoolJar(arm64.launcher("apktool", ToolchainFixtures.LIVE));
         ToolchainStore upgraded = new ToolchainStore(arm64.root(), new EmbeddedToolchain.Assets() {
             public InputStream open(String name) throws Exception {
                 if ("toolchain/manifest.json".equals(name)) return new ByteArrayInputStream(updated.toString().getBytes("UTF-8"));
-                if ("toolchain/common.tar.gz".equals(name)) return new SequenceInputStream(new FileInputStream(new File(assets, name)), new ByteArrayInputStream(new byte[]{0}));
-                return new FileInputStream(new File(assets, name));
+                throw new AssertionError("APK archive access during upgrade");
             }
-        }, "arm64-v8a", 30, ANDROID_RUNTIME);
+        }, "arm64-v8a", 30, ANDROID_RUNTIME, ToolchainFixtures.transport(new EmbeddedToolchain.Assets() {
+            public InputStream open(String name) throws Exception {
+                return "toolchain/common.tar.gz".equals(name) ? new ByteArrayInputStream(nextCommon) : new FileInputStream(new File(releaseFiles, new File(name).getName()));
+            }
+        }, updated));
+        check(upgraded.launcher("apktool", LIVE) == null && oldJar.isFile(), "Upgrade silently downloaded new release bytes");
+        upgraded.installBundled(LIVE, null);
         File newJar = apktoolJar(upgraded.launcher("apktool", ToolchainFixtures.LIVE));
         check(!oldJar.equals(newJar) && oldJar.isFile() && newJar.isFile(), "Payload update overwrote/deleted a potentially running tool or failed on reused release date");
     }
@@ -282,20 +303,21 @@ public final class EmbeddedToolchainRegressionTest {
             ByteArrayOutputStream output = new ByteArrayOutputStream(); output.write(header); output.write(value);
             output.write(new byte[512 - value.length]); output.write(new byte[1024]); tar = output.toByteArray();
             output = new ByteArrayOutputStream(); GZIPOutputStream zipped = new GZIPOutputStream(output); zipped.write(tar); zipped.close(); gzip = output.toByteArray();
-            JSONObject artifact = new JSONObject().put("asset", "toolchain/fixture.tar.gz").put("tar_asset", "toolchain/fixture.tar")
+            JSONObject artifact = ToolchainFixtures.pin(new JSONObject().put("file", "fixture.tar.gz")
                     .put("bytes", gzip.length).put("sha256", ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(gzip)))
-                    .put("tar_bytes", tar.length).put("tar_sha256", ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(tar)));
+                    .put("tar_bytes", tar.length).put("tar_sha256", ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(tar))), "fixture", gzip);
             manifest = new JSONObject().put("version", "fixture").put("artifacts", new JSONArray()
                     .put(new JSONObject(artifact.toString()).put("abi", "any")).put(new JSONObject(artifact.toString()).put("abi", "arm64-v8a")));
         }
-        ToolchainStore store(String name, final boolean missingGzip, final byte[] payload, final JSONObject metadata) throws Exception {
+        ToolchainStore store(String name, final byte[] payload, final JSONObject metadata) throws Exception {
             return new ToolchainStore(new File(root, name), new EmbeddedToolchain.Assets() {
                 public InputStream open(String path) throws Exception {
                     if ("toolchain/manifest.json".equals(path)) return new ByteArrayInputStream(metadata.toString().getBytes("UTF-8"));
-                    if (missingGzip && path.endsWith(".gz")) throw new FileNotFoundException(path);
-                    return new ByteArrayInputStream(payload);
+                    throw new AssertionError("Archive requested from APK assets");
                 }
-            }, "arm64-v8a", 30);
+            }, "arm64-v8a", 30, ANDROID_RUNTIME, ToolchainFixtures.transport(new EmbeddedToolchain.Assets() {
+                public InputStream open(String name) { return new ByteArrayInputStream(payload); }
+            }, metadata));
         }
     }
     private static void put(byte[] output, int at, String value) throws Exception { byte[] bytes = value.getBytes("UTF-8"); System.arraycopy(bytes, 0, output, at, bytes.length); }
@@ -305,50 +327,48 @@ public final class EmbeddedToolchainRegressionTest {
     }
     private static boolean noPublishedFiles(ToolchainStore store) {
         String[] children = store.root().list();
-        return !store.root().exists() || children != null && children.length == 0;
+        if (children != null) for (String child : children) if (child.startsWith("builtin-")) return false;
+        return true;
     }
 
-    private static void renamedTarAssetsAndGzipStreamsUseTheirActualFormatAndChecksums() throws Exception {
-        ArchiveFixture fixture = new ArchiveFixture(); int index = 0;
-        for (boolean missing : new boolean[]{false, true}) for (byte[] payload : new byte[][]{fixture.gzip, fixture.tar}) {
-            ToolchainStore store = fixture.store("format-" + index++, missing, payload, fixture.manifest);
-            File directory = store.prepareBundled(LIVE);
-            check("verified payload".equals(new String(bytes(new File(directory, "fixture.txt")), "UTF-8")), "Asset name determined the format instead of its verified bytes");
-            checkNoStages(store);
-        }
+    private static void compressedReleaseInstallsWithoutApkArchiveReads() throws Exception {
+        ArchiveFixture fixture = new ArchiveFixture(); ToolchainStore store = fixture.store("gzip-release", fixture.gzip, fixture.manifest);
+        store.installBundled(LIVE, null); File directory = store.prepareBundled(LIVE);
+        check("verified payload".equals(new String(bytes(new File(directory, "fixture.txt")), "UTF-8")), "Verified release file failed to install");
+        checkNoStages(store);
     }
 
-    private static void corruptedOrUndeclaredRenamedTarAssetsNeverPublish() throws Exception {
+    private static void corruptedOrUndeclaredReleaseFilesNeverPublish() throws Exception {
         ArchiveFixture fixture = new ArchiveFixture(); byte[] corrupted = fixture.tar.clone(); corrupted[512] ^= 1;
-        ToolchainStore tampered = fixture.store("tampered-tar", true, corrupted, fixture.manifest);
-        boolean refused = false; try { tampered.prepareBundled(LIVE); } catch (Exception expected) { refused = true; }
-        check(refused && noPublishedFiles(tampered), "Renamed TAR skipped its SHA-256 verification"); checkNoStages(tampered);
+        ToolchainStore tampered = fixture.store("tampered-release", corrupted, fixture.manifest);
+        boolean refused = false; try { tampered.installBundled(LIVE, null); } catch (Exception expected) { refused = true; }
+        check(refused && noPublishedFiles(tampered), "Corrupt release skipped its SHA-256 verification"); checkNoStages(tampered);
         JSONObject undeclared = new JSONObject(fixture.manifest.toString());
         for (int i = 0; i < undeclared.getJSONArray("artifacts").length(); i++) undeclared.getJSONArray("artifacts").getJSONObject(i).remove("tar_sha256");
-        ToolchainStore noDigest = fixture.store("unverified-alternate", true, fixture.tar, undeclared);
-        refused = false; try { noDigest.prepareBundled(LIVE); } catch (Exception expected) { refused = true; }
+        ToolchainStore noDigest = fixture.store("unverified-release", fixture.gzip, undeclared);
+        refused = false; try { noDigest.installBundled(LIVE, null); } catch (Exception expected) { refused = true; }
         check(refused && noPublishedFiles(noDigest), "Undeclared fallback archive was accepted"); checkNoStages(noDigest);
     }
 
     private static void gzipTransportVerificationAlsoChecksTheFullUncompressedTar() throws Exception {
         ArchiveFixture fixture = new ArchiveFixture(); JSONObject metadata = new JSONObject(fixture.manifest.toString());
         metadata.getJSONArray("artifacts").getJSONObject(0).put("tar_sha256", "0000000000000000000000000000000000000000000000000000000000000000");
-        ToolchainStore store = fixture.store("wrong-inner-sha", false, fixture.gzip, metadata);
-        boolean refused = false; try { store.prepareBundled(LIVE); } catch (Exception expected) { refused = true; }
+        ToolchainStore store = fixture.store("wrong-inner-sha", fixture.gzip, metadata);
+        boolean refused = false; try { store.installBundled(LIVE, null); } catch (Exception expected) { refused = true; }
         check(refused && noPublishedFiles(store), "Compressed SHA success bypassed the declared TAR content checksum"); checkNoStages(store);
     }
 
     private static void collect(File root, List<File> files) { File[] children = root.listFiles(); if (children != null) for (File file : children) { if (file.isDirectory()) collect(file, files); else files.add(file); } }
     private static void remove(File file) throws Exception { File[] children = file.listFiles(); if (children != null) for (File child : children) remove(child); Files.deleteIfExists(file.toPath()); }
     public static void main(String[] args) throws Exception {
-        repo = new File(args[0]); assets = new File(repo, "app/src/main/assets"); root = Files.createTempDirectory("backcast-embedded-tests-").toFile();
+        repo = new File(args[0]); assets = new File(repo, "app/src/main/assets"); releaseFiles = new File(repo, "app/build/toolchain-release"); root = Files.createTempDirectory("backcast-embedded-tests-").toFile();
         project = new File(root, "project"); project.mkdir(); privateFiles = new File(root, "private"); privateFiles.mkdir();
         temporary = new TemporaryWorkspace(project.getPath(), false, new File(privateFiles, "temporary"), 1); temporary.beginTurn();
-        arm64 = new ToolchainStore(new File(privateFiles, "toolchain-arm64"), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME);
-        arm = new ToolchainStore(new File(privateFiles, "toolchain-arm"), packaged(), "armeabi-v7a", 30, ANDROID_RUNTIME);
+        arm64 = new ToolchainStore(new File(privateFiles, "toolchain-arm64"), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME, downloads());
+        arm = new ToolchainStore(new File(privateFiles, "toolchain-arm"), packaged(), "armeabi-v7a", 30, ANDROID_RUNTIME, downloads());
         int passed = 0;
         try {
-            for (String test : new String[]{"packagedArtifactsMatchManifestAndGitHubSizeLimit", "firstUseOfflinePreparesBothAbisAndAllLaunchers", "apktoolUsesDalvikAndBundledPureJavaPngInsteadOfDesktopOrNativeImageApis", "androidElfAbiAndDynamicDependenciesAreComplete", "pythonAndObjectionArePrivateAndDoNotRequireTermux", "unsupportedDevicesDoNotAttemptAssetReads", "clearRestoresTheBundledLauncherAndCancelledPreparationLeavesNoStage", "onlyDirectBuiltInActionsAreAdvertisedToTheModel", "objectionProbeNeverStartsAServerAndSingleRunsCleanItUp", "sameVersionNewPayloadPreparesSeparatelyAndRetainsTheRunningVersion", "renamedTarAssetsAndGzipStreamsUseTheirActualFormatAndChecksums", "corruptedOrUndeclaredRenamedTarAssetsNeverPublish", "gzipTransportVerificationAlsoChecksTheFullUncompressedTar"}) {
+            for (String test : new String[]{"releaseArtifactsMatchManifestAndAreAbsentFromApk", "onlyExplicitInstallDownloadsAndPreparesBothAbis", "apktoolUsesDalvikAndBundledPureJavaPngInsteadOfDesktopOrNativeImageApis", "androidElfAbiAndDynamicDependenciesAreComplete", "pythonAndObjectionArePrivateAndDoNotRequireTermux", "unsupportedDevicesDoNotAttemptAssetReads", "clearRestoresTheBundledLauncherAndCancelledPreparationLeavesNoStage", "onlyDirectBuiltInActionsAreAdvertisedToTheModel", "objectionProbeNeverStartsAServerAndSingleRunsCleanItUp", "sameVersionNewPayloadPreparesSeparatelyAndRetainsTheRunningVersion", "compressedReleaseInstallsWithoutApkArchiveReads", "corruptedOrUndeclaredReleaseFilesNeverPublish", "gzipTransportVerificationAlsoChecksTheFullUncompressedTar"}) {
                 EmbeddedToolchainRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); passed++;
             }
             System.out.println(passed + " embedded toolchain tests passed");

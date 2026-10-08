@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute the ART fallback code extracted from the actual APK payload.
+"""Execute the ART fallback code extracted from the actual release payload.
 
 No Android target is attached. A supplied official host Frida package compiles
 the actual bundled agent and loads a UTF-8 multi-module fixture. Node executes
@@ -26,7 +26,7 @@ FRIDA_PATH = None
 class ObjectionArtCompatibilityRegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with tarfile.open(REPO / "app/src/main/assets/toolchain/common.tar.gz") as archive:
+        with tarfile.open(REPO / "app/build/toolchain-release/common.tar.gz") as archive:
             cls.agent = archive.extractfile("python-site/objection/agent.js").read().decode()
         cls.manifest = json.loads((REPO / "app/src/main/assets/toolchain/manifest.json").read_text())
         spec = importlib.util.spec_from_file_location("objection_android", REPO / "tools/objection_android.py")

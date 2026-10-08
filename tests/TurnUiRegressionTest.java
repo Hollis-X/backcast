@@ -238,8 +238,10 @@ public final class TurnUiRegressionTest {
                 + "int getHeight(){int y=0;for(View child:children)y+=child.getHeight();return children.isEmpty()?height:y;} }"
                 + "static class LinearLayout extends ViewGroup { static final int HORIZONTAL=0,VERTICAL=1;"
                 + "int orientation=VERTICAL,gravity;LinearLayout(Object... c){} void setOrientation(int o){orientation=o;}int getOrientation(){return orientation;} void setGravity(int g){gravity=g;}static class LayoutParams extends ViewGroup.LayoutParams{int width;float weight;LayoutParams(int w,int h,float x){width=w;height=h;weight=x;}} }"
+                + "static class Layout{static final int BREAK_STRATEGY_SIMPLE=0,HYPHENATION_FREQUENCY_NONE=0;}"
                 + "static class TextView extends View { String text=\"\"; TextView(Object... c){} void setText(CharSequence t){text=t.toString();}"
                 + "void setText(int r){text=String.valueOf(r);} CharSequence getText(){return text;}"
+                + "void setHorizontallyScrolling(boolean v){}void setBreakStrategy(int v){}void setHyphenationFrequency(int v){}"
                 + "void setTextSize(int v){} void setTextColor(int v){} void setLineSpacing(int v,float s){} void setBackgroundResource(int v){} void setMaxWidth(int v){}void setIncludeFontPadding(boolean v){} }"
                 + "static class ImageView extends View {}"
                 + "static class ViewTreeObserver { interface OnPreDrawListener{boolean onPreDraw();}"
@@ -334,7 +336,8 @@ public final class TurnUiRegressionTest {
         source.append(METHODS.get("ReplayCursor"));
         source.append(METHODS.get("ApprovalRequest"));
         source.append("void queueInstallProgress(ToolkitOperation op,EmbeddedToolchain.Progress progress){}void finishInstallProgress(JSONObject result){}"
-                + "void queueBatchProgress(ToolkitOperation op,ToolBatchProbe.Progress progress){}void finishBatchProbe(JSONObject result){}");
+                + "void queueBatchProgress(ToolkitOperation op,ToolBatchProbe.Progress progress){}void finishBatchProbe(JSONObject result){}"
+                + "List<Throwable> toolkitFailures=new ArrayList<>();void recordToolkitFailure(JSONObject args,Throwable failure){toolkitFailures.add(failure);}");
         source.append(TOOL_METHODS.get("ToolkitOperation"));
         source.append(TOOL_METHODS.get("ToolkitResult"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {
@@ -355,7 +358,7 @@ public final class TurnUiRegressionTest {
                 "markdownAnchor", "markdownTop",
                 "bindSummary", "displayElapsed", "seconds", "showActivitySheet", "resetSheetDetails")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
-            source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this"));
+            source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this").replace("android.text.Layout", "Layout"));
         }
         for (String name : Arrays.asList("beginCompactRow", "settleCompact", "completeCompactRow",
                 "dropCompactRow", "addCompactionDivider", "lastCompactionDivider", "finishCompaction")) {
@@ -1749,9 +1752,12 @@ public final class TurnUiRegressionTest {
         try {
             toolkitRequest(view,new JSONObject().put("action","status").put("tool","apktool"),responses);
             awaitUi(view);drain(view,"uiTasks");
+            List<?> failures = (List<?>) get(view, "toolkitFailures");
             check(responses.size()==1 && "error".equals(responses.get(0).optString("state"))
-                    && responses.get(0).optString("error").contains("cleanup_failed"),
-                    "Temporary cleanup failure stranded the UI in a busy state or concealed the failure");
+                    && responses.get(0).optString("error").length() > 0
+                    && !responses.get(0).optString("error").contains("cleanup_failed")
+                    && failures.size() == 1 && ((Throwable) failures.get(0)).getMessage().contains("cleanup_failed"),
+                    "Cleanup failure must release the UI with a short error and send full details to diagnostics");
         } finally {staticField(fixtureType("RunHub"),"failCleanup",false);stopToolkitExecutor(view);}
         pass("toolkitTemporaryCleanupFailureIsReportedAndReleasesUiBusyState");
     }

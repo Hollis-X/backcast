@@ -101,7 +101,7 @@ public final class ChatStorePagingRegressionTest {
                 + "int changed=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(t)"
                 + "&&((Number)row.get(clock?\"session_id\":\"id\")).longValue()==Long.parseLong(a[0])"
                 + "&&(!clock||((Number)row.get(\"running\")).intValue()==1)){row.putAll(v);changed++;}return changed;}"
-                + "public int delete(String t,String s,String[] a){if(!s.equals(\"session_id=?\")&&!t.equals(\"sessions\"))throw new AssertionError(s);"
+                + "public int delete(String t,String s,String[] a){if(s.equals(\"owner=?\"))return 0;if(!s.equals(\"session_id=?\")&&!t.equals(\"sessions\"))throw new AssertionError(s);"
                 + "int changed=0;for(Iterator<Map<String,Object>> i=rows.iterator();i.hasNext();){Map<String,Object> row=i.next();"
                 + "if(row.get(\"table\").equals(t)&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(a[0])){i.remove();changed++;}}return changed;}"
                 + "public Cursor query(String t,String[] c,String s,String[] a,String g,String h,String o){return query(t,c,s,a,g,h,o,null);}"
@@ -532,13 +532,13 @@ public final class ChatStorePagingRegressionTest {
     private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
         Object store = fresh();
         Object db = databaseType.getConstructor().newInstance();
-        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 15,
+        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 16,
                 "Fresh databases do not request the compaction event schema version");
         databaseType.getMethod("legacyRuns", int.class).invoke(null, 10);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 15);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 16);
         @SuppressWarnings("unchecked")
         List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 9 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
+        check(sql.size() == 11 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
                         && sql.get(0).contains("diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).contains("request_events(session_id,id)")
                         && sql.get(2).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
@@ -565,9 +565,9 @@ public final class ChatStorePagingRegressionTest {
         long oldId = (Long) databaseType.getMethod("insert", String.class, String.class, valuesType)
                 .invoke(db, "request_events", null, old);
         databaseType.getMethod("legacyRuns", int.class).invoke(null, 11);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 15);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 16);
         @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 8 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
+        check(sql.size() == 10 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
                         && sql.get(2).contains("diagnostic_errors(session_id,id)"),
                 "Version 11 migration recreated request history or did not apply the additive column default");
@@ -656,7 +656,7 @@ public final class ChatStorePagingRegressionTest {
     }
 
     private static void everyLegacyVersionUpgradesWithNullableDurationColumns() throws Exception {
-        for (int version = 1; version <= 13; version++) {
+        for (int version = 1; version <= 15; version++) {
             Object store = fresh(), db = databaseType.getConstructor().newInstance();
             databaseType.getMethod("legacyRuns", int.class).invoke(null, version);
             if (version >= 4) {
@@ -674,7 +674,7 @@ public final class ChatStorePagingRegressionTest {
             }
             if (version >= 12) databaseType.getField("requestDiagnosticColumn").setBoolean(null, true);
             append(store, 7L, Message.user("preserved legacy request"));
-            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 15);
+            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 16);
             @SuppressWarnings("unchecked") Set<String> columns = (Set<String>) databaseType.getField("runColumns").get(null);
             check(columns.containsAll(Arrays.asList("turn_at", "turn_wall", "seen_at", "turn_elapsed_ms",
                             "turn_think_ms", "tokens_used", "token_budget", "budget_wrap_finished")),
@@ -688,7 +688,7 @@ public final class ChatStorePagingRegressionTest {
             }
             check(elapsedAlters == (version >= 4 && version < 13 ? 1 : 0) && thinkAlters == (version >= 4 && version < 13 ? 1 : 0),
                     "Version " + version + " altered duration columns after creating their latest schema");
-            check(selectionAlters == 1 && messages(page(store, 7L, -1, 48)).get(0).mcpSelection == null
+            check(selectionAlters == (version < 14 ? 1 : 0) && messages(page(store, 7L, -1, 48)).get(0).mcpSelection == null
                             && "preserved legacy request".equals(messages(page(store, 7L, -1, 48)).get(0).content),
                     "Version " + version + " failed to add exactly one empty selection default while preserving legacy requests");
             if (version >= 4) {

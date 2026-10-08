@@ -50,6 +50,14 @@ public final class AgentPanelState {
         int start = Math.min(Math.max(0, resultOffset), Math.max(0, length - 1));
         return new int[] { start, Math.min(length, start + RESULT_PAGE_SIZE) };
     }
+    public int[] resultBounds(String content) {
+        int[] bounds = resultBounds(content.length());
+        if (bounds[0] > 0 && bounds[0] < content.length() && Character.isLowSurrogate(content.charAt(bounds[0]))
+                && Character.isHighSurrogate(content.charAt(bounds[0] - 1))) bounds[0]++;
+        if (bounds[1] > 0 && bounds[1] < content.length() && Character.isHighSurrogate(content.charAt(bounds[1] - 1))
+                && Character.isLowSurrogate(content.charAt(bounds[1]))) bounds[1]++;
+        return bounds;
+    }
     public static boolean active(String status) {
         return SubAgentManager.RUNNING.equals(status) || SubAgentManager.QUEUED.equals(status)
                 || SubAgentManager.WAITING.equals(status);
@@ -67,10 +75,10 @@ public final class AgentPanelState {
         return rows;
     }
     public static final class Entry {
-        public final String role, text;
-        public final List<String> tools;
-        public Entry(String role, String text, List<String> tools) {
-            this.role = role; this.text = text; this.tools = tools;
+        public final String role, text, fullText;
+        public final List<String> tools, fullTools;
+        public Entry(String role, String text, List<String> tools, String fullText, List<String> fullTools) {
+            this.role = role; this.text = text; this.tools = tools; this.fullText = fullText; this.fullTools = fullTools;
         }
     }
     public static List<Entry> history(SubAgentManager.Record record, int from, int to,
@@ -83,10 +91,12 @@ public final class AgentPanelState {
             int limit = Math.min(8000, Math.max(100, remaining / Math.max(1, end - i)));
             String content = message.delegatedRequest == null ? message.content : message.delegatedRequest;
             if (message.coordinationIds != null) content = coordinationText(content);
-            content = shortText(PromptGuard.redact(content, systemPrompt, environment, ""), limit);
+            String fullText = PromptGuard.redact(content, systemPrompt, environment, "");
+            content = shortText(fullText, limit);
             int toolsRemaining = Math.min(2000, Math.max(0, remaining - content.length()));
             List<String> tools = new ArrayList<String>();
-            if (message.toolCalls != null) for (int j = 0; j < message.toolCalls.length() && toolsRemaining > 0; j++) {
+            List<String> fullTools = new ArrayList<String>();
+            if (message.toolCalls != null) for (int j = 0; j < message.toolCalls.length(); j++) {
                 JSONObject call = message.toolCalls.optJSONObject(j);
                 JSONObject fn = call == null ? null : call.optJSONObject("function");
                 if (fn == null) continue;
@@ -98,16 +108,20 @@ public final class AgentPanelState {
                     Iterator<String> keys = values.keys();
                     while (keys.hasNext()) {
                         String key = keys.next();
-                        text.append('\n').append(key).append(": ").append(shortText(String.valueOf(values.opt(key)), 600));
+                        text.append('\n').append(key).append(": ").append(String.valueOf(values.opt(key)));
                     }
                     tool = text.toString();
-                } catch (Exception invalid) { tool += "\n" + shortText(args, 1200); }
-                String formatted = shortText(PromptGuard.redact(tool, systemPrompt, environment, ""), toolsRemaining);
-                tools.add(formatted); toolsRemaining -= formatted.length();
+                } catch (Exception invalid) { tool += "\n" + args; }
+                String complete = PromptGuard.redact(tool, systemPrompt, environment, "");
+                fullTools.add(complete);
+                if (toolsRemaining > 0) {
+                    String formatted = shortText(complete, toolsRemaining);
+                    tools.add(formatted); toolsRemaining -= formatted.length();
+                }
             }
             remaining -= content.length();
             for (String tool : tools) remaining -= tool.length();
-            entries.add(new Entry(message.coordinationIds == null ? message.role : "message", content, tools));
+            entries.add(new Entry(message.coordinationIds == null ? message.role : "message", content, tools, fullText, fullTools));
         }
         return entries;
     }
@@ -135,5 +149,73 @@ public final class AgentPanelState {
     public static String shortText(String text, int limit) {
         if (text == null) return "";
         return text.length() <= limit ? text : text.substring(0, Math.max(0, limit)) + "\u2026";
+    }
+
+    /** Result pages include reports and immutable outcomes, including older assignments. */
+    public static String resultsText(SubAgentManager.Record record) {
+        if (record.tasks.length() == 0 && record.results.length() == 0 && record.events.length() == 0
+                && record.result.length() > 0) return record.result;
+        StringBuilder out = new StringBuilder();
+        JSONObject current = null;
+        for (int i = record.tasks.length() - 1; i >= 0; i--) {
+            JSONObject task = record.tasks.optJSONObject(i);
+            if (task != null && record.currentTaskId.equals(task.optString("taskId"))) { current = task; break; }
+        }
+        String finalText = "", savedPartial = "";
+        for (int i = record.results.length() - 1; i >= 0; i--) {
+            JSONObject result = record.results.optJSONObject(i);
+            if (result != null && record.currentTaskId.equals(result.optString("taskId"))) {
+                finalText = result.optString("content");
+                savedPartial = result.optString("partial");
+                String status = result.optString("status");
+                appendSection(out, "cancelled".equals(status)
+                        || SubAgentManager.STOPPED.equals(status) || SubAgentManager.FAILED.equals(status)
+                        ? "部分成果" : "最终结果", finalText);
+                break;
+            }
+        }
+        if (savedPartial.length() > 0 && !savedPartial.equals(finalText)) appendSection(out, "已输出的内容", savedPartial);
+        if (current != null) {
+            String partial = current.optString("partial");
+            if (partial.length() > 0 && !partial.equals(finalText) && !partial.equals(savedPartial))
+                appendSection(out, "已输出的内容", partial);
+        }
+        java.util.HashSet<String> seen = new java.util.HashSet<String>();
+        for (int i = 0; i < record.events.length(); i++) {
+            JSONObject event = record.events.optJSONObject(i);
+            if (event == null || !record.currentTaskId.equals(event.optString("taskId"))
+                    || !record.id.equals(event.optString("from")) || !"message".equals(event.optString("kind"))) continue;
+            String report = event.optString("text");
+            if (report.length() > 0 && !report.equals(finalText) && seen.add(report)) appendSection(out, "阶段汇报", report);
+        }
+        if (out.length() == 0 && record.results.length() == 0) appendSection(out, "最终结果", record.result);
+        if (out.length() == 0 && record.progress.length() > 0) appendSection(out, "最近进展", record.progress);
+        boolean older = false;
+        for (int i = record.results.length() - 1; i >= 0; i--) {
+            JSONObject result = record.results.optJSONObject(i);
+            if (result == null || record.currentTaskId.equals(result.optString("taskId"))) continue;
+            String content = result.optString("content");
+            String partial = result.optString("partial");
+            if (partial.length() > 0 && !partial.equals(content)) {
+                content = content.length() == 0 ? partial : content + "\n\n部分成果\n" + partial;
+            }
+            if (content.length() == 0) continue;
+            if (!older) { if (out.length() > 0) out.append("\n\n"); out.append("历次任务成果"); older = true; }
+            String request = result.optString("taskId");
+            for (int j = 0; j < record.tasks.length(); j++) {
+                JSONObject task = record.tasks.optJSONObject(j);
+                if (task != null && request.equals(task.optString("taskId"))) {
+                    request = shortText(task.optString("request"), 220); break;
+                }
+            }
+            appendSection(out, request, content);
+        }
+        return out.toString();
+    }
+
+    private static void appendSection(StringBuilder out, String label, String content) {
+        if (content == null || content.length() == 0) return;
+        if (out.length() > 0) out.append("\n\n");
+        out.append(label).append('\n').append(content);
     }
 }

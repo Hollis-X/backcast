@@ -62,12 +62,15 @@ public final class ToolInstallProgressUiRegressionTest {
                 + "void drain(){List<Runnable> current;synchronized(this){current=new ArrayList<Runnable>(tasks);tasks.clear();}for(Runnable r:current)r.run();}}"
                 + "static class JSONObject{Map<String,Object> values=new HashMap<String,Object>();JSONObject put(String n,Object v){values.put(n,v);return this;}"
                 + "String optString(String n){Object v=values.get(n);return v==null?\"\":String.valueOf(v);}boolean optBoolean(String n){return Boolean.TRUE.equals(values.get(n));}}"
+                + "static class android{static class text{static class format{static class Formatter{static String formatFileSize(Object context,long bytes){return bytes+\" B\";}}}}}"
                 + "static class R{static class string{static final int toolkit_loading=1,toolkit_cancelled=2,toolkit_failed=3,"
                 + "toolkit_progress_preparing=4,toolkit_progress_value=5,toolkit_progress_checking=6,toolkit_progress_verifying=7,"
                 + "toolkit_progress_unpacking=8,toolkit_progress_publishing=9,toolkit_progress_registering=10,toolkit_progress_complete=11,"
-                + "toolkit_progress_refresh_failed=12,toolkit_progress_common=13,toolkit_progress_device=14,toolkit_progress_phase_artifact=15;}}"
+                + "toolkit_progress_refresh_failed=12,toolkit_progress_common=13,toolkit_progress_device=14,toolkit_progress_phase_artifact=15,"
+                + "toolkit_progress_probing=16,toolkit_progress_downloading=17,toolkit_progress_resuming=18,toolkit_progress_switching=19,toolkit_progress_bytes=20;}}"
                 + "static String getLabel(int id){String[] labels={\"\",\"loading\",\"cancelled\",\"failed\",\"preparing\",\"%1$d%% · %2$s\","
-                + "\"checking\",\"verifying\",\"unpacking\",\"publishing\",\"registering\",\"complete\",\"refresh error: %1$s\",\"common\",\"device\",\"%1$s · %2$s\"};return labels[id];}"
+                + "\"checking\",\"verifying\",\"unpacking\",\"publishing\",\"registering\",\"complete\",\"refresh error: %1$s\",\"common\",\"device\",\"%1$s · %2$s\","
+                + "\"probing\",\"downloading\",\"resuming\",\"switching\",\"%1$s / %2$s\"};return labels[id];}"
                 + "String getString(int id,Object...args){return String.format(java.util.Locale.US,getLabel(id),args);}String toolkitState(String s){return s;}"
                 + "boolean activityDestroyed,finishing,progressTerminal,batchTerminal,busy;ToolkitOperation active;"
                 + "String probeContext=\"\";Map<String,JSONObject> probeResults=new HashMap<String,JSONObject>();void finishBatchProbe(JSONObject result){}"
@@ -147,10 +150,18 @@ public final class ToolInstallProgressUiRegressionTest {
             Thread worker=new Thread(()->{try{for(int i=0;i<10000;i++)event(coalesced,coalescedOperation,"unpacking","any",i,20000);}catch(Exception error){throw new RuntimeException(error);}});
             worker.start();worker.join();
             check((int)call(coalesced,"queued")==1&&(long)call(coalesced,"delay")==100&&(int)call(coalesced,"mutations")==mutations,"Worker flooded UI callbacks or mutated widgets before main delivery");
-            call(coalesced,"drain");check((int)call(coalesced,"percent")==49&&call(coalesced,"label").equals("49% · unpacking · common"),"Coalescing did not render the newest aggregate snapshot");
+            call(coalesced,"drain");check((int)call(coalesced,"percent")==49&&call(coalesced,"label").equals("49% · unpacking · common\n9999 B / 20000 B"),"Coalescing did not render the newest aggregate snapshot");
             event(coalesced,coalescedOperation,"unpacking","arm64-v8a",10,20000);call(coalesced,"drain");
             check((int)call(coalesced,"percent")==49&&call(coalesced,"label").toString().contains("device"),"Displayed overall progress regressed or lost device stage");
             pass("worker callbacks coalesce to one main-thread update and retain newest overall progress");
+
+            for(String phase:List.of("probing","downloading","resuming","switching")){
+                Object network=start(type),networkOperation=call(network,"operation");
+                event(network,networkOperation,phase,"any",20,100);call(network,"drain");
+                check(call(network,"label").toString().contains(phase+" · common")&&call(network,"label").toString().contains("20 B / 100 B"),"Network installation stage or bytes omitted: "+phase);
+                call(network,"cancel");
+            }
+            pass("network probing, downloading, resuming and failover expose readable stage and byte progress");
 
             Object successful=start(type),successfulOperation=call(successful,"operation");
             event(successful,successfulOperation,"complete","",100,100);call(successful,"drain");

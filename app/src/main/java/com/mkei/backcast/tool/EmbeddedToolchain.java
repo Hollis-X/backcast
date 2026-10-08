@@ -3,18 +3,16 @@ package com.mkei.backcast.tool;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.PushbackInputStream;
 import java.security.MessageDigest;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Offline payloads are verified and published inside the app's private files. */
+/** A small APK manifest pins downloaded release files and private installed directories. */
 public final class EmbeddedToolchain {
     public interface Assets { InputStream open(String name) throws Exception; }
     /** Called on the installation worker; observers should post UI updates without waiting. */
@@ -54,11 +52,11 @@ public final class EmbeddedToolchain {
         final JSONObject artifact;
         final String id;
         final File destination;
-        final boolean cached, gzip;
+        final boolean cached;
         final long archiveBytes, tarBytes;
-        PayloadPlan(JSONObject artifact, String id, File destination, boolean cached, boolean gzip, long archiveBytes, long tarBytes) {
+        PayloadPlan(JSONObject artifact, String id, File destination, boolean cached, long archiveBytes, long tarBytes) {
             this.artifact = artifact; this.id = id; this.destination = destination;
-            this.cached = cached; this.gzip = gzip; this.archiveBytes = archiveBytes; this.tarBytes = tarBytes;
+            this.cached = cached; this.archiveBytes = archiveBytes; this.tarBytes = tarBytes;
         }
         long work() { return cached ? 0 : archiveBytes + tarBytes + 1; }
     }
@@ -66,13 +64,14 @@ public final class EmbeddedToolchain {
     private final Assets assets;
     private final String abi;
     private final int sdk;
+    private final ToolchainDownloader downloader;
     private JSONObject manifest;
     private File prepared;
     private File preparedCommon;
 
-    EmbeddedToolchain(ToolchainStore store, Assets assets, String abi, int sdk) {
+    EmbeddedToolchain(ToolchainStore store, Assets assets, String abi, int sdk, ToolchainDownloader downloader) {
         this.store = store; this.assets = assets;
-        this.abi = "armeabi".equals(abi) ? "armeabi-v7a" : abi; this.sdk = sdk;
+        this.abi = "armeabi".equals(abi) ? "armeabi-v7a" : abi; this.sdk = sdk; this.downloader = downloader;
     }
 
     public boolean supports(String id) {
@@ -102,11 +101,11 @@ public final class EmbeddedToolchain {
         return receipt.isFile() && digest.equals(new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8"));
     }
 
-    public synchronized File prepare(ToolchainInstaller.Cancellation cancellation, ProgressListener listener) throws Exception {
+    synchronized File prepare(ToolchainInstaller.Cancellation cancellation, ProgressListener listener, boolean allowDownload) throws Exception {
         cancellation.check();
         ProgressTracker progress = new ProgressTracker(listener);
         progress.phase("checking", "");
-        if (!supports("apktool")) throw new IllegalArgumentException("内置工具需要 Android 8.0+ 和 ARM/ARM64；当前 ABI=" + abi + "，API=" + sdk);
+        if (!supports("apktool")) throw new IllegalArgumentException("工具包需要 Android 8.0+ 和 ARM/ARM64；当前 ABI=" + abi + "，API=" + sdk);
         JSONObject data = manifest();
         String version = data.getString("version");
         JSONObject commonArtifact = artifact("any"), nativeArtifact = artifact(abi);
@@ -114,10 +113,11 @@ public final class EmbeddedToolchain {
                 || !verified(prepared, nativeArtifact.getString("sha256")))) resetPrepared();
         PayloadPlan commonPlan = plan(commonArtifact, "builtin-common-" + version + "-" + commonArtifact.getString("sha256").substring(0, 16), cancellation);
         PayloadPlan nativePlan = plan(nativeArtifact, "builtin-" + abi + "-" + version + "-" + nativeArtifact.getString("sha256").substring(0, 16), cancellation);
+        if (!allowDownload && (!commonPlan.cached || !nativePlan.cached)) throw new IllegalStateException("工具包尚未安装，请在工具配置中点击安装。");
         progress.total = commonPlan.work() + nativePlan.work() + 1;
         progress.emit(true);
-        File common = unpack(commonPlan, cancellation, progress);
-        File nativeTools = unpack(nativePlan, cancellation, progress);
+        File common = unpack(commonPlan, version, cancellation, progress);
+        File nativeTools = unpack(nativePlan, version, cancellation, progress);
         cancellation.check();
         progress.phase("registering", "");
         cancellation.check();
@@ -133,18 +133,15 @@ public final class EmbeddedToolchain {
         cancellation.check();
         File destination = store.managed(new File(store.root(), name).getPath());
         boolean cached = verified(destination, artifact.getString("sha256"));
-        if (cached) return new PayloadPlan(artifact, artifact.getString("abi"), destination, true, false, 0, 0);
-        if (destination.exists()) throw new IOException("内置工具目录校验记录不一致。");
-        InputStream stream = openArtifact(artifact);
-        boolean gzip;
-        try { int first = stream.read(), second = stream.read(); gzip = first == 0x1f && second == 0x8b; }
-        finally { stream.close(); }
+        if (cached) return new PayloadPlan(artifact, artifact.getString("abi"), destination, true, 0, 0);
+        if (destination.exists()) throw new IOException("工具包目录校验记录不一致。");
         cancellation.check();
-        long archiveBytes = gzip ? artifact.getLong("bytes") : artifact.optLong("tar_bytes", -1);
+        long archiveBytes = artifact.getLong("bytes");
         long tarBytes = artifact.optLong("tar_bytes", -1);
-        if (archiveBytes < 0 || archiveBytes > 512L * 1024 * 1024 || tarBytes < 0 || tarBytes > 512L * 1024 * 1024)
-            throw new IOException("内置工具缺少有效的归档大小记录。");
-        return new PayloadPlan(artifact, artifact.getString("abi"), destination, false, gzip, archiveBytes, tarBytes);
+        if (archiveBytes <= 0 || archiveBytes > 512L * 1024 * 1024 || tarBytes <= 0 || tarBytes > 512L * 1024 * 1024
+                || !artifact.optString("tar_sha256", "").matches("[0-9a-f]{64}"))
+            throw new IOException("工具包缺少有效的归档大小记录。");
+        return new PayloadPlan(artifact, artifact.getString("abi"), destination, false, archiveBytes, tarBytes);
     }
 
     private JSONObject manifest() throws Exception {
@@ -155,7 +152,7 @@ public final class EmbeddedToolchain {
             byte[] buffer = new byte[4096]; int count;
             while ((count = stream.read(buffer)) >= 0) {
                 bytes.write(buffer, 0, count);
-                if (bytes.size() > 512 * 1024) throw new IOException("内置工具清单过大。");
+                if (bytes.size() > 512 * 1024) throw new IOException("工具包清单过大。");
             }
         } finally { stream.close(); }
         manifest = new JSONObject(new String(bytes.toByteArray(), "UTF-8"));
@@ -168,59 +165,38 @@ public final class EmbeddedToolchain {
             JSONObject item = artifacts.getJSONObject(i);
             if (requestedAbi.equals(item.getString("abi"))) return item;
         }
-        throw new IOException("APK 中缺少当前 ABI 的内置工具。");
+        throw new IOException("工具包清单中缺少当前 ABI。");
     }
 
-    private File unpack(PayloadPlan plan, ToolchainInstaller.Cancellation cancellation, ProgressTracker progress) throws Exception {
+    private File unpack(final PayloadPlan plan, String version, ToolchainInstaller.Cancellation cancellation, final ProgressTracker progress) throws Exception {
         JSONObject artifact = plan.artifact;
         File destination = plan.destination;
         File receipt = store.managed(new File(destination, ".verified-sha256").getPath());
         String digest = artifact.getString("sha256");
         if (plan.cached) {
             cancellation.check();
-            if (!receipt.isFile() || !digest.equals(new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8"))) throw new IOException("内置工具目录校验记录已变化。");
+            if (!receipt.isFile() || !digest.equals(new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8"))) throw new IOException("工具包目录校验记录已变化。");
             return destination;
         }
-        if (destination.exists()) throw new IOException("内置工具目录校验记录不一致。");
+        if (destination.exists()) throw new IOException("工具包目录校验记录不一致。");
         if (!store.root().isDirectory() && !store.root().mkdirs()) throw new IOException("无法创建私有工具目录。");
+        final long[] accounted = new long[1];
+        File archive = downloader.fetch(artifact, version, store.managed(new File(store.root(), ".downloads").getPath()), cancellation,
+                new ToolchainDownloader.Listener() { public void update(String stage, long verified, long total) {
+                    progress.phase(stage, plan.id);
+                    long delta = Math.max(0L, verified - accounted[0]);
+                    accounted[0] += delta; progress.advance(delta);
+                } });
         File stage = store.managed(new File(store.root(), ".embedded-" + UUID.randomUUID()).getPath());
-        if (!stage.mkdir()) throw new IOException("无法创建内置工具暂存目录。");
+        if (!stage.mkdir()) throw new IOException("无法创建工具包安装暂存目录。");
         boolean published = false;
         try {
-            File archive = new File(stage, "payload.archive"), payload = new File(stage, "payload");
-            progress.phase("verifying", plan.id);
-            MessageDigest sha = MessageDigest.getInstance("SHA-256");
-            long total = 0;
-            boolean gzip;
-            PushbackInputStream input = new PushbackInputStream(openArtifact(artifact), 2);
-            try {
-                FileOutputStream output = new FileOutputStream(archive);
-                try {
-                int first = input.read(), second = input.read();
-                if (second >= 0) input.unread(second);
-                if (first >= 0) input.unread(first);
-                gzip = first == 0x1f && second == 0x8b;
-                if (gzip != plan.gzip) throw new IOException("内置工具归档格式在安装时发生变化。");
-                String expectedDigest = gzip ? digest : artifact.optString("tar_sha256", "");
-                long expectedBytes = gzip ? artifact.getLong("bytes") : artifact.optLong("tar_bytes", -1);
-                if (expectedDigest.length() != 64 || expectedBytes < 0) throw new IOException("内置工具缺少实际归档格式的校验记录。");
-                byte[] buffer = new byte[16384]; int read;
-                while ((read = input.read(buffer)) >= 0) {
-                    cancellation.check(); total += read;
-                    if (total > expectedBytes) throw new IOException("内置工具大小校验失败。");
-                    sha.update(buffer, 0, read); output.write(buffer, 0, read);
-                    progress.advance(read);
-                }
-                output.getFD().sync();
-                if (total != expectedBytes || !expectedDigest.equals(ToolchainInstaller.hex(sha.digest()))) throw new IOException("内置工具 SHA-256 校验失败。");
-                progress.emit(true);
-                } finally { output.close(); }
-            } finally { input.close(); }
-            if (!payload.mkdir()) throw new IOException("无法解包内置工具。");
+            File payload = new File(stage, "payload");
+            if (!payload.mkdir()) throw new IOException("无法解包工具包。");
             progress.phase("unpacking", plan.id);
             InputStream stored = new FileInputStream(archive);
             try {
-                if (gzip) stored = new GZIPInputStream(stored);
+                stored = new GZIPInputStream(stored);
                 VerifiedTarStream tar = new VerifiedTarStream(stored, artifact, progress);
                 ToolchainInstaller.extractTar(tar, payload, "", cancellation);
                 byte[] remainder = new byte[16384]; while (tar.read(remainder) >= 0) { cancellation.check(); }
@@ -232,28 +208,16 @@ public final class EmbeddedToolchain {
             progress.phase("publishing", plan.id);
             cancellation.check();
             store.managed(destination.getPath());
-            if (!payload.renameTo(destination)) throw new IOException("无法发布内置工具。");
+            if (!payload.renameTo(destination)) throw new IOException("无法发布工具包。");
             published = true; cancellation.check();
             progress.advance(1); progress.emit(true);
+            store.managed(archive.getPath());
+            if (!archive.delete()) throw new IOException("无法清理已安装工具包的下载缓存。");
             return destination;
         } catch (Exception failure) {
             if (published) ToolchainInstaller.remove(destination, store.root());
             throw failure;
         } finally { ToolchainInstaller.remove(stage, store.root()); }
-    }
-
-    private InputStream openArtifact(JSONObject artifact) throws Exception {
-        String primary = artifact.getString("asset");
-        try { return assets.open(primary); }
-        catch (IOException unavailable) {
-            String alternate = artifact.optString("tar_asset", "");
-            if (alternate.length() == 0 || artifact.optString("tar_sha256", "").length() != 64
-                    || artifact.optLong("tar_bytes", -1) < 0) throw unavailable;
-            try { return assets.open(alternate); }
-            catch (IOException missing) {
-                throw new IOException("APK 中缺少内置工具资源：" + primary + " 或 " + alternate, missing);
-            }
-        }
     }
 
     private static final class VerifiedTarStream extends FilterInputStream {
@@ -276,12 +240,12 @@ public final class EmbeddedToolchain {
         }
         private void counted(int bytes) throws IOException {
             count += bytes;
-            if (count > 512L * 1024 * 1024 || expectedBytes >= 0 && count > expectedBytes) throw new IOException("内置工具解压大小校验失败。");
+            if (count > 512L * 1024 * 1024 || expectedBytes >= 0 && count > expectedBytes) throw new IOException("工具包解压大小校验失败。");
             progress.advance(bytes);
         }
         void verify() throws IOException {
             if (expectedDigest.length() > 0 && (count != expectedBytes || !expectedDigest.equals(ToolchainInstaller.hex(sha.digest())))) {
-                throw new IOException("内置工具解压后的 TAR SHA-256 校验失败。");
+                throw new IOException("工具包解压后的 TAR SHA-256 校验失败。");
             }
         }
     }

@@ -310,6 +310,28 @@ public class LlmClient {
         this.config = config;
     }
 
+    /** Child checkpoint configuration contains only a credential fingerprint, never the key. */
+    public JSONObject configSnapshot() {
+        try {
+            return new JSONObject().put("baseUrl", config.baseUrl).put("credentialFingerprint", credentialFingerprint(config.apiKey))
+                    .put("model", config.model).put("providerId", config.providerId)
+                    .put("reasoningEffort", config.reasoningEffort).put("verbosity", config.verbosity)
+                    .put("responseInstructions", config.responseInstructions).put("timeoutMs", config.timeoutMs)
+                    .put("maxTokens", config.maxTokens).put("totalTimeoutMs", config.totalTimeoutMs)
+                    .put("maxResponseChars", config.maxResponseChars);
+        } catch (org.json.JSONException invalid) { throw new IllegalStateException("无法捕获父 agent 模型配置。", invalid); }
+    }
+
+    public static String credentialFingerprint(String credential) {
+        try {
+            byte[] bytes = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest((credential == null ? "" : credential).getBytes("UTF-8"));
+            StringBuilder result = new StringBuilder();
+            for (byte value : bytes) result.append(String.format(java.util.Locale.US, "%02x", value & 255));
+            return result.toString();
+        } catch (Exception impossible) { throw new IllegalStateException("无法校验模型授权身份。", impossible); }
+    }
+
     /** 断开正在进行的请求。用户点停止时调用。 */
     public void abort() {
         Attempt current = attempt;

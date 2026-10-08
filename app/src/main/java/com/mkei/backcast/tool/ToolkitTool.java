@@ -15,6 +15,8 @@ public final class ToolkitTool implements Tool {
     private String workDir;
     private TemporaryWorkspace temporary;
     private volatile int epoch;
+    private final Object installationLock = new Object();
+    private ToolchainInstaller.Cancellation installation;
 
     public ToolkitTool(ShellTool shell, ToolchainStore store, String workDir,
             TemporaryWorkspace temporary, String abi) {
@@ -26,10 +28,10 @@ public final class ToolkitTool implements Tool {
     @Override public String name() { return "toolkit"; }
 
     @Override public String description() {
-        return "直接调用 APK 内置逆向工具，无需用户下载或填写路径。list 查看内置工具；status 实际探测指定 tool，例如 {action:'status',tool:'apktool'}；"
+        return "直接调用已安装的逆向工具，无需填写私有工具路径。工具配置中的安装按钮从固定发布源下载工具包；list、status、diagnose 和 run 不会下载。list 查看工具；status 实际探测指定 tool，例如 {action:'status',tool:'apktool'}；"
                 + "diagnose 检查受管理的工具入口；Objection 会真实验证私有 Frida client/server 版本、匹配情况和 ART 兼容模式。"
                 + "私有工具路径通过 toolkit 管理，不要用 shell 访问或要求用户把 App 私有目录添加为工作文件夹。"
-                + "Apktool 使用内置 DEX JAR 和 Android aapt2，radare2/rabin2、GNU binutils、Objection/Python/Frida 均离线释放到 App 私有目录。"
+                + "Apktool 使用 DEX JAR 和 Android aapt2，radare2/rabin2、GNU binutils、Objection/Python/Frida 安装在 App 私有目录，安装后可离线使用。"
                 + "支持 Android 8.0+ ARM/ARM64；Objection 自动启用本次调用的本地 Frida server，结束后清理子进程，跨应用操作需要 root。"
                 + "Objection 用 ['-n','包名','run','android hooking list classes'] 这样的单次命令；交互 start/explore 和桌面 patch/sign 工作流不适用于此入口。"
                 + "list 返回各工具参数示例。radare2 用 ['-c','ii;is;afl;q','文件']，本入口自动非交互退出；rabin2 的 -I/-i 分别查看信息/导入。"
@@ -61,7 +63,12 @@ public final class ToolkitTool implements Tool {
         } catch (Exception failure) { return new JSONObject(); }
     }
 
-    @Override public void abort() { epoch++; shell.abort(); }
+    @Override public void abort() {
+        ToolchainInstaller.Cancellation owned;
+        synchronized (installationLock) { epoch++; owned = installation; }
+        if (owned != null) store.cancelDownloads(owned);
+        shell.abort();
+    }
 
     @Override public String run(JSONObject args) throws Exception {
         final int mine = epoch;
@@ -104,7 +111,7 @@ public final class ToolkitTool implements Tool {
                     ToolchainStore.Launcher launcher = store.launcher(id, new ToolchainInstaller.Cancellation() {
                         public void check() throws Exception { checkEpoch(mine); }
                     });
-                    if (launcher == null) return status(id, mine, shellMine).put("error", "当前设备没有兼容的内置工具入口。").toString();
+                    if (launcher == null) return status(id, mine, shellMine).put("success", false).put("error", "工具未安装或运行入口不可用，请检查工具配置。").toString();
                     checkEpoch(mine);
                     result = shell.runProgram(launcher, arguments, args.optBoolean("temporary", true), args.optInt("timeout_sec", 60), shellMine);
                 } } finally { use.close(); }
@@ -134,9 +141,9 @@ public final class ToolkitTool implements Tool {
         for (int i = 0; i < tools.length(); i++) {
             JSONObject entry = tools.getJSONObject(i), configured = store.configuration(entry.getString("id"));
             boolean bundled = store.bundled(entry.getString("id"));
-            entry.put("bundled", bundled).put("configured", bundled || configured.optString("path", "").length() > 0).put("configuration", visibleConfiguration(configured))
-                    .put("state", bundled ? store.bundledRemoved() ? "removed" : bundle.optBoolean("installed") ? "installed" : "bundled_not_probed" : configured.optString("path", "").length() > 0 ? "configured_not_probed"
-                            : store.hasBundledAssets() ? "unsupported" : "unconfigured");
+            entry.put("bundled", bundled).put("configured", bundled ? bundle.optBoolean("installed") : configured.optString("path", "").length() > 0).put("configuration", visibleConfiguration(configured))
+                    .put("state", bundled ? bundle.optString("state", "not_installed") : configured.optString("path", "").length() > 0 ? "configured_not_probed"
+                            : store.hasPackageManifest() ? "unsupported" : "unconfigured");
         }
         JSONObject visibleBundle = new JSONObject(bundle.toString()), manifest = visibleBundle.optJSONObject("manifest");
         if (manifest != null) {
@@ -151,8 +158,20 @@ public final class ToolkitTool implements Tool {
     }
 
     public JSONObject installBundled(EmbeddedToolchain.ProgressListener listener) throws Exception {
-        final int mine = epoch;
-        return store.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } }, listener);
+        final int mine;
+        final ToolchainInstaller.Cancellation owned;
+        synchronized (installationLock) {
+            if (installation != null) throw new IllegalStateException("本会话的工具包安装仍在进行中。");
+            mine = epoch;
+            owned = new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } };
+            installation = owned;
+        }
+        try {
+            checkEpoch(mine);
+            return store.installBundled(owned, listener);
+        } finally {
+            synchronized (installationLock) { if (installation == owned) installation = null; }
+        }
     }
     public JSONObject removeBundled() throws Exception {
         final int mine = epoch;
@@ -168,19 +187,25 @@ public final class ToolkitTool implements Tool {
         final int token = mine;
         ToolchainStore.Use use = store.beginUse(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(token); } });
         try {
-            if (store.bundled(id) && store.bundledRemoved()) return ToolCatalog.get(id).json().put("ready", false).put("state", "removed").put("bundled", true);
+            if (store.bundled(id) && store.bundledRemoved()) return ToolCatalog.get(id).json().put("ready", false).put("success", false).put("state", "removed").put("bundled", true);
             synchronized (store.toolLock(id)) { checkEpoch(mine); return statusLocked(id, mine, shellMine); }
         } finally { use.close(); }
     }
 
     private JSONObject statusLocked(String id, final int mine, int shellMine) throws Exception {
+        if (store.bundled(id)) {
+            JSONObject bundle = store.packageStatus();
+            if (!bundle.optBoolean("installed")) return ToolCatalog.get(id).json().put("ready", false).put("success", false)
+                    .put("state", bundle.optString("state", "not_installed")).put("bundled", true)
+                    .put("hint", "请在工具配置中点击安装工具包。");
+        }
         ToolchainStore.Launcher launcher = store.launcher(id, new ToolchainInstaller.Cancellation() {
             public void check() throws Exception { checkEpoch(mine); }
         });
         JSONObject result = ToolCatalog.get(id).json(), configured = store.configuration(id);
         result.put("configuration", visibleConfiguration(configured)).put("ready", false).put("bundled", store.bundled(id))
                 .put("probe_type", "version").put("probe_scope", "只验证程序版本入口；目标文件分析和动态附加能力以实际 run 结果为准。");
-        if (configured.optString("path", "").length() == 0) return result.put("state", store.hasBundledAssets() ? "unsupported" : "unconfigured");
+        if (configured.optString("path", "").length() == 0) return result.put("state", store.hasPackageManifest() ? "unsupported" : "unconfigured");
         if (launcher == null) return result.put("state", "needs_runtime");
         List<String> version = new ArrayList<String>(); version.add("--version");
         if ("radare2".equals(id) || "rabin2".equals(id)) { version.clear(); version.add("-v"); }
@@ -211,7 +236,7 @@ public final class ToolkitTool implements Tool {
         try { synchronized (store.toolLock(id)) {
             checkEpoch(mine);
             if (store.bundled(id) && store.bundledRemoved()) return ToolCatalog.get(id).json()
-                    .put("ready", false).put("state", "removed").put("bundled", true);
+                    .put("ready", false).put("success", false).put("state", "removed").put("bundled", true);
             JSONObject result = statusLocked(id, mine, shellMine);
             if (!"objection".equals(id)) return result;
             ToolchainStore.Launcher launcher = store.launcher(id, new ToolchainInstaller.Cancellation() {
@@ -256,7 +281,7 @@ public final class ToolkitTool implements Tool {
             result.put("ready", ready).put("state", ready ? "diagnostic_ready" : "unavailable");
             if (!matches) result.put("failure_kind", serverVersion.length() == 0 || clientVersion.length() == 0
                     ? "frida_runtime_unavailable" : "frida_version_mismatch")
-                    .put("hint", "Frida client/server 必须匹配且都能启动。请在工具配置中重新安装内置工具包，再运行 diagnose；没有执行目标 Java hook。");
+                    .put("hint", "Frida client/server 必须匹配且都能启动。请在工具配置中重新安装工具包，再运行 diagnose；没有执行目标 Java hook。");
             return result;
         } } finally { use.close(); }
     }
@@ -307,7 +332,7 @@ public final class ToolkitTool implements Tool {
                 && ("script_create".equals(phase) || phase.length() == 0
                 && (output.contains("Script(line ") || output.contains("script(line ")))) {
             result.put("failure_kind", "frida_script_invalid").put("frida_phase", "script_create").put("hint", "Frida 已附加，但 Objection 脚本编译失败。"
-                    + "这是脚本语法或打包错误，不是附加超时；使用更新后的内置工具包并保留原始行号。");
+                    + "这是脚本语法或打包错误，不是附加超时；使用更新后的工具包并保留原始行号。");
         } else if ("objection".equals(id) && output.contains("TimedOutError")) {
             result.put("failure_kind", "frida_operation_timeout").put("hint", "Frida 操作超时；按 frida_phase 和原始 traceback 区分脚本加载、RPC 或连接。"
                     + "没有 attach 阶段证据时不能称附加失败，也不能凭超时判定反调试。");
@@ -380,7 +405,7 @@ public final class ToolkitTool implements Tool {
                         + "只指定 name/PID、一次 run 命令及 debug/spawn/no-pause/foremost 等目标选项。");
             }
             if ("version".equals(value) || "run".equals(value)) return;
-            throw new IllegalArgumentException("内置 Objection 使用非交互 run 单次命令或 version。start/explore/API 常驻服务和桌面 patch/sign 流程不由该入口执行。");
+            throw new IllegalArgumentException("Objection 使用非交互 run 单次命令或 version。start/explore/API 常驻服务和桌面 patch/sign 流程不由该入口执行。");
         }
         throw new IllegalArgumentException("请给 Objection 的 run 命令，例如 ['-n','包名','run','android hooking list classes']。");
     }

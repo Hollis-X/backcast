@@ -271,7 +271,7 @@ public final class SubAgentLoopIntegrationTest {
         for (int i = 0; i < 100 && f.manager.hasPendingWork(); i++) Thread.sleep(10L);
         check(!f.manager.hasPendingWork(), "Cancelled child did not finish its cleanup");
         check(SubAgentManager.IDLE.equals(f.manager.find(idle).status), "Cancelling a parent closed its idle reusable child");
-        f.manager.resumePending(); f.manager.send("main", idle, "reuse after cancellation"); f.manager.waitFor("main", null, 5000L);
+        f.manager.resumePending(); f.manager.send("main", idle, "reuse after cancellation", "task"); f.manager.waitFor("main", null, 5000L);
         check(SubAgentManager.IDLE.equals(f.manager.find(idle).status), "Idle context was unusable after parent cancellation");
     }
 
@@ -394,7 +394,7 @@ public final class SubAgentLoopIntegrationTest {
         f.manager.waitFor("main", null, 5000L); long first = f.manager.usageLease(id);
         check(first == f.root.goalUsageLease(), "Initial delegated task lacked its parent's usage lease");
         f.manager.collectResults(); f.manager.acknowledgeResults(); f.root.setGoal("second goal");
-        f.manager.send("main", id, "new goal work"); f.manager.waitFor("main", null, 5000L);
+        f.manager.send("main", id, "new goal work", "task"); f.manager.waitFor("main", null, 5000L);
         check(first != f.manager.usageLease(id) && f.manager.usageLease(id) == f.root.goalUsageLease()
                 && f.childCalls.get() == 2 && SubAgentManager.IDLE.equals(f.manager.find(id).status),
                 "Idle loop reuse retained the old goal's billing lease");
@@ -511,7 +511,7 @@ public final class SubAgentLoopIntegrationTest {
                     for (int i = 0; i < tasks.length(); i++) oldId.add(tasks.getJSONObject(i).getString("id"));
                     f.root.renameGoal("new scope");
                     check(!f.manager.list("main", 0).getBoolean("cancelled")
-                            && SubAgentManager.FAILED.equals(f.manager.find(oldId.get(0)).status),
+                            && SubAgentManager.STOPPED.equals(f.manager.find(oldId.get(0)).status),
                             "Objective change disabled the manager or kept old work active");
                     f.childRelease.countDown(); return text("continue the updated objective");
                 }
@@ -527,7 +527,7 @@ public final class SubAgentLoopIntegrationTest {
         try {
             f.submit();
             check(f.errors.isEmpty() && Goal.COMPLETE.equals(f.root.goalStatus()) && f.childCalls.get() == 2
-                    && SubAgentManager.FAILED.equals(f.manager.find(oldId.get(0)).status),
+                    && SubAgentManager.STOPPED.equals(f.manager.find(oldId.get(0)).status),
                     "Current parent turn could not delegate after objective change: " + f.errors);
         } finally { f.childRelease.countDown(); f.root.cancel(); }
     }
@@ -543,7 +543,7 @@ public final class SubAgentLoopIntegrationTest {
         catch (IllegalStateException expected) { rejected = true; }
         check(rejected && f.manager.list("main", 0).getBoolean("cancelled")
                 && f.manager.find("main").managerCancelled && f.childCalls.get() == 1
-                && SubAgentManager.FAILED.equals(f.manager.find(id).status),
+                && SubAgentManager.STOPPED.equals(f.manager.find(id).status),
                 "Renaming a stopped goal cleared cancellation or restarted child work");
     }
 
@@ -657,10 +657,10 @@ public final class SubAgentLoopIntegrationTest {
             String id = f.spawn(); f.manager.waitFor("main", null, 5000L);
             f.root.setAutomaticDelegation(false);
             boolean rejected = false;
-            try { f.manager.send("main", id, "model-chosen follow-up"); }
+            try { f.manager.send("main", id, "model-chosen follow-up", "task"); }
             catch (IllegalStateException expected) { rejected = true; }
             check(rejected && f.childCalls.get() == 1, "A model follow-up bypassed max's explicit-user requirement");
-            f.manager.sendFromUser(id, "user-directed follow-up");
+            f.manager.sendFromUser(id, "user-directed follow-up", "task");
             f.manager.waitFor("main", null, 5000L);
             check(f.childCalls.get() == 2 && "user-directed follow-up".equals(f.manager.find(id).task)
                     && !f.root.delegationAllowed() && !f.child.delegationAllowed(),
@@ -669,10 +669,11 @@ public final class SubAgentLoopIntegrationTest {
             try { f.manager.spawn(id, "unrequested descendant", "new work", false); }
             catch (IllegalStateException expected) { rejected = true; }
             check(rejected, "A user child message gave the child unlimited delegation authority");
-            f.root.cancel(); rejected = false;
-            try { f.manager.sendFromUser(id, "must remain stopped"); }
-            catch (IllegalStateException expected) { rejected = true; }
-            check(rejected && f.childCalls.get() == 2, "User child sending revived a stopped manager");
+            f.root.cancel();
+            f.manager.sendFromUser(id, "explicit new child task", "task");
+            f.manager.waitFor("main", null, 5000L);
+            check(f.childCalls.get() == 3 && !f.manager.shouldWakeRoot() && !f.root.busy(),
+                    "Explicit child task failed or revived its stopped parent");
         } finally { f.root.cancel(); }
     }
 
@@ -689,7 +690,7 @@ public final class SubAgentLoopIntegrationTest {
             f.submit();
             check(Goal.BUDGET_LIMITED.equals(f.root.goalStatus()), "Fixture did not exhaust the parent goal budget");
             boolean rejected = false;
-            try { f.manager.sendFromUser(id, "overspend from UI"); }
+            try { f.manager.sendFromUser(id, "overspend from UI", "task"); }
             catch (IllegalStateException expected) { rejected = true; }
             check(rejected && f.childCalls.get() == 1, "User child sending bypassed the parent budget");
         } finally { f.root.cancel(); }

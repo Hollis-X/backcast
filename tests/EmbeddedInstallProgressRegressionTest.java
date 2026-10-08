@@ -21,7 +21,7 @@ public final class EmbeddedInstallProgressRegressionTest {
     private static final ToolchainInstaller.Cancellation LIVE = new ToolchainInstaller.Cancellation() { public void check() { } };
     private static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }
     private static final class Payload implements EmbeddedToolchain.Assets {
-        final byte[] commonTar, common, nativeTar;
+        final byte[] commonTar, common, nativeTar, nativeGzip;
         final JSONObject manifest;
         int opens, closedStreams;
         boolean damaged;
@@ -30,18 +30,18 @@ public final class EmbeddedInstallProgressRegressionTest {
             nativeTar = tar("usr/bin/greadelf", 170000);
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             GZIPOutputStream gzip = new GZIPOutputStream(bytes); gzip.write(commonTar); gzip.close(); common = bytes.toByteArray();
+            bytes = new ByteArrayOutputStream(); gzip = new GZIPOutputStream(bytes); gzip.write(nativeTar); gzip.close(); nativeGzip = bytes.toByteArray();
             manifest = new JSONObject().put("version", "progress-fixture").put("artifacts", new JSONArray()
                     .put(artifact("any", "common", commonTar, common))
-                    .put(artifact("arm64-v8a", "native", nativeTar, nativeTar)));
+                    .put(artifact("arm64-v8a", "native", nativeTar, nativeGzip)));
         }
         JSONObject artifact(String abi, String name, byte[] raw, byte[] source) throws Exception {
-            return new JSONObject().put("abi", abi).put("asset", "toolchain/" + name + ".tar.gz")
-                    .put("tar_asset", "toolchain/" + name + ".tar").put("sha256", hash(source))
-                    .put("bytes", source.length).put("tar_sha256", hash(raw)).put("tar_bytes", raw.length);
+            return ToolchainFixtures.pin(new JSONObject().put("abi", abi).put("file", name + ".tar.gz").put("sha256", hash(source))
+                    .put("bytes", source.length).put("tar_sha256", hash(raw)).put("tar_bytes", raw.length), "progress-fixture", source);
         }
         public InputStream open(String name) throws Exception {
             opens++;
-            byte[] source = name.endsWith("manifest.json") ? manifest.toString().getBytes("UTF-8") : name.contains("common") ? common : nativeTar;
+            byte[] source = name.endsWith("manifest.json") ? manifest.toString().getBytes("UTF-8") : name.contains("common") ? common : nativeGzip;
             if (damaged && name.contains("native")) { source = source.clone(); source[source.length - 1] = 1; }
             return new ByteArrayInputStream(source) {
                 private boolean closed;
@@ -51,7 +51,7 @@ public final class EmbeddedInstallProgressRegressionTest {
                 }
             };
         }
-        ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30); }
+        ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30, ArtRuntimeLauncher.DEVICE, ToolchainFixtures.transport(this, manifest)); }
     }
     private static final class Events implements EmbeddedToolchain.ProgressListener {
         final List<EmbeddedToolchain.Progress> values = new ArrayList<EmbeddedToolchain.Progress>();
@@ -90,7 +90,7 @@ public final class EmbeddedInstallProgressRegressionTest {
         File[] files = store.root().listFiles();
         if (files != null) for (File file : files) check(!file.getName().startsWith(".embedded-"), "Installation staging leaked");
     }
-    private static void mixedArchiveFormatsReportAnExactWholePackageBudget() throws Exception {
+    private static void downloadAndExpandedBytesReportAnExactWholePackageBudget() throws Exception {
         Payload payload = new Payload(); final ToolchainStore store = payload.store("real"); final Events events = new Events();
         check(store.installBundled(LIVE, new EmbeddedToolchain.ProgressListener() { public void onProgress(EmbeddedToolchain.Progress value) {
             events.onProgress(value);
@@ -102,7 +102,7 @@ public final class EmbeddedInstallProgressRegressionTest {
             } catch (Exception failure) { throw new AssertionError(failure); }
         } }).getBoolean("installed"), "Offline install failed"); events.validate(true);
         EmbeddedToolchain.Progress last = events.values.get(events.values.size() - 1);
-        check(last.total == payload.common.length + payload.commonTar.length + 2L * payload.nativeTar.length + 3, "Budget did not include actual gzip/TAR reads, both publications and registration");
+        check(last.total == payload.common.length + payload.commonTar.length + payload.nativeGzip.length + payload.nativeTar.length + 3, "Budget did not include verified downloaded bytes, expanded TAR bytes, publications and registration");
         List<String> phases = new ArrayList<String>();
         List<Long> starts = new ArrayList<Long>();
         for (EmbeddedToolchain.Progress value : events.values) {
@@ -112,10 +112,10 @@ public final class EmbeddedInstallProgressRegressionTest {
             }
             if (!value.artifact.isEmpty()) check("any".equals(value.artifact) || "arm64-v8a".equals(value.artifact), "Progress lost payload identity");
         }
-        check(phases.equals(java.util.Arrays.asList("checking", "verifying:any", "unpacking:any", "publishing:any",
-                "verifying:arm64-v8a", "unpacking:arm64-v8a", "publishing:arm64-v8a", "registering", "complete")),
+        check(phases.equals(java.util.Arrays.asList("checking", "probing:any", "downloading:any", "verifying:any", "unpacking:any", "publishing:any",
+                "probing:arm64-v8a", "downloading:arm64-v8a", "verifying:arm64-v8a", "unpacking:arm64-v8a", "publishing:arm64-v8a", "registering", "complete")),
                 "Real phase transitions were omitted, duplicated or reordered");
-        long[] work = {payload.common.length, payload.commonTar.length, 1, payload.nativeTar.length, payload.nativeTar.length, 1, 1};
+        long[] work = {0, payload.common.length, 0, payload.commonTar.length, 1, 0, payload.nativeGzip.length, 0, payload.nativeTar.length, 1, 1};
         for (int i = 0; i < work.length; i++) check(starts.get(i + 2) - starts.get(i + 1) == work[i],
                 "Real total progress did not account for the completed phase " + phases.get(i + 1));
         check(events.values.size() < 30, "Fast byte reads were emitted without throttling"); stagingGone(store);
@@ -162,9 +162,9 @@ public final class EmbeddedInstallProgressRegressionTest {
         failed = false;
         try { outputStore.installBundled(LIVE, new EmbeddedToolchain.ProgressListener() { public void onProgress(EmbeddedToolchain.Progress value) {
             outputEvents.onProgress(value);
-            if ("verifying".equals(value.stage) && value.completed == 0) {
-                for (File directory : outputStore.root().listFiles()) if (directory.getName().startsWith(".embedded-"))
-                    check(new File(directory, "payload.archive").mkdir(), "Could not inject a destination-open failure");
+            if ("probing".equals(value.stage) && value.completed == 0) {
+                try { check(new File(outputStore.root(), ".downloads/" + hash(outputPayload.common) + ".part").mkdir(), "Could not inject a destination-open failure"); }
+                catch (Exception failure) { throw new AssertionError(failure); }
             }
         } }); } catch (java.io.IOException expected) { failed = true; }
         check(failed && outputPayload.opens == outputPayload.closedStreams, "Opening the destination failed after opening its asset stream without closing it");
@@ -203,7 +203,7 @@ public final class EmbeddedInstallProgressRegressionTest {
     public static void main(String[] args) throws Exception {
         root = Files.createTempDirectory("backcast-install-progress-").toFile();
         try {
-            for (String method : new String[]{"mixedArchiveFormatsReportAnExactWholePackageBudget", "cachedAndReinstalledPackagesResetTheirProgress",
+            for (String method : new String[]{"downloadAndExpandedBytesReportAnExactWholePackageBudget", "cachedAndReinstalledPackagesResetTheirProgress",
                     "cancellationNeverCompletesAndCleansEveryExtractionPhase", "checksumAndObserverFailureCannotReportSuccess",
                     "callbacksKeepThePackageMutationGateHeld", "progressSnapshotsAreImmutable"}) {
                 EmbeddedInstallProgressRegressionTest.class.getDeclaredMethod(method).invoke(null); System.out.println("PASS " + method);

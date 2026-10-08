@@ -34,10 +34,67 @@ public final class McpTools implements ToolRegistry.Source {
         refresh("");
     }
 
-    public static void register(ToolRegistry registry, McpStore store) {
+    private McpTools(McpStore store, JSONObject snapshot) {
+        this.store = store;
+        try {
+            JSONArray configured = snapshot.getJSONArray("servers");
+            for (int i = 0; i < configured.length(); i++) {
+                JSONObject entry = configured.getJSONObject(i);
+                McpServer server = null;
+                for (McpServer authorized : store.servers()) {
+                    if (authorized.enabled && authorized.id.equals(entry.getString("id"))
+                            && authorized.endpoint.equals(entry.getString("endpoint"))
+                            && authorized.timeoutSeconds == entry.getInt("timeoutSeconds")
+                            && com.mkei.backcast.agent.LlmClient.credentialFingerprint(authorized.bearerToken)
+                                .equals(entry.getString("credentialFingerprint"))) {
+                        server = new McpServer(authorized.id, entry.getString("name"), authorized.endpoint,
+                                authorized.bearerToken, true, authorized.timeoutSeconds);
+                        break;
+                    }
+                }
+                if (server == null) throw new IllegalStateException("父 agent MCP 授权已禁用、删除或变更，不能恢复旧工具。");
+                List<McpToolInfo> tools = new ArrayList<McpToolInfo>();
+                JSONArray cached = entry.getJSONArray("tools");
+                for (int j = 0; j < cached.length(); j++) tools.add(new McpToolInfo(cached.getJSONObject(j)));
+                servers.put(server.id, server); schemas.put(server.id, tools);
+            }
+            JSONObject selected = snapshot.optJSONObject("selection");
+            selection = selected == null ? null : McpSelection.fromJson(selected);
+            refresh(selection == null ? "" : selection.serverId);
+        } catch (Exception invalid) { throw new IllegalStateException("父 agent MCP 工具快照损坏。", invalid); }
+    }
+
+    public static McpTools register(ToolRegistry registry, McpStore store) {
         McpTools source = new McpTools(store);
         if (!source.servers.isEmpty()) registry.addSource(source);
+        return source;
     }
+
+    /** Registers an independent client set for the captured parent tools. Revocation stays live. */
+    public static McpTools register(ToolRegistry registry, McpStore store, JSONObject snapshot) {
+        McpTools source = new McpTools(store, snapshot);
+        if (!source.servers.isEmpty()) registry.addSource(source);
+        return source;
+    }
+
+    /** Factory checkpoint stores credential fingerprints, never tokens or session headers. */
+    public synchronized JSONObject contextSnapshot() {
+        try {
+            JSONArray configured = new JSONArray();
+            for (McpServer server : servers.values()) {
+                JSONArray cached = new JSONArray();
+                for (McpToolInfo tool : schemas.get(server.id)) cached.put(tool.toJson());
+                configured.put(new JSONObject().put("id", server.id).put("name", server.name)
+                        .put("endpoint", server.endpoint).put("credentialFingerprint",
+                                com.mkei.backcast.agent.LlmClient.credentialFingerprint(server.bearerToken))
+                        .put("timeoutSeconds", server.timeoutSeconds).put("tools", cached));
+            }
+            JSONObject snapshot = new JSONObject().put("servers", configured);
+            if (selection != null) snapshot.put("selection", selection.toJson());
+            return snapshot;
+        } catch (Exception invalid) { throw new IllegalStateException("无法捕获父 agent MCP 配置。", invalid); }
+    }
+
 
     @Override public List<Tool> tools() { return exposed; }
 

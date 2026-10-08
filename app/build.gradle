@@ -35,6 +35,11 @@ android {
         // This APK is sideloaded and deliberately retains targetSdk 26 behavior.
         disable 'ExpiredTargetSdkVersion'
     }
+    testOptions {
+        unitTests.all {
+            systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+        }
+    }
 }
 
 dependencies {
@@ -43,6 +48,8 @@ dependencies {
     // App cancellation/deadline hooks use the SDK's public transport APIs directly.
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'com.squareup.okio:okio-jvm:3.6.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }
 
 // JVM regressions use the same official SDK dependency graph as the packaged app.

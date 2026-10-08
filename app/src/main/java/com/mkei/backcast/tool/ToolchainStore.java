@@ -26,6 +26,7 @@ public final class ToolchainStore {
 
     private final File root, registry;
     private final EmbeddedToolchain embedded;
+    private final ToolchainDownloader downloader;
     private final ArtRuntimeLauncher.Probe artRuntime;
     private static final ConcurrentHashMap<String, ReentrantReadWriteLock> OPERATIONS =
             new ConcurrentHashMap<String, ReentrantReadWriteLock>();
@@ -43,13 +44,19 @@ public final class ToolchainStore {
     }
 
     ToolchainStore(File directory, EmbeddedToolchain.Assets assets, String abi, int sdk, ArtRuntimeLauncher.Probe artRuntime) {
+        this(directory, assets, abi, sdk, artRuntime, null);
+    }
+
+    ToolchainStore(File directory, EmbeddedToolchain.Assets assets, String abi, int sdk, ArtRuntimeLauncher.Probe artRuntime,
+            ToolchainDownloader.Transport transport) {
         if (directory == null) throw new IllegalArgumentException("工具安装需要 App 私有路径。");
         if (artRuntime == null) throw new IllegalArgumentException("ART 入口探测不能为空。");
         this.artRuntime = artRuntime;
         try { root = directory.getCanonicalFile(); }
         catch (IOException error) { throw new IllegalArgumentException("无法确认工具目录。", error); }
         registry = new File(root, "registry.json");
-        embedded = assets == null ? null : new EmbeddedToolchain(this, assets, abi, sdk);
+        downloader = assets == null ? null : transport == null ? new ToolchainDownloader() : new ToolchainDownloader(transport);
+        embedded = assets == null ? null : new EmbeddedToolchain(this, assets, abi, sdk, downloader);
         ReentrantReadWriteLock created = new ReentrantReadWriteLock(true);
         ReentrantReadWriteLock shared = OPERATIONS.putIfAbsent(root.getPath(), created);
         operations = shared == null ? created : shared;
@@ -58,7 +65,8 @@ public final class ToolchainStore {
     public File root() { return root; }
 
     public boolean bundled(String id) { return embedded != null && embedded.supports(id); }
-    public boolean hasBundledAssets() { return embedded != null; }
+    public boolean hasPackageManifest() { return embedded != null; }
+    public void cancelDownloads(ToolchainInstaller.Cancellation owner) { if (downloader != null) downloader.cancel(owner); }
 
     public File prepareBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
         return prepareBundled(cancellation, null);
@@ -67,9 +75,9 @@ public final class ToolchainStore {
     public File prepareBundled(ToolchainInstaller.Cancellation cancellation, EmbeddedToolchain.ProgressListener listener) throws Exception {
         Use use = beginUse(cancellation);
         try {
-            if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
-            if (bundledRemoved()) throw new IllegalStateException("内置工具包已删除，请在工具配置中重新安装。");
-            return embedded.prepare(cancellation, listener);
+            if (embedded == null) throw new IllegalArgumentException("当前构建没有工具包清单。");
+            if (bundledRemoved()) throw new IllegalStateException("工具包已删除，请在工具配置中重新安装。");
+            return embedded.prepare(cancellation, listener, false);
         } finally { use.close(); }
     }
 
@@ -94,7 +102,7 @@ public final class ToolchainStore {
         cancellation.check();
         if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
         try {
-            if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
+            if (embedded == null) throw new IllegalArgumentException("当前构建没有工具包清单。");
             boolean wasRemoved = bundledRemoved();
             if (wasRemoved) {
                 embedded.resetPrepared();
@@ -105,12 +113,12 @@ public final class ToolchainStore {
             synchronized (this) { JSONObject data = load(); data.put("bundled_removed", false); save(data); }
             try {
                 final EmbeddedToolchain.Progress[] complete = new EmbeddedToolchain.Progress[1];
-                prepareBundled(cancellation, listener == null ? null : new EmbeddedToolchain.ProgressListener() {
+                embedded.prepare(cancellation, listener == null ? null : new EmbeddedToolchain.ProgressListener() {
                     public void onProgress(EmbeddedToolchain.Progress progress) {
                         if ("complete".equals(progress.stage)) complete[0] = progress;
                         else listener.onProgress(progress);
                     }
-                });
+                }, true);
                 JSONObject status = packageStatus();
                 cancellation.check();
                 if (listener != null && complete[0] != null) listener.onProgress(complete[0]);
@@ -127,7 +135,7 @@ public final class ToolchainStore {
         cancellation.check();
         if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
         try {
-            if (embedded == null) throw new IllegalArgumentException("当前构建没有内置工具资源。");
+            if (embedded == null) throw new IllegalArgumentException("当前构建没有工具包清单。");
             List<File> removable = releasedBundles();
             cancellation.check();
             // Disable implicit installation before deletion, including interrupted deletion.
@@ -144,6 +152,7 @@ public final class ToolchainStore {
             }
             embedded.resetPrepared();
             for (File file : removable) { cancellation.check(); removeManaged(file, cancellation); }
+            removeDownloads(cancellation);
             return packageStatus();
         } finally { operations.writeLock().unlock(); }
     }
@@ -183,6 +192,19 @@ public final class ToolchainStore {
         if (file.exists() && !file.delete()) throw new IOException("无法删除私有工具文件：" + file.getName());
     }
 
+    private void removeDownloads(ToolchainInstaller.Cancellation cancellation) throws Exception {
+        File directory = managed(new File(root, ".downloads").getPath());
+        File[] files = directory.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            cancellation.check(); managed(file.getPath());
+            if (file.isFile() && file.getName().matches("[0-9a-f]{64}\\.(?:part|archive)")) {
+                if (!file.delete()) throw new IOException("无法删除工具包下载缓存。");
+            }
+        }
+        if (directory.list().length == 0 && !directory.delete()) throw new IOException("无法删除工具包下载缓存目录。");
+    }
+
     public synchronized JSONObject configuration(String id) throws Exception {
         ToolCatalog.get(id);
         JSONObject tools = load().optJSONObject("tools");
@@ -193,6 +215,9 @@ public final class ToolchainStore {
     Launcher launcher(String id, ToolchainInstaller.Cancellation cancellation) throws Exception {
         JSONObject config = configuration(id);
         if (bundled(id) && (!"bundled".equals(config.optString("origin", "")) || !embedded.isPrepared())) {
+            if (bundledRemoved()) throw new IllegalStateException("工具包已删除，请在工具配置中重新安装。");
+            if (!embedded.packageStatus().optBoolean("installed")) return null;
+            // Re-register legacy installed paths offline. Probes and model calls never fetch releases.
             prepareBundled(cancellation); config = configuration(id);
         }
         if ("apktool".equals(id) && "bundled".equals(config.optString("origin", ""))) {
@@ -243,10 +268,10 @@ public final class ToolchainStore {
         JSONObject environment = config.optJSONObject("environment");
         if (environment == null) environment = new JSONObject();
         if (classpath.length() == 0) classpath = environment.optString("CLASSPATH");
-        if (classpath.length() == 0) throw new IOException("内置 Apktool 的 DEX 文件登记缺失，请在工具配置中重新安装。");
+        if (classpath.length() == 0) throw new IOException("Apktool 的 DEX 文件登记缺失，请在工具配置中重新安装。");
         File jar = managed(classpath);
         if (!jar.isFile() || !"apktool-dex.jar".equals(jar.getName())) {
-            throw new IOException("内置 Apktool 的 DEX 文件缺失，请在工具配置中重新安装。");
+            throw new IOException("Apktool 的 DEX 文件缺失，请在工具配置中重新安装。");
         }
         environment.remove("CLASSPATH");
         JSONArray prefix = new JSONArray().put("-Dsun.arch.data.model=" + runtime.bits)

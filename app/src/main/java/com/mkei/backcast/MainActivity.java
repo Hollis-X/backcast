@@ -3119,6 +3119,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final View anchor = candidate;
         final int offset = anchor == null ? 0 : markdownTop(anchor) - y;
         final int token = historyToken, action = scrollActionToken;
+        view.setHorizontallyScrolling(false);
+        view.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+        view.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
         view.setText(result);
         if (anchor != null) {
             scroll.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {

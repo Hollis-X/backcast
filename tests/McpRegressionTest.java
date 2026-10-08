@@ -773,6 +773,34 @@ public final class McpRegressionTest {
         rejects(() -> new McpServer("one", "Fixture", "https://example.com/mcp", "key\r\nX: value", true, 60), "无效字符");
         pass("urlAndHeaderValidation");
     }
+
+    private static void capturedParentToolsKeepSchemasAndRevocationWithoutSharingClients() throws Exception {
+        Path dir=Files.createTempDirectory("backcast-mcp-parent-snapshot-");
+        try(Fixture remote=new Fixture()) {
+            McpStore store=new McpStore(dir.toFile());McpServer server=remote.server("one");store.save(server);
+            store.cacheTools(server,Arrays.asList(new McpToolInfo(tool("echo"))));
+            ToolRegistry parent=new ToolRegistry();McpTools source=McpTools.register(parent,store);
+            JSONObject captured=source.contextSnapshot();String mapped=parent.all().get(1).name();
+            check(!captured.toString().contains(TOKEN)&&!captured.getJSONArray("servers").getJSONObject(0).has("bearerToken"),
+                    "Persistent MCP factory snapshot contains credentials");
+            store.cacheTools(server,Arrays.asList(new McpToolInfo(tool("later"))));
+            String later=McpCatalog.cached(store).get(0).tools.get(0).mappedName;
+            ToolRegistry child=new ToolRegistry();McpTools.register(child,store,captured);
+            check(child.get(mapped)!=null&&child.get(later)==null,
+                    "Child used current global schema instead of captured parent tools");
+            check(!child.toSchema().toString().contains(TOKEN),"Private factory credentials leaked into child tool schemas");
+            parent.get(mapped).run(new JSONObject().put("text","parent"));
+            child.get(mapped).run(new JSONObject().put("text","child"));
+            check(remote.initializes.get()==2,"Child reused its parent's MCP client/session");
+            child.abort();parent.get(mapped).run(new JSONObject().put("text","parent still active"));
+            check(remote.initializes.get()==2&&remote.calls.get()==3,"Child cancellation aborted its parent client");
+            store.save(new McpServer(server.id,server.name,server.endpoint,server.bearerToken,false,server.timeoutSeconds));
+            int posts=remote.posts.get();rejects(()->child.get(mapped).run(new JSONObject()),"禁用");
+            check(remote.posts.get()==posts,"Captured tools bypassed current connection revocation");
+            parent.abort();child.abort();
+        }finally{remove(dir);}
+        pass("capturedParentToolsKeepSchemasAndRevocationWithoutSharingClients");
+    }
     public static void main(String[] args) throws Exception {
         initializationPaginationAndSchema(); emptyNotificationAcknowledgmentsCompleteInitialization();
         invalidNotificationAcknowledgmentsStopInitialization(); sseMultilineAndServerRequests(); mappedToolsAndNoUiNetwork();
@@ -786,6 +814,7 @@ public final class McpRegressionTest {
         selectedMetadataSurvivesCompactionAndClearsOnNewUserRequest();
         rejectedSelectionCannotFinishTheOwningWorker(); selectedToolStillRequiresApprovalAndTextCannotSelect();
         cancelingManualRefreshLeavesCacheAndModelClientAlone();
+        capturedParentToolsKeepSchemasAndRevocationWithoutSharingClients();
         System.out.println("MCP regression checks passed: " + passed);
     }
 }

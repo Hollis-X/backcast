@@ -97,7 +97,7 @@ public final class ObjectionBootstrapRegressionTest {
                 + "assert changed['host']=='192.0.2.1' and changed['port']==1234\n"
                 + "print('CONFIRMED_LATE_OPTION_OVERRIDE')\n";
         ProcessBuilder builder = new ProcessBuilder("/usr/bin/python3", "-c", program,
-                new File(repo, "app/src/main/assets/toolchain/common.tar.gz").getAbsolutePath(), modules.getAbsolutePath());
+                new File(repo, "app/build/toolchain-release/common.tar.gz").getAbsolutePath(), modules.getAbsolutePath());
         builder.environment().put("PYTHONDONTWRITEBYTECODE", "1"); builder.redirectErrorStream(true);
         Process process = builder.start();
         try {

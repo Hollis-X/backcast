@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Rebuild the APK's offline Android toolchain from upstream artifacts.
+"""Rebuild Android toolchain release files from upstream artifacts.
 
 Run with a disposable --work directory and a separately downloaded official R8
-compiler. Network access is only required by this build utility, never the app.
+compiler. Large archives are written outside APK assets; the APK retains their
+pinned download manifest and licenses.
 """
 import argparse
 import concurrent.futures
@@ -27,6 +28,8 @@ PNGJ = "https://repo.maven.apache.org/maven2/ar/com/hjg/pngj/2.1.0/pngj-2.1.0.ja
 PNGJ_SHA256 = "e6b762f15e4891178dddd74e4d57318f518ce278000129efa41f85410b132ccc"
 PNG_PATCH = "Apktool Res9patchStreamDecoder: use bundled PNGJ 2.1.0 without desktop AWT/ImageIO or Android Bitmap JNI"
 OS_PATCH = "Apktool OSDetection: tolerate missing desktop JVM properties on Android ART"
+VERSION = "2026.10.01"
+RELEASE_BASE = "https://github.com/Hollis-X/backcast/releases/download/toolchain-"
 R2 = "https://github.com/radareorg/radare2/releases/download/6.2.2/radare2-6.2.2-android-{}.tar.gz"
 REQUIRED = ["binutils", "python", "aapt2", "termux-licenses"]
 PYTHON_PACKAGES = ["objection==1.12.5", "click", "delegator-py", "flask", "litecli", "packaging", "prompt-toolkit", "pygments", "requests", "semver", "setuptools", "tabulate", "colorama", "rich", "websockets", "pexpect", "ptyprocess", "wcwidth", "blinker", "itsdangerous", "jinja2", "werkzeug", "markdown-it-py", "mdurl", "certifi", "charset-normalizer", "idna", "urllib3", "terminaltables", "pymysql", "sqlparse", "configobj", "cli_helpers"]
@@ -82,14 +85,25 @@ def compress(source, output):
 
 
 def artifact_metadata(output):
+    compressed_sha = hashlib.sha256()
+    chunk_hashes = []
+    prefix = b""
+    with output.open("rb") as stream:
+        while block := stream.read(4 * 1024 * 1024):
+            if not prefix:
+                prefix = block[:65536]
+            compressed_sha.update(block)
+            chunk_hashes.append(hashlib.sha256(block).hexdigest())
     tar_sha = hashlib.sha256()
     tar_bytes = 0
     with gzip.open(output, "rb") as stream:
         while block := stream.read(1024 * 1024):
             tar_sha.update(block)
             tar_bytes += len(block)
-    return {"sha256": hashlib.sha256(output.read_bytes()).hexdigest(), "bytes": output.stat().st_size,
-            "tar_asset": "toolchain/" + output.name.removesuffix(".gz"),
+    return {"file": output.name, "url": RELEASE_BASE + VERSION + "/" + output.name,
+            "sha256": compressed_sha.hexdigest(), "bytes": output.stat().st_size,
+            "prefix_bytes": len(prefix), "prefix_sha256": hashlib.sha256(prefix).hexdigest(),
+            "chunk_bytes": 4 * 1024 * 1024, "chunk_sha256": chunk_hashes,
             "tar_sha256": tar_sha.hexdigest(), "tar_bytes": tar_bytes}
 
 
@@ -155,14 +169,20 @@ def main():
     parser.add_argument("--r8", type=pathlib.Path)
     parser.add_argument("--android-jar", type=pathlib.Path)
     parser.add_argument("--java", default="java")
+    parser.add_argument("--output", type=pathlib.Path, help="Directory for independent GitHub Release archives")
     args = parser.parse_args()
     repo = pathlib.Path(__file__).resolve().parents[1]
-    output = repo / "app/src/main/assets/toolchain"
+    asset_dir = repo / "app/src/main/assets/toolchain"
+    output = args.output or repo / "app/build/toolchain-release"
+    output.mkdir(parents=True, exist_ok=True)
     if args.refresh_manifest:
-        manifest = output / "manifest.json"
+        manifest = asset_dir / "manifest.json"
         data = json.loads(manifest.read_text())
         for artifact in data["artifacts"]:
-            artifact.update(artifact_metadata(repo / "app/src/main/assets" / artifact["asset"]))
+            filename = artifact.get("file") or pathlib.PurePosixPath(artifact["asset"]).name
+            artifact.update(artifact_metadata(output / filename))
+            artifact.pop("asset", None)
+            artifact.pop("tar_asset", None)
         manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         return
     if args.patch_objection_common:
@@ -174,7 +194,7 @@ def main():
         with tarfile.open(output / "common.tar.gz") as archive:
             archive.extractall(common, filter="data")
         patch_common(common)
-        manifest_path = output / "manifest.json"
+        manifest_path = asset_dir / "manifest.json"
         data = json.loads(manifest_path.read_text())
         artifact = next(item for item in data["artifacts"] if item["abi"] == "any")
         artifact.update(compress(common, output / "common.tar.gz"))
@@ -192,7 +212,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
     if args.rebuild_common:
-        manifest_path = output / "manifest.json"
+        manifest_path = asset_dir / "manifest.json"
         data = json.loads(manifest_path.read_text())
         common = work / "common"
         common.mkdir(exist_ok=True)
@@ -216,12 +236,12 @@ def main():
                 data["patches"].append(patch)
         for artifact in data["artifacts"]:
             if artifact["abi"] != "any":
-                artifact.update(artifact_metadata(repo / "app/src/main/assets" / artifact["asset"]))
+                artifact.update(artifact_metadata(output / artifact["file"]))
         manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         print(json.dumps(common_artifact, indent=2))
         return
     sources = []
-    licenses = output / "licenses"
+    licenses = asset_dir / "licenses"
     licenses.mkdir(exist_ok=True)
     for name, url in [("Apktool-Apache-2.0.txt", "https://raw.githubusercontent.com/iBotPeaches/Apktool/v2.9.3/LICENSE.md"),
                       ("radare2-COPYING.txt", "https://raw.githubusercontent.com/radareorg/radare2/6.2.2/COPYING.md"),
@@ -266,7 +286,7 @@ def main():
             entry = next(item for item in release["urls"] if item["filename"] == path.name)
             sources.append(fetch(entry["url"], path, entry["digests"]["sha256"]))
     patch_common(common)
-    artifacts = [{"asset": "toolchain/common.tar.gz", "abi": "any", "min_sdk": 26, **compress(common, output / "common.tar.gz")}]
+    artifacts = [{"abi": "any", "min_sdk": 26, **compress(common, output / "common.tar.gz")}]
     for arch, abi, rarch in [("aarch64", "arm64-v8a", "aarch64"), ("arm", "armeabi-v7a", "arm")]:
         packages = index(BASE + "termux-main/dists/stable/main/binary-" + arch + "/Packages.gz")
         root_packages = index(BASE + "termux-root/dists/root/stable/binary-" + arch + "/Packages.gz")
@@ -368,13 +388,13 @@ def main():
                 # SDB helper. Runtime radare2 links its Android libr_sdb.so.
                 excluded.append(path.relative_to(native).as_posix())
                 path.unlink()
-        artifact = {"asset": "toolchain/" + abi + ".tar.gz", "abi": abi, "min_sdk": 24, **compress(native, output / (abi + ".tar.gz"))}
+        artifact = {"abi": abi, "min_sdk": 24, **compress(native, output / (abi + ".tar.gz"))}
         artifact["excluded_upstream_host_tools"] = excluded
         if artifact["bytes"] >= 100 * 1024 * 1024:
             raise ValueError("Asset exceeds GitHub's file limit: " + abi)
         artifacts.append(artifact)
-    manifest = {"version": "2026.10.01", "apktool": "2.9.3", "pngj": "2.1.0", "radare2": "6.2.2", "objection": "1.12.5", "java_bridge": BRIDGE_VERSION, "objection_art_mode": MODE, "objection_art_patch_source": "https://github.com/frida/frida-java-bridge/pull/407", "patches": [PNG_PATCH, OS_PATCH, PATCH_DESCRIPTION, "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix", "Materialize upstream internal symlinks as regular copies for private extraction", "Exclude desktop aapt binaries; include Android aapt2", "Exclude unneeded pip and Frida tracer web UI"], "converter": {"tool": "Google R8/D8 8.3.37", "sha256": hashlib.sha256(args.r8.read_bytes()).hexdigest(), "dex_min_api": 26}, "artifacts": artifacts, "sources": sources}
-    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    manifest = {"version": VERSION, "apktool": "2.9.3", "pngj": "2.1.0", "radare2": "6.2.2", "objection": "1.12.5", "java_bridge": BRIDGE_VERSION, "objection_art_mode": MODE, "objection_art_patch_source": "https://github.com/frida/frida-java-bridge/pull/407", "patches": [PNG_PATCH, OS_PATCH, PATCH_DESCRIPTION, "Python subprocess.py: use /system/bin/sh instead of the Termux installation prefix", "Materialize upstream internal symlinks as regular copies for private extraction", "Exclude desktop aapt binaries; include Android aapt2", "Exclude unneeded pip and Frida tracer web UI"], "converter": {"tool": "Google R8/D8 8.3.37", "sha256": hashlib.sha256(args.r8.read_bytes()).hexdigest(), "dex_min_api": 26}, "artifacts": artifacts, "sources": sources}
+    (asset_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(artifacts, indent=2))
 
 

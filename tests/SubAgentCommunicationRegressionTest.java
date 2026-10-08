@@ -168,7 +168,7 @@ public final class SubAgentCommunicationRegressionTest {
             await(f.toolStarted);
             SubAgentManager.Record running = f.manager.find(id);
             check("tool".equals(running.phase) && "probe".equals(running.activeTool), "Tool stage is not real runtime state");
-            f.manager.send("main", id, "check the second file too");
+            f.manager.send("main", id, "check the second file too", "message");
         } finally { f.toolRelease.countDown(); }
         f.settle();
         check(f.requests.get() == 2 && f.manager.find(id).inbox.length() == 0, "Control message created a delayed unrelated turn");
@@ -208,8 +208,8 @@ public final class SubAgentCommunicationRegressionTest {
             f.manager.waitFor("main", peer, 5000);
             JSONObject initial = f.manager.waitForUpdate("main", worker, 0, -1);
             long cursor = initial.getLong("cursor");
-            f.manager.send(peer, worker, "peer evidence ready");
-            f.manager.send(peer, "main", "stage: evidence ready; worker still executing");
+            f.manager.send(peer, worker, "peer evidence ready", "message");
+            f.manager.send(peer, "main", "stage: evidence ready; worker still executing", "message");
             long started = System.currentTimeMillis();
             JSONObject update = f.manager.waitForUpdate("main", worker, 3000, cursor);
             check(System.currentTimeMillis() - started < 1000 && update.getBoolean("pending")
@@ -344,13 +344,13 @@ public final class SubAgentCommunicationRegressionTest {
         String id = f.spawn("reusable", "inspect the old objective", false);
         try {
             await(f.toolStarted);
-            f.manager.send("main", id, "cancelled old instruction");
-            f.manager.send(id, "main", "old task stopped at probe stage");
+            f.manager.send("main", id, "cancelled old instruction", "message");
+            f.manager.send(id, "main", "old task stopped at probe stage", "message");
             f.manager.cancelForObjectiveChange();
             f.settle();
             check(f.manager.find(id).inbox.length() == 0 && f.manager.peekInbox("main").getJSONArray("messages").length() == 1,
                     "Cancelled controls survived or the parent's stage evidence was dropped");
-            f.manager.send("main", id, "inspect the new objective"); f.settle();
+            f.manager.send("main", id, "inspect the new objective", "task"); f.settle();
             check(f.requests.get() == 2 && f.manager.find(id).error.length() == 0,
                     "Reusable child did not run exactly the new task after cancellation");
         } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
@@ -380,10 +380,10 @@ public final class SubAgentCommunicationRegressionTest {
             f.manager.awaitSettled(5000, new LlmClient.RequestValidity() {
                 @Override public boolean isCurrent() { return true; }
             });
-            check(!f.manager.hasPendingWork() && SubAgentManager.FAILED.equals(f.manager.find(id).status),
+            check(!f.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(f.manager.find(id).status),
                     "Cancelled waiting parent was changed back to running during slot reacquisition");
             Fixture recovered = new Fixture(f.store);
-            check(!recovered.manager.hasPendingWork() && SubAgentManager.FAILED.equals(recovered.manager.find(id).status),
+            check(!recovered.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(recovered.manager.find(id).status),
                     "Cancelled nested wait became a permanently queued task after restart");
         } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
     }
@@ -434,7 +434,7 @@ public final class SubAgentCommunicationRegressionTest {
         });
         f.root.setAutomaticDelegation(false); f.holdTool = true;
         try {
-            f.manager.sendFromUser(id, "read new evidence and report");
+            f.manager.sendFromUser(id, "read new evidence and report", "task");
             await(f.toolStarted);
             check(f.manager.hasLiveWork() && !f.root.busy() && starts.get() > 0,
                     "User's child-only work never reported a live lifecycle while the parent was idle");
@@ -486,8 +486,8 @@ public final class SubAgentCommunicationRegressionTest {
         });
         String id = f.spawn("cleanup", "read and clean temporary material", false);
         try {
-            await(f.toolStarted); f.manager.close("main", id); await(f.cleanupStarted);
-            check(f.manager.hasLiveWork() && SubAgentManager.CLOSED.equals(f.manager.find(id).status)
+            await(f.toolStarted); f.manager.stopFromUser(id); await(f.cleanupStarted);
+            check(f.manager.hasLiveWork() && SubAgentManager.STOPPED.equals(f.manager.find(id).status)
                     && stopped.getCount() == 1 && !f.root.busy(),
                     "Closing a child ended its background lifecycle before its tool cleanup completed");
             f.cleanupRelease.countDown(); f.settle(); await(stopped);

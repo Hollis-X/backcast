@@ -20,6 +20,7 @@ import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.ui.AgentPanelState;
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.ui.Markdown;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -29,6 +30,8 @@ import org.json.JSONObject;
 
 /** A session's delegated work, with a separate task, activity and result view. */
 public final class SubAgentsActivity extends AppCompatActivity {
+    private final java.util.Map<String, Integer> expandedPages = new java.util.HashMap<String, Integer>();
+    private String expandedAgent = "";
     public static final String EXTRA_SESSION_ID = "session_id";
     private final AgentPanelState state = new AgentPanelState();
     private final ExecutorService reader = Executors.newSingleThreadExecutor();
@@ -228,8 +231,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
             item.setPadding(0, dp(12), 0, dp(12));
             TextView name = text(row.name, 15, 0xFF0D0D0D, false); name.setMaxLines(2); name.setEllipsize(TextUtils.TruncateAt.END);
             Icons.right(name, Icons.CHEVRON_RIGHT, 0xFF8E8E93, dp(16)); item.addView(name);
-            item.addView(text(status(row.status, row.phase) + " · " + phase(row.phase)
-                    + (row.activeTool.length() == 0 ? "" : " · " + row.activeTool), 12, statusColor(row.status), false));
+            item.addView(text(statusSummary(row), 12, statusColor(row.status), false));
             TextView task = text(AgentPanelState.shortText(row.task, 220), 13, 0xFF66666C, false);
             task.setMaxLines(3); task.setEllipsize(TextUtils.TruncateAt.END); item.addView(task);
             item.setContentDescription(row.name + ", " + status(row.status, row.phase));
@@ -246,12 +248,13 @@ public final class SubAgentsActivity extends AppCompatActivity {
     private void renderDetail(boolean preserveScroll) {
         if (selected == null) return;
         final SubAgentManager.Record row = selected;
+        if (!row.id.equals(expandedAgent)) { expandedPages.clear(); expandedAgent = row.id; }
         title.setText(row.name); tabBar.setVisibility(View.VISIBLE); composer.setVisibility(View.VISIBLE);
-        stop.setVisibility(View.VISIBLE); stop.setEnabled(!closing && !SubAgentManager.CLOSED.equals(row.status));
+        stop.setVisibility(AgentPanelState.active(row.status) ? View.VISIBLE : View.GONE);
+        stop.setEnabled(!closing && AgentPanelState.active(row.status));
         boolean open = !SubAgentManager.CLOSED.equals(row.status);
         send.setEnabled(open && !sending && !closing); message.setEnabled(open && !closing);
-        summary.setText(status(row.status, row.phase) + " · " + phase(row.phase)
-                + (row.activeTool.length() == 0 ? "" : " · " + row.activeTool)
+        summary.setText(statusSummary(row)
                 + (row.lastActivityAt <= 0 ? "" : "\n" + getString(R.string.agent_panel_updated,
                         android.text.format.DateFormat.format("MM-dd HH:mm:ss", row.lastActivityAt))));
         for (int i = 0; i < tabs.length; i++) {
@@ -280,16 +283,16 @@ public final class SubAgentsActivity extends AppCompatActivity {
                 if (entries.isEmpty()) body.addView(text(getString(R.string.agent_panel_no_activity), 14, 0xFF8E8E93, false));
                 for (AgentPanelState.Entry entry : entries) {
                     body.addView(text(role(entry.role), 12, 0xFF8E8E93, false));
-                    if (entry.text.length() > 0) body.addView(text(entry.text, 14, 0xFF0D0D0D, true));
-                    for (String tool : entry.tools) {
-                        TextView command = text(tool, 12, 0xFF44444A, true); command.setTypeface(android.graphics.Typeface.MONOSPACE);
-                        command.setPadding(dp(10), dp(10), dp(10), dp(10)); command.setBackgroundColor(0xFFF5F5F7); body.addView(command);
+                    if (entry.fullText.length() > 0) body.addView(textPages(entry.fullText, entry.text.length()));
+                    for (int i = 0; i < entry.fullTools.size(); i++) {
+                        String tool = entry.fullTools.get(i);
+                        body.addView(textPages(tool, i < entry.tools.size() ? entry.tools.get(i).length() : 200));
                     }
                     divider();
                 }
             } else {
-                String resultText = redact(row.result);
-                int[] result = state.resultBounds(resultText.length());
+                String resultText = redact(AgentPanelState.resultsText(row));
+                int[] result = state.resultBounds(resultText);
                 pages.setVisibility(resultText.length() > AgentPanelState.RESULT_PAGE_SIZE ? View.VISIBLE : View.GONE);
                 latest.setVisibility(View.GONE);
                 pageLabel.setText(getString(R.string.agent_panel_result_page, result[1] > result[0] ? result[0] + 1 : 0, result[1], resultText.length()));
@@ -298,8 +301,16 @@ public final class SubAgentsActivity extends AppCompatActivity {
                     TextView error = text(getString(R.string.agent_panel_failure), 14, 0xFFC0392B, false);
                     body.addView(error); divider();
                 }
-                body.addView(text(resultText.length() == 0 ? getString(R.string.agent_panel_no_result)
-                        : resultText.substring(result[0], result[1]), 14, 0xFF0D0D0D, true));
+                String empty = AgentPanelState.active(row.status) ? getString(R.string.agent_panel_result_pending)
+                        : SubAgentManager.FAILED.equals(row.status) ? getString("cancelled".equals(row.phase)
+                                ? R.string.agent_panel_result_stopped : R.string.agent_panel_result_failed)
+                        : SubAgentManager.CLOSED.equals(row.status) || SubAgentManager.STOPPED.equals(row.status)
+                                ? getString(R.string.agent_panel_result_stopped)
+                        : getString(R.string.agent_panel_no_result);
+                TextView resultView = text(resultText.length() == 0 ? empty : resultText.substring(result[0], result[1]),
+                        14, 0xFF0D0D0D, true);
+                if (resultText.length() > 0) resultView.setText(Markdown.render(resultText.substring(result[0], result[1]), 0xFFEFEFF1));
+                body.addView(resultView);
             }
         } catch (Exception failure) {
             recordUiFailure(failure);
@@ -322,7 +333,11 @@ public final class SubAgentsActivity extends AppCompatActivity {
         reader.execute(new Runnable() {
             @Override public void run() {
                 String failure = "";
-                try { SubAgentManager source = manager(); if (source == null) throw new IllegalStateException("子任务不存在"); source.sendFromUser(id, content); }
+                try {
+                    SubAgentManager source = manager(); if (source == null) throw new IllegalStateException("子任务不存在");
+                    SubAgentManager.Record target = source.find(id);
+                    source.sendFromUser(id, content, AgentPanelState.active(target.status) ? "message" : "task");
+                }
                 catch (Exception error) { recordUiFailure(error); failure = error.getClass().getSimpleName(); }
                 final String error = failure;
                 runOnUiThread(new Runnable() {
@@ -345,7 +360,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
         reader.execute(new Runnable() {
             @Override public void run() {
                 String failure = "";
-                try { SubAgentManager source = manager(); if (source == null) throw new IllegalStateException("子任务不存在"); source.close(SubAgentManager.ROOT, id); }
+                try { SubAgentManager source = manager(); if (source == null) throw new IllegalStateException("子任务不存在"); source.stopFromUser(id); }
                 catch (Exception error) { recordUiFailure(error); failure = error.getClass().getSimpleName(); }
                 final String error = failure;
                 runOnUiThread(new Runnable() {
@@ -382,6 +397,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
         }, "backcast-agent-ui-diagnostic").start();
     }
     private String status(String status, String phase) {
+        if (SubAgentManager.STOPPED.equals(status)) return getString(R.string.agent_panel_stopped);
         if (SubAgentManager.IDLE.equals(status) && "completed".equals(phase)) return getString(R.string.sub_agents_phase_completed);
         if (SubAgentManager.QUEUED.equals(status)) return getString(R.string.sub_agents_queued);
         if (SubAgentManager.RUNNING.equals(status)) return getString(R.string.sub_agents_running);
@@ -389,6 +405,11 @@ public final class SubAgentsActivity extends AppCompatActivity {
         if (SubAgentManager.FAILED.equals(status)) return getString("cancelled".equals(phase) ? R.string.agent_panel_stopped : R.string.sub_agents_failed);
         if (SubAgentManager.IDLE.equals(status)) return getString(R.string.sub_agents_idle);
         return getString(R.string.sub_agents_closed);
+    }
+    private String statusSummary(SubAgentManager.Record row) {
+        String label = status(row.status, row.phase), stage = phase(row.phase);
+        return label + (label.equals(stage) ? "" : " · " + stage)
+                + (row.activeTool.length() == 0 ? "" : " · " + row.activeTool);
     }
     private String phase(String phase) {
         if ("generating_tool".equals(phase)) return getString(R.string.sub_agents_phase_generating);
@@ -416,11 +437,47 @@ public final class SubAgentsActivity extends AppCompatActivity {
     }
     private void section(int label, String content) {
         body.addView(text(getString(label), 12, 0xFF8E8E93, false));
-        body.addView(text(content, 14, 0xFF0D0D0D, true)); divider();
+        body.addView(textPages(content)); divider();
+    }
+    private LinearLayout textPages(final String content) {
+        return textPages(content, AgentPanelState.RESULT_PAGE_SIZE);
+    }
+    private LinearLayout textPages(final String content, int previewChars) {
+        final LinearLayout group = new LinearLayout(this); group.setOrientation(LinearLayout.VERTICAL);
+        final String key = state.selectedId + ":" + content.hashCode() + ":" + content.length();
+        final int[] shown = {textEnd(content, expandedPages.containsKey(key)
+                ? expandedPages.get(key).intValue() : Math.max(1, previewChars))};
+        for (int start = 0; start < shown[0];) {
+            int end = Math.min(shown[0], textEnd(content, start + AgentPanelState.RESULT_PAGE_SIZE));
+            group.addView(text(content.substring(start, end), 14, 0xFF0D0D0D, true)); start = end;
+        }
+        if (shown[0] < content.length()) {
+            final TextView more = text(getString(R.string.agent_panel_read_more), 14, 0xFF2E6BE6, false);
+            group.addView(more);
+            more.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View view) {
+                    group.removeView(more);
+                    int end = textEnd(content, shown[0] + AgentPanelState.RESULT_PAGE_SIZE);
+                    group.addView(text(content.substring(shown[0], end), 14, 0xFF0D0D0D, true));
+                    shown[0] = end; expandedPages.put(key, Integer.valueOf(end));
+                    if (end < content.length()) group.addView(more);
+                }
+            });
+        }
+        return group;
+    }
+    private int textEnd(String content, int offset) {
+        int end = Math.min(content.length(), offset);
+        if (end > 0 && end < content.length() && Character.isHighSurrogate(content.charAt(end - 1))
+                && Character.isLowSurrogate(content.charAt(end))) end++;
+        return end;
     }
     private TextView text(String content, int size, int color, boolean selectable) {
         TextView view = new TextView(this); view.setText(content); view.setTextSize(size); view.setTextColor(color);
         view.setTextIsSelectable(selectable); view.setLineSpacing(dp(3), 1f); view.setPadding(0, dp(4), 0, dp(6));
+        view.setHorizontallyScrolling(false);
+        view.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
+        view.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
         view.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return view;
     }

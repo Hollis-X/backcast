@@ -43,13 +43,14 @@ javac -proc:none -encoding UTF-8 -source 8 -target 8 -Xlint:-options -cp "$json"
     "$root"/tests/RootExecutionRegressionTest.java \
     "$root"/tests/TaskWorkspaceRegressionTest.java \
     "$root"/tests/ShellGuardRegressionTest.java \
-    "$root"/tests/FileSubAgentStoreRegressionTest.java \
     "$root"/tests/SubAgentRegressionTest.java \
     "$root"/tests/SubAgentLoopIntegrationTest.java \
     "$root"/tests/SubAgentCommunicationRegressionTest.java \
     "$root"/tests/SubAgentProgressRegressionTest.java \
+    "$root"/tests/SubAgentTaskLifecycleRegressionTest.java \
     "$root"/tests/ToolkitRegressionTest.java \
     "$root"/tests/ToolchainFixtures.java \
+    "$root"/tests/ToolchainDownloadRegressionTest.java \
     "$root"/tests/ToolkitDiagnosticsRegressionTest.java \
     "$root"/tests/ToolPackageManagementRegressionTest.java \
     "$root"/tests/EmbeddedToolchainRegressionTest.java \
@@ -130,6 +131,14 @@ if [ "${3:-}" = "http" ]; then
     java -cp "$build:$json" LlmStreamLifecycleRegressionTest
     exit "$?"
 fi
+if [ "${3:-}" = "subagents" ]; then
+    java -cp "$build:$json" SubAgentRegressionTest || exit "$?"
+    java -cp "$build:$json" SubAgentLoopIntegrationTest || exit "$?"
+    java -cp "$build:$json" SubAgentCommunicationRegressionTest || exit "$?"
+    java -cp "$build:$json" SubAgentProgressRegressionTest || exit "$?"
+    java -cp "$build:$json" SubAgentTaskLifecycleRegressionTest
+    exit "$?"
+fi
 if [ "${3:-}" = "child-progress" ]; then
     java -cp "$build:$json" SubAgentProgressRegressionTest
     exit "$?"
@@ -144,6 +153,10 @@ if [ "${3:-}" = "panel" ]; then
 fi
 if [ "${3:-}" = "embedded" ]; then
     java -cp "$build:$json" com.mkei.backcast.tool.EmbeddedToolchainRegressionTest "$root"
+    exit "$?"
+fi
+if [ "${3:-}" = "tool-download" ]; then
+    java -cp "$build:$json" com.mkei.backcast.tool.ToolchainDownloadRegressionTest
     exit "$?"
 fi
 if [ "${3:-}" = "toolkit" ]; then
@@ -259,7 +272,7 @@ if [ "$root_execution_status" -ne 0 ]; then exit 1; fi
 java -cp "$build:$json" com.mkei.backcast.tool.TaskWorkspaceRegressionTest || exit "$?"
 java -cp "$build:$json" com.mkei.backcast.tool.ShellGuardRegressionTest
 shell_status=$?
-java -cp "$build:$json" FileSubAgentStoreRegressionTest
+java -cp "$build:$json" "$root/tests/SQLiteSubAgentStoreRegressionTest.java" "$root"
 child_store_status=$?
 java -cp "$build:$json" SubAgentRegressionTest
 subagent_status=$?
@@ -269,6 +282,7 @@ java -cp "$build:$json" SubAgentCommunicationRegressionTest
 communication_status=$?
 java -cp "$build:$json" SubAgentProgressRegressionTest
 child_progress_status=$?
+java -cp "$build:$json" SubAgentTaskLifecycleRegressionTest || exit "$?"
 java -cp "$build:$json" com.mkei.backcast.tool.ToolkitRegressionTest
 toolkit_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.ToolkitDiagnosticsRegressionTest
@@ -277,6 +291,8 @@ java -cp "$build:$json" com.mkei.backcast.tool.ToolPackageManagementRegressionTe
 package_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.EmbeddedToolchainRegressionTest "$root"
 embedded_status=$?
+java -cp "$build:$json" com.mkei.backcast.tool.ToolchainDownloadRegressionTest
+tool_download_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.EmbeddedInstallProgressRegressionTest
 install_progress_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.ProgramArgumentRegressionTest
@@ -343,4 +359,4 @@ if [ "$mcp_status" -ne 0 ]; then exit 1; fi
 if [ "$resource_reachability_status" -ne 0 ]; then exit 1; fi
 if [ "$network_routing_status" -ne 0 ] || [ "$device_network_status" -ne 0 ] || [ "$markdown_status" -ne 0 ] || [ "$objection_bootstrap_status" -ne 0 ]; then exit 1; fi
 if [ "$diagnostics_status" -ne 0 ] || [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ] || [ "$install_progress_status" -ne 0 ] || [ "$program_arguments_status" -ne 0 ] || [ "$art_runtime_status" -ne 0 ] || [ "$install_ui_status" -ne 0 ] || [ "$workspace_status" -ne 0 ] || [ "$workspace_ui_status" -ne 0 ] || [ "$batch_probe_status" -ne 0 ] || [ "$batch_probe_ui_status" -ne 0 ] || [ "$toolkit_operation_status" -ne 0 ]; then exit 1; fi
-if [ "$network_sdk_status" -ne 0 ] || [ "$model_picker_status" -ne 0 ] || [ "$error_storage_status" -ne 0 ] || [ "$http_runtime_status" -ne 0 ] || [ "$request_policy_status" -ne 0 ] || [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$file_search_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$root_execution_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$child_progress_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi
+if [ "$network_sdk_status" -ne 0 ] || [ "$model_picker_status" -ne 0 ] || [ "$error_storage_status" -ne 0 ] || [ "$http_runtime_status" -ne 0 ] || [ "$request_policy_status" -ne 0 ] || [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$file_search_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$root_execution_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$child_progress_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$tool_download_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi

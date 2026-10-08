@@ -29,15 +29,15 @@ public final class ToolCatalog {
     private static final List<Entry> ENTRIES = new ArrayList<Entry>();
     static {
         ENTRIES.add(new Entry("apktool", "Apktool", "android", "https://github.com/iBotPeaches/Apktool",
-                "APK 内置 Apktool 2.9.3 DEX JAR，使用 Android ART 运行，附带 Android aapt2。需要 Android 8.0+ ARM/ARM64。", "apktool"));
+                "工具包提供 Apktool 2.9.3 DEX JAR，使用 Android ART 运行，附带 Android aapt2。需要 Android 8.0+ ARM/ARM64。", "apktool"));
         ENTRIES.add(new Entry("radare2", "radare2", "native", "https://github.com/radareorg/radare2",
-                "APK 内置官方 Android ARM/ARM64 原生包与数据库，自动释放到 App 私有路径。执行权限以设备探测为准。", "radare2", "r2"));
+                "工具包提供官方 Android ARM/ARM64 原生程序与数据库，安装在 App 私有路径。执行权限以设备探测为准。", "radare2", "r2"));
         ENTRIES.add(new Entry("rabin2", "rabin2", "native", "https://github.com/radareorg/radare2",
                 "随 radare2 Android 包安装，用于二进制信息提取。", "rabin2"));
         ENTRIES.add(new Entry("objection", "Objection", "dynamic", "https://github.com/sensepost/objection",
-                "APK 内置 Objection 1.12.5、Android Python、Frida Python 绑定及 server 和全部依赖。跨应用动态分析需要 root。", "objection"));
+                "工具包提供 Objection 1.12.5、Android Python、Frida Python 绑定及 server 和全部依赖。跨应用动态分析需要 root。", "objection"));
         String source = "https://sourceware.org/binutils/";
-        String dependencies = "APK 内置 GNU binutils Android ARM/ARM64 编译版本及全部共享库，无需安装 Termux 或配置路径。";
+        String dependencies = "工具包提供 GNU binutils Android ARM/ARM64 编译版本及全部共享库，无需安装 Termux 或配置路径。";
         for (String id : new String[]{"readelf", "objdump", "nm", "strings", "addr2line", "size", "objcopy", "ar", "strip"}) {
             ENTRIES.add(new Entry(id, id, "binutils", source, dependencies, id, "g" + id, "llvm-" + id));
         }

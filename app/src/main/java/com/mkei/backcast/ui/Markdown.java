@@ -1,11 +1,8 @@
 package com.mkei.backcast.ui;
 
-import android.graphics.Canvas;
-import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
-import android.text.style.ReplacementSpan;
 import android.text.style.BackgroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
@@ -192,43 +189,9 @@ public final class Markdown {
         if (end <= start) {
             return;
         }
-        out.setSpan(new CodeSpan(codeBg), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-    }
-
-    /** 行内代码：小圆角底，不要下划线，也不要贴着字的灰条。 */
-    private static class CodeSpan extends ReplacementSpan {
-        private final int bg;
-        private final float padX = 8f;
-        private final float padY = 2f;
-
-        CodeSpan(int bg) {
-            this.bg = bg;
-        }
-
-        @Override
-        public int getSize(Paint paint, CharSequence text, int start, int end,
-                Paint.FontMetricsInt fm) {
-            Typeface old = paint.getTypeface();
-            paint.setTypeface(Typeface.MONOSPACE);
-            int width = (int) (paint.measureText(text, start, end) + padX * 2);
-            paint.setTypeface(old);
-            return width;
-        }
-
-        @Override
-        public void draw(Canvas canvas, CharSequence text, int start, int end,
-                float x, int top, int y, int bottom, Paint paint) {
-            Typeface old = paint.getTypeface();
-            paint.setTypeface(Typeface.MONOSPACE);
-            float w = paint.measureText(text, start, end);
-            Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-            fill.setColor(bg);
-            float rTop = y + paint.ascent() - padY;
-            float rBottom = y + paint.descent() + padY;
-            canvas.drawRoundRect(x, rTop, x + w + padX * 2, rBottom, 8f, 8f, fill);
-            canvas.drawText(text, start, end, x + padX, y, paint);
-            paint.setTypeface(old);
-        }
+        // Native spans preserve the characters and allow Android to wrap long code tokens.
+        out.setSpan(new TypefaceSpan("monospace"), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        out.setSpan(new BackgroundColorSpan(codeBg), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     private static boolean isTableLine(String trimmed) {

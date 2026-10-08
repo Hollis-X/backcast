@@ -58,7 +58,7 @@ public final class RunHubRecoveryTest {
                 + "public String fullSystemPrompt() { return \"system/\"+mode; } public String baseUrl() { legacyRead();return url; }"
                 + "public String apiKey() {legacyRead();return key; } public String model() {legacyRead();return selectedModel; }"
                 + "private void legacyRead(){if(failLegacyProfileReads)throw new AssertionError(\"Client configuration used independent credential reads\");}"
-                + "public AiProfile activeAiProfile(){return new AiProfile(provider,provider,url,key,selectedModel,java.util.Collections.singletonList(selectedModel));}"
+                + "public AiProfile activeAiProfile(){return new AiProfile(provider,provider,url,key,selectedModel,java.util.Collections.singletonList(selectedModel));}public java.util.List<AiProfile> aiProfiles(){return java.util.Collections.singletonList(activeAiProfile());}"
                 + "public String reasoningEffort() {return effort;}public String effectiveReasoningEffort(){return effort;}"
                 + "public String agentMode(){return mode;}public int agentConcurrency(){return concurrency;}"
                 + "public String outputVerbosity() { return \"default\"; } public String outputLanguage() { return \"zh-CN\"; }"
@@ -70,11 +70,11 @@ public final class RunHubRecoveryTest {
                 + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,tokensUsed,tokenBudget; public Long turnElapsedMs,turnThinkMs; public boolean running; public Boolean budgetWrapFinished; }"
                 + "private static final java.util.Map<Long,Run> runs=new java.util.HashMap<Long,Run>();"
                 + "public static long pausedRead=-1; public static java.util.concurrent.CountDownLatch readStarted,readRelease;"
-                + "public static int runSaves,clockSaves;"
+                + "public static int runSaves,clockSaves;public static java.util.Set<Long> restartOnly=new java.util.HashSet<Long>();public boolean subAgentUserRestartOnly(long sid){return restartOnly.contains(sid);}public static java.util.List<Long> childWork=new java.util.ArrayList<Long>();public java.util.List<Long> subAgentWorkSessionIds(){return new java.util.ArrayList<Long>(childWork);}"
                 + "public static long requestSession,requestElapsed,diagnosticSession;public static String requestPurpose,requestOutcome,requestReason,requestDiagnostic,diagnosticSource,diagnosticSummary,diagnosticDetail;public static int requestRetry,diagnosticCalls;"
                 + "public static void pauseRead(long sid) { pausedRead=sid; readStarted=new java.util.concurrent.CountDownLatch(1); readRelease=new java.util.concurrent.CountDownLatch(1); }"
                 + "public ChatStore(android.content.Context c) {}"
-                + "public static void reset() { runs.clear(); pausedRead=-1;runSaves=clockSaves=0;requestSession=requestElapsed=diagnosticSession=0;requestRetry=diagnosticCalls=0;requestPurpose=requestOutcome=requestReason=requestDiagnostic=diagnosticSource=diagnosticSummary=diagnosticDetail=null; }"
+                + "public static void reset() { runs.clear();childWork.clear();restartOnly.clear(); pausedRead=-1;runSaves=clockSaves=0;requestSession=requestElapsed=diagnosticSession=0;requestRetry=diagnosticCalls=0;requestPurpose=requestOutcome=requestReason=requestDiagnostic=diagnosticSource=diagnosticSummary=diagnosticDetail=null; }"
                 + "public static void pending(long sid) { checkpoint(sid,true,5000L,null); }"
                 + "public static void checkpoint(long sid,boolean running,Long elapsed,Long think) { Run r=new Run();r.running=running;r.turnElapsedMs=elapsed;r.turnThinkMs=think;runs.put(sid,r); }"
                 + "public static void pendingBudget(long sid,Boolean finished) { pending(sid); Run r=runs.get(sid); r.goal=\"spent goal\"; r.status=\"budget_limited\"; r.budgetWrapFinished=finished; }"
@@ -122,32 +122,38 @@ public final class RunHubRecoveryTest {
                 + "public void setUsageObserver(UsageObserver o){usageObserver=o;}public long goalUsageLease(){return 7L;}"
                 + "public void accountExternalUsage(long t){externalUsage+=t;}public void accountExternalUsage(long t,long lease){externalUsage+=t;}"
                 + "public void setSubAgents(SubAgentManager m){children=m;}"
+                + "public org.json.JSONObject captureChildContext(){return new org.json.JSONObject().put(\"client\",client.configSnapshot()).put(\"system\",environment).put(\"workspace\",directory).put(\"access\",access).put(\"contextLimit\",limit).put(\"compactRatio\",ratio);}public ToolRegistry childSourceTools(){return registry;}"
+                + "public void armRecoveredChildEvents(){}public volatile boolean wakeBlocked;public java.util.concurrent.CountDownLatch wakeEntered,wakeRelease;public boolean resumeForChildEvents(long sid,int token){if(busyState||wakeBlocked)return false;busyState=true;resumes++;if(wakeEntered!=null){wakeEntered.countDown();try{wakeRelease.await(5,java.util.concurrent.TimeUnit.SECONDS);}catch(InterruptedException e){throw new RuntimeException(e);}}if(children!=null)children.wakePending=false;busyState=false;return true;}"
                 + "public boolean automaticDelegation;public AgentLoop delegationParent;public void setAutomaticDelegation(boolean b){automaticDelegation=b;}public void setDelegationParent(AgentLoop p){delegationParent=p;}"
                 + "public void retarget(LlmClient c,ToolRegistry r) {client=c;registry=r;retargets++;} public void reset(String s) {resetPrompt=s;}"
                 + "public void setEnvironment(String prompt,String dir) {environment=prompt;directory=dir;}"
                 + "public void clearGoal() {} public void cancel() { cancellations++;if(children!=null)children.cancelAll(); } public String goalText() { return \"\"; } }");
-        add(files, "com.mkei.backcast.agent.ApprovalGate", "public class ApprovalGate { public static final String ACCESS_FULL=\"full\"; }");
-        add(files, "com.mkei.backcast.agent.Goal", "public class Goal { public static boolean isSteer(String s) { return false; } public static boolean isNote(String s) { return false; } }");
-        add(files, "com.mkei.backcast.agent.Message", "public class Message { public String content; }");
-        add(files, "com.mkei.backcast.agent.LlmClient", "public class LlmClient {public Config config; public static class Config { public String verbosity,responseInstructions,effort,model,baseUrl,apiKey,providerId; public Config(String a,String b,String c,String d) {baseUrl=a;apiKey=b;model=c;effort=d;} } public LlmClient(Config c) {config=c;} }");
+        add(files, "com.mkei.backcast.agent.ApprovalGate", "public class ApprovalGate { public static final String ACCESS_FULL=\"full\",ACCESS_STRICT=\"strict\",ACCESS_GUARDED=\"guarded\"; }");
+        add(files, "com.mkei.backcast.agent.Goal", "public class Goal { public static boolean isClosed(String s){return \"complete\".equals(s)||\"blocked\".equals(s);}public static boolean isSteer(String s) { return false; } public static boolean isNote(String s) { return false; } }");
+        add(files, "com.mkei.backcast.agent.Message", "public class Message { public String content;public static boolean isCoordination(String content){return false;} }");
+        add(files, "com.mkei.backcast.agent.LlmClient", "public class LlmClient {public Config config; public static class Config { public String verbosity,responseInstructions,effort,model,baseUrl,apiKey,providerId;public int timeoutMs=120000,maxTokens,totalTimeoutMs,maxResponseChars; public Config(String a,String b,String c){this(a,b,c,\"\");}public Config(String a,String b,String c,String d) {baseUrl=a;apiKey=b;model=c;effort=d;} } public LlmClient(Config c) {config=c;} public static String credentialFingerprint(String value){try{byte[] digest=java.security.MessageDigest.getInstance(\"SHA-256\").digest(value.getBytes(\"UTF-8\"));StringBuilder out=new StringBuilder();for(byte b:digest)out.append(String.format(java.util.Locale.US,\"%02x\",b&255));return out.toString();}catch(Exception e){throw new IllegalStateException(e);}}public org.json.JSONObject configSnapshot(){return new org.json.JSONObject().put(\"baseUrl\",config.baseUrl).put(\"credentialFingerprint\",credentialFingerprint(config.apiKey)).put(\"model\",config.model).put(\"providerId\",config.providerId).put(\"reasoningEffort\",config.effort).put(\"verbosity\",config.verbosity).put(\"responseInstructions\",config.responseInstructions).put(\"timeoutMs\",config.timeoutMs);} }");
         add(files, "com.mkei.backcast.agent.SubAgentManager", "public class SubAgentManager {"
-                + "public static final String ROOT=\"main\";public static class Record{public String id,name=\"child fixture\";public long sessionId;}"
+                + "public static final String ROOT=\"main\";public static class Record{public String id,name=\"child fixture\";public long sessionId;public boolean managerCancelled;public org.json.JSONObject forkConfig=new org.json.JSONObject();}"
                 + "public interface Factory{AgentLoop create(Record task,AgentLoop.Listener listener,SubAgentManager manager) throws Exception;}"
-                + "public interface Store{}public final Factory factory;public final Store store;public AgentLoop parent;public int parallel,cancellations;"
+                + "public interface ContextFactory extends Factory{org.json.JSONObject capture(AgentLoop parent) throws Exception;}"
+                + "public boolean wakeAllowed,wakePending;public boolean shouldWakeRoot(){return wakeAllowed&&wakePending;}"
+                + "public interface Store{}public final Factory factory;public final Store store;public AgentLoop parent;public int parallel,cancellations,resumeCalls;public void resumePending(){resumeCalls++;}"
+                + "public int restrictedResumeCalls;public boolean resumeUserRestartOnlyPending(){restrictedResumeCalls++;return true;}"
                 + "public interface WorkObserver{void onWorkChanged();}public WorkObserver observer;public boolean live;public void setWorkObserver(WorkObserver o){observer=o;}public boolean hasLiveWork(){return live;}public void live(boolean value){live=value;if(observer!=null)observer.onWorkChanged();}"
                 + "public java.util.List<AgentLoop> loops=new java.util.ArrayList<AgentLoop>();public long usage;public String accountedId;"
                 + "public SubAgentManager(int p,Factory f,Store s){parallel=p;factory=f;store=s;}"
                 + "public void attachRoot(AgentLoop l){parent=l;}public void setMaxParallel(int p){parallel=p;}"
-                + "public Record find(String id){Record r=new Record();r.id=id;return r;}"
+                + "public volatile int findCalls;public boolean stopped;public Record find(String id){Record r=new Record();r.id=id;r.managerCancelled=stopped;findCalls++;return r;}"
                 + "public java.util.List<AgentLoop> runtimeLoops(){return new java.util.ArrayList<AgentLoop>(loops);}"
                 + "public void cancelAll(){cancellations++;for(AgentLoop l:loops)l.cancel();}"
                 + "public void accountUsage(String id,long t){accountedId=id;usage+=t;}"
                 + "public long usageLease(String id){return 7L;}"
                 + "public AgentLoop createChild(String id,long sid,AgentLoop.Listener listener)throws Exception{"
-                + "Record r=new Record();r.id=id;r.sessionId=sid;AgentLoop l=factory.create(r,listener,this);l.bindSession(sid);loops.add(l);return l;} }");
-        add(files, "com.mkei.backcast.agent.FileSubAgentStore", "public class FileSubAgentStore implements SubAgentManager.Store {"
-                + "public java.io.File directory;public int binds,removes;public FileSubAgentStore(java.io.File d){directory=d;}"
-                + "public void bindDirectory(java.io.File d){directory=d;binds++;}public void remove(){removes++;} }");
+                + "Record r=new Record();r.id=id;r.sessionId=sid;r.forkConfig=((ContextFactory)factory).capture(parent);return createTaskChild(r,listener);}public AgentLoop createTaskChild(Record r,AgentLoop.Listener listener)throws Exception{AgentLoop l=factory.create(r,listener,this);l.bindSession(r.sessionId);loops.add(l);return l;} }");
+        add(files, "com.mkei.backcast.SQLiteSubAgentStore", "public class SQLiteSubAgentStore implements com.mkei.backcast.agent.SubAgentManager.Store {"
+                + "public static void migrateLegacySessions(ChatStore s,java.io.File d){}"
+                + "public java.io.File directory;public String owner;public long sessionId;public int binds,removes;public SQLiteSubAgentStore(ChatStore store,long sid,java.io.File d){directory=d;sessionId=sid;owner=sid<0?\"draft-fixture\":\"session-\"+sid;}"
+                + "public void bindSession(long sid){sessionId=sid;owner=\"session-\"+sid;binds++;}public void remove(){removes++;} }");
         add(files, "com.mkei.backcast.agent.ToolRegistry", "public class ToolRegistry { public java.util.List<String> names=new java.util.ArrayList<String>();public java.util.List<Object> tools=new java.util.ArrayList<Object>(); public void register(Object tool) { names.add(tool.getClass().getSimpleName());tools.add(tool); } }");
         for (String name : Arrays.asList("EditTool", "GoalTool", "GetGoalTool", "ReadTool", "FindFilesTool", "ShellTool", "WriteTool", "TemporaryTool", "ToolkitTool")) {
             add(files, "com.mkei.backcast.tool." + name, "public class " + name + " {public Object[] args;public int aborts; public " + name + "(Object... args) {this.args=args;}public void abort(){aborts++;} }");
@@ -156,7 +162,7 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.mcp.McpSelection", "public final class McpSelection{}");
         add(files, "com.mkei.backcast.mcp.McpCatalog", "public class McpCatalog{public static class Server{}public static class Refresh{public Refresh(McpStore store,String id){}}public static java.util.List<Server> cached(McpStore store){return java.util.Collections.emptyList();}}");
         add(files, "com.mkei.backcast.mcp.McpStore", "public class McpStore{public java.io.File directory;public McpStore(java.io.File directory){this.directory=directory;}public void validateSelection(McpSelection selection){}}");
-        add(files, "com.mkei.backcast.mcp.McpTools", "public class McpTools{public static void register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store){registry.register(new McpTools());}}");
+        add(files, "com.mkei.backcast.mcp.McpTools", "public class McpTools{public org.json.JSONObject contextSnapshot(){return new org.json.JSONObject().put(\"servers\",new org.json.JSONArray());}public static McpTools register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store){McpTools source=new McpTools();registry.register(source);return source;}public static McpTools register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store,org.json.JSONObject snapshot){return register(registry,store);}}");
         add(files, "com.mkei.backcast.tool.EmbeddedToolchain", "public class EmbeddedToolchain {public interface Assets {java.io.InputStream open(String name) throws Exception;}}");
         add(files, "com.mkei.backcast.tool.ToolchainStore", "public class ToolchainStore {public java.io.File directory;public EmbeddedToolchain.Assets assets;public String abi;public int sdk;public ToolchainStore(java.io.File d,EmbeddedToolchain.Assets a,String b,int s){directory=d;assets=a;abi=b;sdk=s;}}");
         add(files, "com.mkei.backcast.tool.TemporaryWorkspace", "public class TemporaryWorkspace {public Object[] args;public long sessionId;public String directory;public boolean root;"
@@ -477,10 +483,10 @@ public final class RunHubRecoveryTest {
         check(directory.equals(new java.io.File(appFiles,"sub-agents/session-21")),"Child persistence escaped the app's private session path");
         Object draft=call(hub,"freshDraft",new Class[]{listenerType},listener()),draftManager=children(hub,draft);
         Object checkpoint=field(draftManager,"store");
-        check(((java.io.File)field(checkpoint,"directory")).getName().startsWith("draft-"),"A draft used another session's child checkpoint");
+        check(((String)field(checkpoint,"owner")).startsWith("draft-") && field(checkpoint,"directory")==null,"A draft used another session's child checkpoint");
         call(hub,"adopt",new Class[]{loopType,long.class},draft,23L);
         check(children(hub,draft)==draftManager && (Long)call(draft,"sessionKey",new Class[0])==23L
-                && field(checkpoint,"directory").equals(new java.io.File(appFiles,"sub-agents/session-23"))
+                && "session-23".equals(field(checkpoint,"owner"))
                 && (Integer)field(checkpoint,"binds")==1,"Draft adoption lost or misbound its existing child history");
         Object workspace=((Map<?,?>)field(hub,"temporary")).get(draft);
         check((Long)field(workspace,"sessionId")==23L,"Draft adoption did not rebind its temporary ledger");
@@ -537,7 +543,7 @@ public final class RunHubRecoveryTest {
                 "Concurrency change did not update the running session's existing manager");
         setting("mode","ultra");setting("effort","ultra");call(hub,"retargetIfNeeded",new Class[0]);
         check("ultra".equals(field(field(field(root,"client"),"config"),"effort"))
-                && "ultra".equals(field(field(field(child,"client"),"config"),"effort"))
+                && "off".equals(field(field(field(child,"client"),"config"),"effort"))
                 && (Boolean)field(root,"automaticDelegation"),"Ultra did not retarget API effort and authorization");
         setting("mode","manual");setting("effort","max");call(hub,"retargetIfNeeded",new Class[0]);
         check(field(root,"children")==manager && !(Boolean)field(root,"automaticDelegation")
@@ -551,11 +557,11 @@ public final class RunHubRecoveryTest {
         setting("provider", "openai"); setting("url", "https://openai.test/v1"); setting("key", "new-key");
         setting("selectedModel", "new-model"); setting("failLegacyProfileReads", true);
         call(hub, "retargetIfNeeded", new Class[0]);
-        for (Object loop : new Object[]{root, child}) {
+        for (Object loop : new Object[]{root}) {
             Object next = field(field(loop, "client"), "config");
             check("openai".equals(field(next, "providerId")) && "https://openai.test/v1".equals(field(next, "baseUrl"))
                             && "new-key".equals(field(next, "apiKey")) && "new-model".equals(field(next, "model")),
-                    "Retargeting did not update parent and reusable child to the selected provider/model together");
+                    "Retargeting did not update the parent provider/model");
         }
         check("deepseek".equals(field(oldParent, "providerId")) && "fixture".equals(field(oldParent, "apiKey"))
                         && "fixture".equals(field(oldChild, "model")) && children(hub, root) == manager,
@@ -627,10 +633,11 @@ public final class RunHubRecoveryTest {
         call(hub, "retargetIfNeeded", new Class[0]);
         check(count(root, "retargets") == previous + 1, "Additional directory change did not retarget without changing primary");
         Map<?, ?> temporary = (Map<?, ?>) field(hub, "temporary");
-        for (Object loop : new Object[]{root, child}) {
+        for (Object loop : new Object[]{root}) {
             @SuppressWarnings("unchecked") List<String> roots = (List<String>) field(temporary.get(loop), "roots");
             check(roots.equals(Arrays.asList(".", "/project/additional")), "Parent/child tools lost the complete authorized snapshot");
         }
+        check(((List<?>)field(temporary.get(child),"roots")).equals(Collections.singletonList(".")), "Existing child workspace changed with global settings");
         Object session = call(hub, "newToolkitSession", new Class[0]);
         @SuppressWarnings("unchecked") List<String> roots = (List<String>) field(field(hub, "uiMaterials"), "roots");
         check(roots.equals(Arrays.asList(".", "/project/additional")), "Independent UI tool session lost additional directories");
@@ -660,6 +667,98 @@ public final class RunHubRecoveryTest {
         check(!(Boolean) call(hub, "hasWork", new Class<?>[0]) && app.getClass().getField("serviceStops").getInt(app) == 1,
                 "Child completion did not stop its foreground service");
         recover(hub); check(count(root, "resumes") == 0, "Service recovery restarted an idle or stopped parent");
+    }
+
+    private static void queuedChildUsesCapturedParentConfigAfterGlobalSettingsChange() throws Exception {
+        Object hub=freshHub(); setting("directory","/original/project");setting("root",true);
+        setting("provider","original-provider");setting("url","https://original.test/v1");setting("key","original-key");setting("selectedModel","original-model");
+        Object parent=bind(hub,41L,listener()),manager=children(hub,parent),factory=field(manager,"factory");
+        Class<?> recordType=hubType.getClassLoader().loadClass("com.mkei.backcast.agent.SubAgentManager$Record");
+        Object task=recordType.getConstructor().newInstance();recordType.getField("id").set(task,"captured");recordType.getField("sessionId").setLong(task,1001L);
+        JSONObject snapshot=(JSONObject)call(factory,"capture",new Class<?>[]{loopType},parent);recordType.getField("forkConfig").set(task,snapshot);
+        check(!snapshot.toString().contains("original-key")&&!snapshot.getJSONObject("client").has("apiKey")
+                &&snapshot.getJSONObject("client").has("credentialFingerprint"),"Child checkpoint leaked its model credential");
+        setting("directory","/new/project");setting("root",false);setting("provider","new-provider");setting("url","https://new.test/v1");setting("key","new-key");setting("selectedModel","new-model");
+        call(hub,"retargetIfNeeded",new Class<?>[0]);
+        Class<?> gateType=hubType.getClassLoader().loadClass("com.mkei.backcast.agent.ApprovalGate");Object gate=gateType.getConstructor().newInstance();
+        call(hub,"broadcastAccess",new Class<?>[]{String.class,gateType},"strict",gate);
+        Object child=call(manager,"createTaskChild",new Class<?>[]{recordType,listenerType},task,listener());
+        Object config=field(field(child,"client"),"config"),materials=((Map<?,?>)field(hub,"temporary")).get(child);
+        check("original-model".equals(field(config,"model"))&&"original-provider".equals(field(config,"providerId"))
+                &&"original-key".equals(field(config,"apiKey"))&&"/original/project".equals(field(child,"directory"))
+                &&(Boolean)field(materials,"root")&&((List<?>)field(materials,"roots")).equals(Collections.singletonList("/original/project")),
+                "Queued child used unrelated global model/root/workspace settings");
+        check("strict".equals(field(child,"access"))&&field(child,"gate")==gate,
+                "Queued full-access snapshot bypassed a later permission restriction");
+        Object next=child(manager,"next",1002L);
+        check("new-model".equals(field(field(field(next,"client"),"config"),"model"))
+                &&"/new/project".equals(field(next,"directory")),"A new task failed to capture its current parent config");
+    }
+
+    private static void childEventsWakeIdleParentOnceAndRespectBusyAndStoppedGuards() throws Exception {
+        Object hub=freshHub(),parent=bind(hub,42L,listener()),manager=children(hub,parent);
+        manager.getClass().getField("wakeAllowed").setBoolean(manager,true);manager.getClass().getField("wakePending").setBoolean(manager,true);
+        busy(parent);call(manager,"live",new Class<?>[]{boolean.class},true);
+        check(count(parent,"resumes")==0,"Child event reentered a busy parent");
+        loopType.getField("busyState").setBoolean(parent,false);
+        java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);
+        loopType.getField("wakeEntered").set(parent,entered);loopType.getField("wakeRelease").set(parent,release);
+        try {
+            call(manager,"live",new Class<?>[]{boolean.class},true);
+            check(entered.await(3,java.util.concurrent.TimeUnit.SECONDS),"Persisted child event did not wake idle parent");
+            for(int i=0;i<12;i++)call(manager,"live",new Class<?>[]{boolean.class},true);
+            check(count(parent,"resumes")==1,"Repeated work notifications started overlapping parent workers");
+        } finally { release.countDown(); }
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+        while(!((Map<?,?>)field(hub,"childWakes")).isEmpty()&&System.nanoTime()<deadline)Thread.yield();
+        manager.getClass().getField("wakeAllowed").setBoolean(manager,false);
+        loopType.getField("wakeBlocked").setBoolean(parent,true);
+        call(manager,"live",new Class<?>[]{boolean.class},true);
+        check(count(parent,"resumes")==1,"Stopped/completed parent was revived by a late child event");
+    }
+
+    private static void restoredCapturedModelRequiresMatchingPrivateCredentials() throws Exception {
+        Object hub=freshHub(),parent=bind(hub,43L,listener()),manager=children(hub,parent),factory=field(manager,"factory");
+        Class<?> recordType=hubType.getClassLoader().loadClass("com.mkei.backcast.agent.SubAgentManager$Record");
+        Object task=recordType.getConstructor().newInstance();recordType.getField("id").set(task,"restore_key");recordType.getField("sessionId").setLong(task,1003L);
+        recordType.getField("forkConfig").set(task,call(factory,"capture",new Class<?>[]{loopType},parent));
+        ((Map<?,?>)field(hub,"capturedCredentials")).clear();setting("selectedModel","different-global-model");
+        Object restored=call(manager,"createTaskChild",new Class<?>[]{recordType,listenerType},task,listener());
+        check("fixture".equals(field(field(field(restored,"client"),"config"),"model")),"Credential resolution changed the captured model");
+        ((Map<?,?>)field(hub,"capturedCredentials")).clear();setting("key","rotated-key");recordType.getField("id").set(task,"reject_key");
+        boolean rejected=false;try{call(manager,"createTaskChild",new Class<?>[]{recordType,listenerType},task,listener());}
+        catch(java.lang.reflect.InvocationTargetException expected){rejected=expected.getCause() instanceof IllegalStateException;}
+        check(rejected,"Restored child silently used changed global credentials");
+    }
+
+    private static void childOnlyRecoveryResumesQueuesWithoutResendingIdleParent() throws Exception {
+        Object hub=freshHub();@SuppressWarnings("unchecked") List<Long> work=(List<Long>)storeType.getField("childWork").get(null);work.add(44L);
+        Object parent=bind(hub,44L,listener()),manager=children(hub,parent);
+        recover(hub);long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+        while((Integer)field(manager,"resumeCalls")==0&&System.nanoTime()<deadline)Thread.yield();
+        check((Integer)field(manager,"resumeCalls")==1&&count(parent,"resumes")==0,
+                "Recovering child-only work lost its queue or resent the idle parent's old API request");
+    }
+
+    private static void durableChildStopOutranksStaleParentRunningRow() throws Exception {
+        Object hub=freshHub();pending(45L);Object parent=bind(hub,45L,listener()),manager=children(hub,parent);
+        manager.getClass().getField("stopped").setBoolean(manager,true);
+        int before=(Integer)field(manager,"findCalls");recover(hub);
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+        while((Integer)field(manager,"findCalls")==before&&System.nanoTime()<deadline)Thread.yield();
+        check((Integer)field(manager,"findCalls")>before&&count(parent,"resumes")==0
+                &&(Integer)field(manager,"resumeCalls")==0,"Stale running flag revived an explicitly stopped legacy parent or its children");
+    }
+    private static void explicitChildRestartRecoveryKeepsClosedParentAndOldQueuesIdle() throws Exception {
+        Object hub=freshHub();storeType.getMethod("checkpoint",long.class,boolean.class,Long.class,Long.class).invoke(null,46L,false,0L,null);
+        Object run=call(field(hub,"store"),"readRun",new Class<?>[]{long.class},46L);run.getClass().getField("status").set(run,"complete");
+        @SuppressWarnings("unchecked") List<Long> work=(List<Long>)storeType.getField("childWork").get(null);work.add(46L);
+        @SuppressWarnings("unchecked") java.util.Set<Long> selected=(java.util.Set<Long>)storeType.getField("restartOnly").get(null);selected.add(46L);
+        Object parent=bind(hub,46L,listener()),manager=children(hub,parent);recover(hub);
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+        while((Integer)field(manager,"restrictedResumeCalls")==0&&System.nanoTime()<deadline)Thread.yield();
+        check((Integer)field(manager,"restrictedResumeCalls")==1&&(Integer)field(manager,"resumeCalls")==0
+                &&count(parent,"resumes")==0,"Explicit child restart recovered the old parent or ordinary queued work");
     }
 
     private static void modelDiagnosticsUseTheConversationRecorder() throws Exception {
@@ -744,7 +843,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder", "queuedChildUsesCapturedParentConfigAfterGlobalSettingsChange", "childEventsWakeIdleParentOnceAndRespectBusyAndStoppedGuards", "restoredCapturedModelRequiresMatchingPrivateCredentials", "childOnlyRecoveryResumesQueuesWithoutResendingIdleParent","durableChildStopOutranksStaleParentRunningRow","explicitChildRestartRecoveryKeepsClosedParentAndOldQueuesIdle"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

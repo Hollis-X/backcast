@@ -20,17 +20,24 @@
   },
   "artifacts": [
     {
-      "asset": "toolchain/common.tar.gz",
       "abi": "any",
       "min_sdk": 26,
       "sha256": "3e7928e65a64fe3346568bb495272d7df0dbc57d6cd0df272ba750c643642cfc",
       "bytes": 9521956,
-      "tar_asset": "toolchain/common.tar",
       "tar_sha256": "eff1ffe3e1699d98f4ac11b65254513a2c7910b8f0d275351fcfe3aba9018014",
-      "tar_bytes": 25896960
+      "tar_bytes": 25896960,
+      "file": "common.tar.gz",
+      "url": "https://github.com/Hollis-X/backcast/releases/download/toolchain-2026.10.01/common.tar.gz",
+      "prefix_bytes": 65536,
+      "prefix_sha256": "2504b18fb5e64863723e25fa2538e6e42383a72a5e386267584b0beffaa655af",
+      "chunk_bytes": 4194304,
+      "chunk_sha256": [
+        "c4d69f5347c95d56ace4ca1c709f1968665c4309b9f40391a0792a4af0fbd277",
+        "addf754712caf9fcf03b54aab8c1cb97e0c53c937f1be94dd1dcfa91b794f1e6",
+        "026d760a703e1aa6405279541119c5e6484b4837e1d36f22048539a7d3c01ed5"
+      ]
     },
     {
-      "asset": "toolchain/arm64-v8a.tar.gz",
       "abi": "arm64-v8a",
       "min_sdk": 24,
       "sha256": "43e5d4244b0d58c256a8ba2b95d0fd9ca1d419d8fc927580bf01deb93bf8f87c",
@@ -38,12 +45,39 @@
       "excluded_upstream_host_tools": [
         "radare2/bin/r2sdb"
       ],
-      "tar_asset": "toolchain/arm64-v8a.tar",
       "tar_sha256": "9241b3919a46625b6fbca74e5b7317a056b2f90035d1eb376fcff17ed48f1a51",
-      "tar_bytes": 244602880
+      "tar_bytes": 244602880,
+      "file": "arm64-v8a.tar.gz",
+      "url": "https://github.com/Hollis-X/backcast/releases/download/toolchain-2026.10.01/arm64-v8a.tar.gz",
+      "prefix_bytes": 65536,
+      "prefix_sha256": "3c52e4b7f75f018ec7f28c11564c0a03753262163b41512bfe6da48573cf34e3",
+      "chunk_bytes": 4194304,
+      "chunk_sha256": [
+        "80458082678381eedb4508560d4c0229650c9b26c9f4d7338ce48ebcaff4d90c",
+        "d71543740f074012105d5b159fe665f17fb9ebf55db1394fce3cab26849452df",
+        "6649c0e547396e75f46366299b1b1f4f3c1d63988b58a0214554735a1d2a73bf",
+        "858d9f682ba1d5e7bc5d8eb5ef6a583fa1e100a16aa2fe2d2b09dca3a6fe1375",
+        "78fc1d6a27e327b201763ff7fed498708ce69c83ee06ea2c5ac4469f75989680",
+        "7132339a98fd2fc7a35bfeb2f90e7a585f03191f4618b9d892229e754f264d62",
+        "73957169778b31614b9cfd2a01a3fecdac5ea95878680ea4e5dcc08510ce0921",
+        "dad79d1500ef0807c1ad9124d013d15e8b58dfbd97b123ac47f4d6c97c704603",
+        "ac23e2faecc6355bcfb22be93a5047d8ae5edf93447f70ae88d2db4825d1a6af",
+        "60fae669e8b02887e47f9b54452022355a5280f07e50ac2397781f771fc0a951",
+        "905d4f3977950a86b6ed59a87bc2a795c937f9f9e12dfa6c45d6d69e9095eb2d",
+        "47b621d954c966723993177bc7b75ebb9dba418d39779124e87d49c7b5c5e5ae",
+        "cf29fb03004fa7d003c83bd6a5cc4feff51e64ad81a21ec67a74e49eb54cb656",
+        "2768b22947a7874e49580d513582565583c1404d4ad11941f8b32af5f0789e08",
+        "8bbeb48123b31f824b3894bfa4a1b3ea26914e9e2541fe65dceda67edef605fc",
+        "21556c8d70e6f1f464a9b7da56616b655fa7b68612f69381c06923d433e0c530",
+        "e2304fd0420fc13d3785bf5aecae26192ae13f566086df86085ef99a7d65734a",
+        "9e8ebe84149451debc9a5d1b495a168d3314f8b4836c54554593c6d6711c3b81",
+        "7a84de514ae270469c636d21c66e29d4aad6935552572f2ef9868f2e51738775",
+        "43cb0359e8ae060812c34bbe4ea066d5b48754006880be91cd923037d5984f13",
+        "043d7d5d523671ffe7b04b75b527580aa101aca7384f058f101b9bb12772535e",
+        "db40a77e2a9dc45cd8a27241aebab382c51dcff51f6270e595ecd1fb2bfa6e4f"
+      ]
     },
     {
-      "asset": "toolchain/armeabi-v7a.tar.gz",
       "abi": "armeabi-v7a",
       "min_sdk": 24,
       "sha256": "7420915b916e12faa7c3f9f701812fce1fc72be0c4387ca2e953c8f5cbf39635",
@@ -51,9 +85,31 @@
       "excluded_upstream_host_tools": [
         "radare2/bin/r2sdb"
       ],
-      "tar_asset": "toolchain/armeabi-v7a.tar",
       "tar_sha256": "5f801554eb996ab319b426cda2cb599d8affab444d1bf7e35aa6c4866b38a34f",
-      "tar_bytes": 173834240
+      "tar_bytes": 173834240,
+      "file": "armeabi-v7a.tar.gz",
+      "url": "https://github.com/Hollis-X/backcast/releases/download/toolchain-2026.10.01/armeabi-v7a.tar.gz",
+      "prefix_bytes": 65536,
+      "prefix_sha256": "5b0a8716a99ce5789bd428ca6b5923b8ede2467a44080c2d7a173fe8d0601831",
+      "chunk_bytes": 4194304,
+      "chunk_sha256": [
+        "2b1de1edb5646e8c74504936e457dd52bf6840a11b78d6c99f4a91c813ee4db6",
+        "5a7e6052cc853225be83bc2c8dd9d4a1ecbe83b761b737ffa2d38ce36b282d76",
+        "faf5d39c167c1753c26023f8e49d18b962fa3da23abe07a5adc02fd1f2e0d57b",
+        "739bcb7c3f6d2d75f72b6b680258376362fa9b716126d020a36d6602ef529365",
+        "4790a9796ddd52aea40ca168959edadaeabb768aad947ef136a757404d4c0407",
+        "59c8bfbc91d3291cdb0fcdbd9e012874c24939923ea6b5f95490faa26308c313",
+        "9359f45ef11927024a43cfc887c75c242dc94a7514e3ec780e79a3ebf4baf097",
+        "11d5e9193ac9f1393a333facf0007a9eca5b74977e29ddaef128e02afc5f61b5",
+        "93d19582494a1c35673f81d1006fc25b3f9eb39443f1301cc4b1bb155064bead",
+        "fb386c26e91ffb532cc7b3316e3e147f0eb4e5cb4a7ad1251523b97fc3b05dd4",
+        "1291ead84af08bfed959bd857ae33282ef9f1d03387c52a6f8a7af90fa07c148",
+        "6b291ea541b2b5f006cf020418d056466cbc6770a453c5a83b8fe978c16d31a2",
+        "9a41405dd93480fa324ba8a4e0146be4f4b8119169bca28316d6c990bbaa4b14",
+        "0f02409f6e6533b91fa80b5ae3648b850debee627e7d37f2cba59f271e57176c",
+        "405a346653ab0ceb663a15f6ee0d1e14bc225bd00256cae1cd56ab53e00d6e8f",
+        "a01220bdaa7395c4ef374c6ae4268574957d768cc42c9179bb00b18c129bfcc0"
+      ]
     }
   ],
   "sources": [

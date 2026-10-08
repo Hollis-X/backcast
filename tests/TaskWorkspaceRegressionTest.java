@@ -91,7 +91,7 @@ public final class TaskWorkspaceRegressionTest {
             pass("privateTemporaryLeaseRemainsAccessible");
             Rig child = new Rig(); child.loop.setDelegationParent(rig.loop);
             child.client.next = r -> confined(r);
-            child.loop.submitDelegated("inspect " + operations + "/servers.json", "reference " + storage, 1, child.loop.generation(), 1);
+            child.loop.submitDelegated("inspect " + operations + "/servers.json", "reference " + storage, "fixture-task", 1, child.loop.generation(), 1);
             require(child.client.next == null, "Child did not execute scope check");
             pass("delegatedTaskCannotBroadenParentHumanScope");
             rig.loop.compactNow(1, rig.loop.generation(), 1);

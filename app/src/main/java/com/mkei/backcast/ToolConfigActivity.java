@@ -16,6 +16,8 @@ import com.mkei.backcast.tool.EmbeddedToolchain;
 import com.mkei.backcast.tool.ToolCatalog;
 import com.mkei.backcast.tool.ToolBatchProbe;
 import com.mkei.backcast.tool.ToolchainInstaller;
+import com.mkei.backcast.tool.ToolchainDownloader;
+import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.ui.Icons;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,7 +28,7 @@ import java.util.concurrent.Executors;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Offline package management and one tool's detail are separate navigation pages. */
+/** Package installation and one tool's detail are separate navigation pages. */
 public final class ToolConfigActivity extends AppCompatActivity {
     public static final String EXTRA_TOOL_ID = "tool_id";
     public static final String EXTRA_PROBE_RESULT = "probe_result";
@@ -107,7 +109,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
             @Override public void onCheckedChanged(CompoundButton button, boolean checked) { updateRoot(checked); }
         });
         install.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) { manage("package_install", R.string.toolkit_installing_offline); }
+            @Override public void onClick(View view) { manage("package_install", R.string.toolkit_installing); }
         });
         remove.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { manage("package_remove", R.string.toolkit_removing); }
@@ -256,11 +258,18 @@ public final class ToolConfigActivity extends AppCompatActivity {
                     : getString(R.string.toolkit_progress_device);
             phase = getString(R.string.toolkit_progress_phase_artifact, phase, artifact);
         }
-        installProgressText.setText(getString(R.string.toolkit_progress_value, percent, phase));
+        installProgressText.setText(getString(R.string.toolkit_progress_value, percent, phase)
+                + "\n" + getString(R.string.toolkit_progress_bytes,
+                        android.text.format.Formatter.formatFileSize(this, progress.completed),
+                        android.text.format.Formatter.formatFileSize(this, progress.total)));
     }
 
     private String installProgressPhase(String stage) {
-        int resource = "verifying".equals(stage) ? R.string.toolkit_progress_verifying
+        int resource = "probing".equals(stage) ? R.string.toolkit_progress_probing
+                : "downloading".equals(stage) ? R.string.toolkit_progress_downloading
+                : "resuming".equals(stage) ? R.string.toolkit_progress_resuming
+                : "switching".equals(stage) ? R.string.toolkit_progress_switching
+                : "verifying".equals(stage) ? R.string.toolkit_progress_verifying
                 : "unpacking".equals(stage) ? R.string.toolkit_progress_unpacking
                 : "publishing".equals(stage) ? R.string.toolkit_progress_publishing
                 : "registering".equals(stage) || "complete".equals(stage) ? R.string.toolkit_progress_registering
@@ -508,7 +517,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
         if ("ready".equals(state)) return getString(R.string.toolkit_ready);
         if ("installed".equals(state)) return getString(R.string.toolkit_installed);
         if ("removed".equals(state)) return getString(R.string.toolkit_removed);
-        if ("not_installed".equals(state) || "bundled_not_probed".equals(state)) return getString(R.string.toolkit_not_installed);
+        if ("not_installed".equals(state)) return getString(R.string.toolkit_not_installed);
         if ("unsupported".equals(state)) return getString(R.string.toolkit_unsupported);
         if ("configured_not_probed".equals(state)) return getString(R.string.toolkit_configured);
         if ("needs_runtime".equals(state)) return getString(R.string.toolkit_needs_runtime);
@@ -556,12 +565,14 @@ public final class ToolConfigActivity extends AppCompatActivity {
                     try { result.put("state", "cancelled").put("error", String.valueOf(cancellation.getMessage())); }
                     catch (Exception ignored) { }
                 } catch (Exception failure) {
-                    try { result.put("state", "error").put("error", String.valueOf(failure.getMessage())); }
+                    recordToolkitFailure(args, failure);
+                    try { result.put("state", "error").put("error", getString(R.string.toolkit_failed)); }
                     catch (Exception ignored) { }
                 } finally {
                     try { closeToolkitSession(operation); }
                     catch (Exception cleanup) {
-                        try { result.put("state", "error").put("error", String.valueOf(cleanup.getMessage())); }
+                        recordToolkitFailure(args, cleanup);
+                        try { result.put("state", "error").put("error", getString(R.string.toolkit_failed)); }
                         catch (Exception ignored) { }
                     }
                     synchronized (toolkitOperations) { toolkitOperations.remove(operation); }
@@ -590,6 +601,22 @@ public final class ToolConfigActivity extends AppCompatActivity {
         RunHub.ToolkitSession session;
         synchronized (operation) { if (operation.session == null) return; session = operation.session; }
         session.close();
+    }
+
+    private void recordToolkitFailure(JSONObject args, Throwable failure) {
+        ChatStore diagnostics = null;
+        try {
+            List<String> secrets = new ArrayList<String>();
+            for (Settings.AiProfile profile : settings.aiProfiles()) secrets.add(profile.apiKey);
+            JSONObject evidence = Diagnostics.failure(failure);
+            evidence.put("reason", failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage());
+            evidence.put("action", args.optString("action")).put("tool", args.optString("tool"));
+            if (failure instanceof ToolchainDownloader.Failure) evidence.put("download", new JSONObject(((ToolchainDownloader.Failure) failure).diagnostic()));
+            diagnostics = new ChatStore(getApplicationContext());
+            diagnostics.recordDiagnostic(-1L, "toolkit", "工具配置操作失败", Diagnostics.boundedJson(evidence, secrets.toArray(new String[secrets.size()])));
+        } catch (Exception unavailable) {
+            android.util.Log.w("Backcast", "Unable to persist toolkit configuration diagnostic");
+        } finally { if (diagnostics != null) diagnostics.close(); }
     }
     private void ui(Runnable callback) { main.post(callback); }
 }

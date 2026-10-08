@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check actual APK DEX budgets and official SDK classes after a full Android build."""
 import argparse
-import hashlib
 import json
+import pathlib
 import struct
 import subprocess
 import zipfile
@@ -36,6 +36,8 @@ def main():
     args = parser.parse_args()
     with zipfile.ZipFile(args.apk) as archive:
         assert archive.testzip() is None, "APK ZIP CRC failure"
+        overhead = pathlib.Path(args.apk).stat().st_size - sum(item.compress_size for item in archive.infolist())
+        assert overhead < 4 * 1024 * 1024, "APK retains large unreachable data from incremental packaging"
         assert "resources.arsc" in archive.namelist(), "Compiled Android resources missing"
         dex_files = sorted(name for name in archive.namelist()
                            if name.startswith("classes") and name.endswith(".dex") and "/" not in name)
@@ -58,6 +60,8 @@ def main():
             "Lcom/mkei/backcast/agent/InternetReachability;",
             "Lcom/mkei/backcast/net/DeviceNetworks;",
             "Lcom/mkei/backcast/ui/MarkdownRenderQueue;",
+            "Lcom/mkei/backcast/SQLiteSubAgentStore;",
+            "Lcom/mkei/backcast/tool/ToolchainDownloader;",
             "Lcom/mkei/backcast/tool/ObjectionBootstrap;",
             "Lcom/mkei/backcast/tool/FindFilesTool;",
             "Lcom/mkei/backcast/tool/RootShell;",
@@ -82,25 +86,18 @@ def main():
         }
         assert required.issubset(classes), "SDK/runtime classes missing: " + str(required - classes)
         assert "Lcom/mkei/backcast/agent/LlmClient$RequestActivity;" not in classes, "Removed header timing bridge still packaged"
+        assert "Lcom/mkei/backcast/agent/FileSubAgentStore;" not in classes, "Removed file checkpoint store still packaged"
         print("PASS official SDK, transport, JSON/Kotlin runtime and application classes packaged")
         manifest = json.loads(archive.read("assets/toolchain/manifest.json"))
+        assert not any(name.startswith("assets/toolchain/") and name.endswith((".tar.gz", ".tar", ".zip"))
+                       for name in archive.namelist()), "Tool payloads must be downloaded, not packaged in the APK"
         for artifact in manifest["artifacts"]:
-            asset = "assets/" + artifact["asset"]
-            tar = asset not in archive.namelist()
-            if tar:
-                asset = "assets/" + artifact["tar_asset"]
-            expected_size = artifact["tar_bytes" if tar else "bytes"]
-            expected_hash = artifact["tar_sha256" if tar else "sha256"]
-            digest, size = hashlib.sha256(), 0
-            with archive.open(asset) as source:
-                while True:
-                    chunk = source.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    digest.update(chunk)
-                    size += len(chunk)
-            assert size == expected_size and digest.hexdigest() == expected_hash, "Tool payload changed: " + asset
-            print("PASS actual packaged tool asset", asset, "bytes=", size)
+            assert artifact["url"] == ("https://github.com/Hollis-X/backcast/releases/download/toolchain-"
+                                        + manifest["version"] + "/" + artifact["file"]), "Unpinned tool release URL"
+            assert len(artifact["sha256"]) == 64 and len(artifact["prefix_sha256"]) == 64, "Missing package hashes"
+            assert len(artifact["chunk_sha256"]) == (artifact["bytes"] + artifact["chunk_bytes"] - 1) // artifact["chunk_bytes"], "Missing resumable chunk hashes"
+        assert any(name.startswith("assets/toolchain/licenses/") for name in archive.namelist()), "Tool licenses missing"
+        print("PASS tool release manifest and licenses retained; all tool payloads excluded from APK")
     manifest = subprocess.run([args.aapt, "dump", "badging", args.apk],
                               check=True, capture_output=True, text=True).stdout
     assert "sdkVersion:'26'" in manifest, "APK minimum API is not Android 8"

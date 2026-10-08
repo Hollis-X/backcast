@@ -15,6 +15,7 @@ trap 'rm -rf "$build"' EXIT HUP INT TERM
 javac -proc:none -encoding UTF-8 -source 8 -target 8 -Xlint:-options -cp "$json" -d "$build" \
     "$root"/app/src/main/java/com/mkei/backcast/agent/*.java \
     "$root"/app/src/main/java/com/mkei/backcast/tool/*.java \
+    "$root"/app/src/main/java/com/mkei/backcast/mcp/*.java \
     "$root"/app/src/main/java/com/mkei/backcast/ui/AgentPanelState.java \
     "$root"/tests/support/android/os/Build.java \
     "$root"/tests/support/android/os/SystemClock.java

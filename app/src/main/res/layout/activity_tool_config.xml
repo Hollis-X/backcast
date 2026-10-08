@@ -52,7 +52,7 @@
                 android:orientation="vertical" android:layout_marginTop="8dp">
                 <Button android:id="@+id/tool_package_install" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:minHeight="48dp"
-                    android:text="@string/toolkit_install_offline" android:textAllCaps="false" />
+                    android:text="@string/toolkit_install_package" android:textAllCaps="false" />
                 <Button android:id="@+id/tool_package_remove" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:minHeight="48dp"
                     android:text="@string/toolkit_remove_package" android:textAllCaps="false" />

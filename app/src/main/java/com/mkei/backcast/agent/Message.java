@@ -13,6 +13,7 @@ public class Message {
     public static final String TOOL = "tool";
     /** Transcript-only separator; synthesized from the local compaction event log. */
     public static final String COMPACTION = "compaction";
+    public static final String COORDINATION_PREFIX = Goal.STEER_PREFIX + "[coordination]\n";
 
     public String role;
     public String content;
@@ -38,6 +39,8 @@ public class Message {
     public boolean resumeAfterCompaction;
     public boolean goalFinalReply;
     public String delegatedRequest;
+    /** Assignment identity stays local and survives independent child checkpoints. */
+    public String agentTaskId;
     public JSONArray coordinationIds;
     public Boolean delegationAuthorized;
     public boolean delegationForbidden;
@@ -77,6 +80,33 @@ public class Message {
         Message m = new Message(TOOL, text);
         m.toolCallId = callId;
         return m;
+    }
+
+    public static boolean isCoordination(String content) {
+        return content != null && content.startsWith(COORDINATION_PREFIX);
+    }
+
+    /** Reconstruct identities from persisted hidden content when transcript columns predate local metadata. */
+    public void restoreCoordinationIds() {
+        if (!isCoordination(content) || coordinationIds != null) return;
+        try {
+            JSONObject batch = new JSONObject(content.substring(content.lastIndexOf('\n') + 1));
+            coordinationIds = coordinationBatchIds(batch);
+        } catch (Exception invalid) { throw new IllegalStateException("协作事件记录不完整，不能确认送达。", invalid); }
+    }
+
+    public static JSONArray coordinationBatchIds(JSONObject batch) throws Exception {
+        JSONArray ids = new JSONArray();
+        for (String key : new String[]{"inbox", "messages"}) {
+            JSONArray mail = batch.optJSONArray(key);
+            if (mail != null) for (int i = 0; i < mail.length(); i++) ids.put(mail.getJSONObject(i).getString("id"));
+        }
+        JSONArray results = batch.optJSONArray("agents");
+        if (results != null) for (int i = 0; i < results.length(); i++) {
+            JSONObject chunk = results.getJSONObject(i);
+            if (chunk.has("resultId")) ids.put("result:" + chunk.getString("resultId") + ":" + chunk.getInt("offset") + ":" + chunk.getInt("endOffset"));
+        }
+        return ids;
     }
 
     public boolean hasDisplayParts(String body, String thought, JSONArray calls) {
@@ -134,6 +164,7 @@ public class Message {
             if (resumeAfterCompaction) item.put("resume_after_compaction", true);
             if (goalFinalReply) item.put("goal_final_reply", true);
             if (delegatedRequest != null) item.put("delegated_request", delegatedRequest);
+            if (agentTaskId != null) item.put("agent_task_id", agentTaskId);
             if (coordinationIds != null) item.put("coordination_ids", coordinationIds);
             if (delegationAuthorized != null) item.put("delegation_authorized", delegationAuthorized);
             if (delegationForbidden) item.put("delegation_forbidden", true);
@@ -154,6 +185,7 @@ public class Message {
         message.resumeAfterCompaction = item.optBoolean("resume_after_compaction", false);
         message.goalFinalReply = item.optBoolean("goal_final_reply", false);
         if (item.has("delegated_request")) message.delegatedRequest = item.optString("delegated_request", "");
+        if (item.has("agent_task_id")) message.agentTaskId = item.optString("agent_task_id", "");
         message.coordinationIds = item.optJSONArray("coordination_ids");
         if (item.has("delegation_authorized")) message.delegationAuthorized = Boolean.valueOf(item.optBoolean("delegation_authorized"));
         message.delegationForbidden = item.optBoolean("delegation_forbidden", false);
