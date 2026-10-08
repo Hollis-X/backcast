@@ -30,19 +30,21 @@ public final class FindFilesTool implements Tool {
     @Override public String name() { return "find_files"; }
 
     @Override public String description() {
-        return "按文件名搜索本轮所有已授权工作目录，返回文件的绝对路径，不读取内容。"
+        return "按文件名搜索本轮主项目目录，返回文件的绝对路径，不读取内容。"
+                + "默认只搜索本轮第一个项目目录；只有明确指定 directory 才搜索其他本轮允许的目录，不因未找到文件而扩大范围。"
                 + "用户只给名字或省略扩展名时先调用它，例如 BlackBox 可找到 BlackBox3.6.5_arm64-v8a.apk.1。"
                 + "优先匹配完整文件名与无扩展名的基名，再返回忽略大小写的前缀/包含匹配。"
                 + "有多个候选不要猜，结合用户指定目录或让用户选择后再 read/edit；写新文件仍须指定目标路径。"
                 + "不跟随符号链接、不访问未授权目录或其他会话临时目录。root 开启时可遍历 App 无权读取的项目目录。"
-                + "结果 complete=false 表示扫描受权限、深度、数量、时间或输出限制，不能据此断言文件不存在。";
+                + "结果 complete=false 表示扫描受权限、深度、数量、时间或输出限制，不能据此断言文件不存在。"
+                + "本轮项目访问范围：" + ToolPaths.searchRoots(workDir, temporary) + "。";
     }
 
     @Override public JSONObject parameters() {
         try {
             JSONObject props = new JSONObject()
                     .put("name", new JSONObject().put("type", "string").put("description", "完整文件名、无扩展名基名或文件名的一部分；不填路径或通配符"))
-                    .put("directory", new JSONObject().put("type", "string").put("description", "可选，缩小到一个已授权目录；相对路径按主工作目录解析"))
+                    .put("directory", new JSONObject().put("type", "string").put("description", "可选，明确选择一个本轮允许的目录；不填时只搜索本轮主项目目录，相对路径按该主目录解析"))
                     .put("limit", new JSONObject().put("type", "integer").put("minimum", 1).put("maximum", MAX_RESULTS).put("description", "最多返回多少个候选，默认40，上限100"))
                     .put("max_depth", new JSONObject().put("type", "integer").put("minimum", 0).put("maximum", 64).put("description", "从授权根或directory向下搜索的最大目录层数，默认16；0只找该目录直接文件"));
             return new JSONObject().put("type", "object").put("properties", props).put("required", new JSONArray().put("name"));
@@ -122,7 +124,7 @@ public final class FindFilesTool implements Tool {
         ArrayDeque<Visit> queue = new ArrayDeque<Visit>();
         if (directory != null && !directory.isEmpty()) queue.add(new Visit(
                 ToolPaths.resolve(workDir, directory, temporary, useRoot, bounded), 0, useRoot));
-        else for (File root : roots) queue.add(new Visit(root, 0, useRoot));
+        else queue.add(new Visit(roots.get(0), 0, useRoot));
         Set<String> seenDirectories = new HashSet<String>(), seenFiles = new HashSet<String>();
         try {
         while (!queue.isEmpty()) {

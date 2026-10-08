@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 应用进程读不到的路径，跟 shell 一样走 root。
- * 探测结果在这次进程里只问一次。
+ * 授权状态只由明确的 UID 探测更新；命令失败或清理失败不能改变授权结果。
  */
 final class RootShell {
 
@@ -58,9 +58,9 @@ final class RootShell {
             }
             boolean ok = false;
             try {
-                Out out = exec("id", null, 400, 10000, cancellation);
+                Out out = exec("id -u", null, 400, 10000, cancellation);
                 String text = new String(out.stdout, "UTF-8");
-                ok = out.exit == 0 && text.indexOf("uid=0") >= 0;
+                ok = out.exit == 0 && "0".equals(text.trim());
             } catch (Exception e) {
                 cancellation.check();
                 ok = false;
@@ -94,10 +94,13 @@ final class RootShell {
                 done = "__backcast_root_done_" + token + ":";
         // Keep stdout binary and untouched. A su launcher's status is not the
         // command status: Android implementations can detach and return zero.
-        String script = "s=$(cat /proc/$$/stat) || exit 125; printf " + quoteArgument("\\n" + begin + "%s\\n")
+        String script = "[ \"$(id -u)\" = 0 ] || { printf 'root authorization unavailable\\n' >&2; exit 126; }; "
+                + "s=$(cat /proc/$$/stat) || exit 125; printf " + quoteArgument("\\n" + begin + "%s\\n")
                 + " \"$s\" >&2; sh -c " + quoteArgument(command) + "; result=$?; printf "
                 + quoteArgument("\\n" + done + "%s\\n") + " \"$result\" >&2; exit \"$result\"";
-        String owner = "su -c " + quoteArgument(script) + "; exec >/dev/null 2>&1; while :; do sleep 1; done";
+        String launch = "if command -v setsid >/dev/null 2>&1; then setsid sh -c " + quoteArgument(script)
+                + "; else sh -c " + quoteArgument(script) + "; fi";
+        String owner = "su -c " + quoteArgument(launch) + "; exec >/dev/null 2>&1; while :; do sleep 1; done";
         Process raw = new ProcessBuilder("sh", "-c", owner).start();
         return new CommandProcess(raw, begin, done, cancellation);
     }
@@ -111,17 +114,20 @@ final class RootShell {
         final InputStream stdout;
         volatile int code = Integer.MIN_VALUE;
         volatile boolean began, controlEnded, destroyed;
+        volatile RootIdentity supervisor;
         volatile String failure = "";
 
         CommandProcess(final Process raw, final String begin, final String done,
                        ToolchainInstaller.Cancellation cancellation) {
-            this.raw = raw; this.cancellation = cancellation; tree = new ProcessTree(raw, true);
+            // RootShell is ProcessTree's lowest-level transport. Its own cleanup must
+            // not reenter RootShell through root signals or unreadable /proc scans.
+            this.raw = raw; this.cancellation = cancellation; tree = new ProcessTree(raw, false);
             stdout = new FilterInputStream(raw.getInputStream()) {
                 @Override public int read() throws IOException {
-                    check(); int value = super.read(); if (value < 0) verifyEof(); return value;
+                    check(); int value = super.read(); check(); if (value < 0) verifyEof(); return value;
                 }
                 @Override public int read(byte[] bytes, int offset, int length) throws IOException {
-                    check(); int count = super.read(bytes, offset, length); if (count < 0) verifyEof(); return count;
+                    check(); int count = super.read(bytes, offset, length); check(); if (count < 0) verifyEof(); return count;
                 }
             };
             Thread control = new Thread(new Runnable() { @Override public void run() {
@@ -133,7 +139,11 @@ final class RootShell {
                             if (buffer[i] == '\n') {
                                 String text = new String(line.toByteArray(), "UTF-8"); line.reset();
                                 if (!discarded && text.startsWith(begin)) {
-                                    if (!began && tree.observeSupervisor(text.substring(begin.length()))) began = true;
+                                    String stat = text.substring(begin.length());
+                                    RootIdentity identity = RootIdentity.parse(stat);
+                                    if (!began && identity != null && tree.observeSupervisor(stat)) {
+                                        supervisor = identity; began = true;
+                                    }
                                     else failure = "root 执行身份握手失败。";
                                 } else if (!discarded && text.startsWith(done)) {
                                     try {
@@ -154,9 +164,6 @@ final class RootShell {
                     controlEnded = true;
                     if (code == Integer.MIN_VALUE && failure.length() == 0)
                         failure = began ? "root 执行结束但未返回命令退出状态。" : "root 执行未返回身份握手，命令未确认执行。";
-                    if (!destroyed && (!began || code == Integer.MIN_VALUE || failure.length() > 0)) {
-                        available = Boolean.FALSE; availableCheckedAt = System.nanoTime();
-                    }
                 }
             } }, "backcast-root-status"); control.setDaemon(true); control.start();
             Thread monitor = new Thread(new Runnable() { @Override public void run() {
@@ -238,16 +245,67 @@ final class RootShell {
         }
         @Override public boolean isAlive() { try { exitValue(); return false; } catch (IllegalThreadStateException running) { return true; } }
         @Override public void destroy() {
-            if (destroyed) return; destroyed = true;
+            synchronized (this) { if (destroyed) return; destroyed = true; }
             // Completed file operations have already released their children.
             // Interrupt only a command whose identity was actually observed.
-            if (began && code == Integer.MIN_VALUE) tree.stop();
-            else new ProcessTree(raw, false).stop();
+            if (began && code == Integer.MIN_VALUE && supervisor != null) supervisor.stop();
+            tree.stop();
             try { raw.getInputStream().close(); } catch (Exception ignored) { }
             try { raw.getOutputStream().close(); } catch (Exception ignored) { }
             raw.destroyForcibly();
         }
         @Override public Process destroyForcibly() { destroy(); return this; }
+    }
+
+    /** Root-read stat is authoritative when Android denies the App's Java /proc reads. */
+    private static final class RootIdentity {
+        final long pid;
+        final String started;
+        RootIdentity(long pid, String started) { this.pid = pid; this.started = started; }
+
+        static RootIdentity parse(String stat) {
+            try {
+                int close = stat.lastIndexOf(')');
+                String[] fields = stat.substring(close + 1).trim().split("\\s+");
+                long pid = Long.parseLong(stat.substring(0, stat.indexOf(' ')));
+                return close >= 0 && pid > 1 && fields.length > 19 && fields[19].matches("[0-9]+")
+                        ? new RootIdentity(pid, fields[19]) : null;
+            } catch (Exception invalid) { return null; }
+        }
+
+        void stop() {
+            // This one guarded signal uses su directly, never the managed executor.
+            // A PID/group is killed only after revalidating its captured start time.
+            String check = "s=$(cat /proc/" + pid + "/stat 2>/dev/null) || exit 0; "
+                    + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || exit 0; g=$3; n=$4; shift 19; "
+                    + "[ \"$1\" = " + quote(started) + " ] || exit 0; "
+                    + "if [ \"$g\" = " + pid + " ] && [ \"$n\" = " + pid + " ]; then "
+                    + "kill -s KILL -- -" + pid + "; else " + descendants() + " fi";
+            Process signaler = null;
+            try {
+                signaler = new ProcessBuilder("su", "-c", check).redirectErrorStream(true)
+                        .redirectOutput(new java.io.File("/dev/null")).start();
+                signaler.getOutputStream().close();
+                if (!signaler.waitFor(2, TimeUnit.SECONDS)) signaler.destroyForcibly();
+            } catch (Exception ignored) { }
+            finally { if (signaler != null) signaler.destroy(); }
+        }
+
+        private String descendants() {
+            // The non-setsid fallback must also handle descendants hidden from Java.
+            return "kill -s STOP " + pid + "; all=' " + pid + " '; records=" + quote(pid + ":" + started) + "; round=0; "
+                    + "while [ \"$round\" -lt 32 ]; do changed=0; round=$((round + 1)); "
+                    + "for f in /proc/[0-9]*/stat; do s=$(cat \"$f\" 2>/dev/null) || continue; p=${s%% *}; "
+                    + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || continue; parent=$2; shift 19; "
+                    + "case \"$all\" in *\" $parent \"*) case \"$all\" in *\" $p \"*) ;; "
+                    + "*) captured=$1; current=$(cat /proc/$p/stat 2>/dev/null) || continue; current=${current##*) }; "
+                    + "set -- $current; [ $# -ge 20 ] || continue; shift 19; [ \"$1\" = \"$captured\" ] || continue; "
+                    + "kill -s STOP \"$p\"; all=\"$all$p \"; records=\"$p:$captured $records\"; changed=1;; esac;; esac; done; "
+                    + "[ \"$changed\" = 1 ] || break; done; "
+                    + "for r in $records; do p=${r%:*}; start=${r#*:}; s=$(cat /proc/$p/stat 2>/dev/null) || continue; "
+                    + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || continue; shift 19; "
+                    + "[ \"$1\" = \"$start\" ] && kill -s KILL \"$p\"; done;";
+        }
     }
 
     /** 读完整份标准输出。超过 max 就停掉，不把大文件整段留在内存里。 */
@@ -328,8 +386,14 @@ final class RootShell {
                         }
                     }
                 } catch (Exception failed) {
-                    if (kill instanceof CommandProcess && !((CommandProcess) kill).destroyed && ((CommandProcess) kill).failure.length() == 0)
-                        ((CommandProcess) kill).failure = "root 读取输出失败（" + failed.getClass().getSimpleName() + "）。";
+                    if (kill instanceof CommandProcess) {
+                        CommandProcess process = (CommandProcess) kill;
+                        // verifyEof deliberately throws for an already-known nonzero
+                        // command exit. Preserve that real status instead of replacing it.
+                        if (!process.destroyed && process.failure.length() == 0
+                                && (process.code == Integer.MIN_VALUE || process.code == 0))
+                            process.failure = "root 读取输出失败（" + failed.getClass().getSimpleName() + "）。";
+                    }
                 }
             }
         });

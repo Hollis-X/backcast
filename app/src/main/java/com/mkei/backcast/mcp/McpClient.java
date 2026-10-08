@@ -133,7 +133,11 @@ public final class McpClient {
             }
             if (status < 200 || status >= 300) throw failure("MCP HTTP " + status + "，未自动重试");
             if (id == null) {
-                if (status != 202 && status != 204) throw failure("MCP 通知未被正确接受");
+                // Streamable HTTP specifies an empty 202; some servers use an empty 200/204.
+                if (status != 200 && status != 202 && status != 204) throw failure("MCP 通知未被正确接受");
+                ResponseBody acknowledgment = response.body();
+                if (acknowledgment != null && !acknowledgment.source().exhausted())
+                    throw failure("MCP 通知响应必须为空，服务器未正确确认通知");
                 return null;
             }
             ResponseBody body = response.body();

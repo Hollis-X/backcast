@@ -140,7 +140,7 @@ public class ShellTool implements Tool {
 
         if (!wantRoot) {
             String note = useRoot
-                    ? "注意：root 不可用（应用未获授权），本次以普通权限执行，"
+                    ? "注意：本次无法确认 root 授权，已以普通权限执行，"
                       + "涉及 /data 等目录的命令会失败。\n"
                     : "";
             return note + output;
@@ -252,7 +252,7 @@ public class ShellTool implements Tool {
 
     private String exec(String command, int timeoutSec, boolean withRoot, boolean temporaryCommand, final int mine, boolean program) throws Exception {
         // 在命令前先切到工作目录，相对路径就不用模型自己拼了。
-        String directory = workDir;
+        String directory = temporary == null ? workDir : temporary.projectDirectory(workDir);
         String prefix = "";
         final File tempDirectory = temporary == null ? null : temporary.directory();
         if (temporary != null) {
@@ -281,6 +281,7 @@ public class ShellTool implements Tool {
         String full = "if command -v setsid >/dev/null 2>&1; then setsid sh -c "
                 + quoteScript(supervisor) + "; else sh -c "
                 + quoteScript(supervisor) + "; fi";
+        if (withRoot) full = "[ \"$(id -u)\" = 0 ] || { printf 'root authorization unavailable\\n' >&2; exit 126; }; " + full;
         // Keep the direct Java child alive even if su/setsid forks its work.
         // Close only this owner's stdout/stderr after launch; detached children
         // retain theirs. Java's pipe reaper cannot discard their later output.

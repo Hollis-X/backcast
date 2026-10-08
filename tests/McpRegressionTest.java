@@ -34,7 +34,7 @@ public final class McpRegressionTest {
         final AtomicInteger cancelled = new AtomicInteger(), deleted = new AtomicInteger(), posts = new AtomicInteger();
         final List<String> methods = Collections.synchronizedList(new ArrayList<String>());
         final AtomicReference<Throwable> error = new AtomicReference<Throwable>();
-        Handler custom;
+        Handler custom, initializedNotification;
         String version = "2025-11-25";
         boolean errorResult;
         Fixture() throws Exception {
@@ -59,7 +59,12 @@ public final class McpRegressionTest {
                     check("session-fixture-secret".equals(exchange.getRequestHeaders().getFirst("MCP-Session-Id")), "Session missing after initialization");
                     check(version.equals(exchange.getRequestHeaders().getFirst("MCP-Protocol-Version")), "Negotiated protocol header missing");
                     if (method.equals("notifications/cancelled")) { cancelled.incrementAndGet(); reply(exchange, 202, null, ""); return; }
-                    if (method.equals("notifications/initialized")) { reply(exchange, 202, null, ""); return; }
+                    if (method.equals("notifications/initialized")) {
+                        check(!request.has("id"), "Initialized notification must not have a request ID");
+                        if (initializedNotification != null) initializedNotification.handle(exchange, request);
+                        else reply(exchange, 202, null, "");
+                        return;
+                    }
                     if (method.equals("tools/list")) lists.incrementAndGet();
                     if (method.equals("tools/call")) calls.incrementAndGet();
                     if (custom != null) { custom.handle(exchange, request); return; }
@@ -85,8 +90,8 @@ public final class McpRegressionTest {
         if (type != null) exchange.getResponseHeaders().add("Content-Type", type);
         exchange.getResponseHeaders().add("Connection", "close");
         byte[] bytes = text.getBytes("UTF-8");
-        exchange.sendResponseHeaders(code, code == 202 || code == 204 ? -1 : bytes.length);
-        if (bytes.length > 0 && code != 202 && code != 204) exchange.getResponseBody().write(bytes);
+        exchange.sendResponseHeaders(code, code == 204 || code == 202 && bytes.length == 0 ? -1 : bytes.length);
+        if (bytes.length > 0 && code != 204) exchange.getResponseBody().write(bytes);
         exchange.close();
     }
     private static void send(HttpExchange exchange, JSONObject request, JSONObject result) throws Exception {
@@ -125,6 +130,67 @@ public final class McpRegressionTest {
                 f.healthy();
             } finally { client.close(); }
         } pass("initializationPaginationAndSchema");
+    }
+    private static void emptyNotificationAcknowledgmentsCompleteInitialization() throws Exception {
+        for (int status : new int[] {200, 202, 204}) {
+            try (Fixture f = new Fixture()) {
+                // For 200 this sends a chunked empty body, without a Content-Type header.
+                f.initializedNotification = (exchange, request) -> reply(exchange, status, null, "");
+                McpClient client = new McpClient(f.server("one"));
+                try {
+                    check(client.discover().size() == 1, "Empty acknowledgment lost tool discovery: " + status);
+                    client.call("echo", new JSONObject());
+                    check(f.methods.equals(Arrays.asList("initialize", "notifications/initialized", "tools/list", "tools/call")),
+                            "Empty acknowledgment reordered/repeated lifecycle: " + status);
+                    f.healthy();
+                } finally { client.close(); }
+            }
+        }
+        try (Fixture f = new Fixture()) {
+            f.initializedNotification = (exchange, request) -> {
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, -1); exchange.close();
+            };
+            McpClient client = new McpClient(f.server("one"));
+            try {
+                client.call("echo", new JSONObject());
+                check(f.initializes.get() == 1 && f.calls.get() == 1, "Fixed empty JSON acknowledgment rejected/retried");
+                f.healthy();
+            } finally { client.close(); }
+        }
+        pass("emptyNotificationAcknowledgmentsCompleteInitialization");
+    }
+    private static void invalidNotificationAcknowledgmentsStopInitialization() throws Exception {
+        String error = new JSONObject().put("jsonrpc", "2.0").put("id", JSONObject.NULL)
+                .put("error", new JSONObject().put("code", -32001).put("message", TOKEN)).toString();
+        for (int status : new int[] {200, 202}) {
+            for (String body : new String[] {error, "broken " + TOKEN, "{}",
+                    "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{}}", "<html>" + TOKEN + "</html>", " \r\n"}) {
+                try (Fixture f = new Fixture()) {
+                    f.initializedNotification = (exchange, request) -> reply(exchange, status, "application/json", body);
+                    McpClient client = new McpClient(f.server("one"));
+                    try {
+                        rejects(client::discover, "通知响应必须为空");
+                        check(f.posts.get() == 2 && f.lists.get() == 0 && f.calls.get() == 0,
+                                "Invalid acknowledgment was retried or allowed a request");
+                        rejects(() -> client.call("echo", new JSONObject()), "通知响应必须为空");
+                        check(f.initializes.get() == 2 && f.posts.get() == 4 && f.calls.get() == 0,
+                                "Invalid acknowledgment incorrectly marked client initialized");
+                        f.healthy();
+                    } finally { client.close(); }
+                }
+            }
+        }
+        try (Fixture f = new Fixture()) {
+            f.initializedNotification = (exchange, request) -> reply(exchange, 201, null, "");
+            McpClient client = new McpClient(f.server("one"));
+            try {
+                rejects(() -> client.call("echo", new JSONObject()), "通知未被正确接受");
+                check(f.posts.get() == 2 && f.calls.get() == 0, "Unsupported acknowledgment status was accepted/retried");
+                f.healthy();
+            } finally { client.close(); }
+        }
+        pass("invalidNotificationAcknowledgmentsStopInitialization");
     }
     private static void sseMultilineAndServerRequests() throws Exception {
         try (Fixture f = new Fixture()) {
@@ -169,6 +235,7 @@ public final class McpRegressionTest {
     }
     private static void errorsStopWithoutRetry() throws Exception {
         try (Fixture f = new Fixture()) {
+            f.initializedNotification = (exchange, request) -> reply(exchange, 200, null, "");
             f.custom = (exchange, request) -> reply(exchange, 503, "application/json", TOKEN);
             McpClient client = new McpClient(f.server("one"));
             try { rejects(() -> client.call("echo", new JSONObject()), "HTTP 503"); check(f.calls.get() == 1, "HTTP tool failure retried"); f.healthy(); }
@@ -405,7 +472,8 @@ public final class McpRegressionTest {
         pass("urlAndHeaderValidation");
     }
     public static void main(String[] args) throws Exception {
-        initializationPaginationAndSchema(); sseMultilineAndServerRequests(); mappedToolsAndNoUiNetwork();
+        initializationPaginationAndSchema(); emptyNotificationAcknowledgmentsCompleteInitialization();
+        invalidNotificationAcknowledgmentsStopInitialization(); sseMultilineAndServerRequests(); mappedToolsAndNoUiNetwork();
         errorsStopWithoutRetry(); protocolErrorsDoNotLeakBody(); expiredSessionNeverReplaysCall();
         resultCredentialsRedactedAndToolErrorsRecognized(); staleCacheAndRevocation(); cancellationAndSessionIsolation();
         hardDeadlineStopsProgress(); malformedAndWrongIdResponses(); repeatedCursorAndUnsupportedVersion();

@@ -89,6 +89,16 @@ public final class TemporaryWorkspace {
         turnRoots.set(roots);
     }
 
+    void restrictToTask(WorkspaceRoots authorized, java.util.List<String> paths) {
+        turnRoots.set(authorized.forTask(paths));
+    }
+
+    public String projectDirectory(String directory) {
+        java.util.List<File> roots = projectRoots(directory).directories();
+        if (roots.isEmpty()) throw new IllegalArgumentException("本轮指定路径不在已授权工作目录内，无法执行项目命令。");
+        return roots.get(0).getPath();
+    }
+
     private String lease() {
         String value = turn.get();
         return value == null ? "manual" : value;

@@ -126,13 +126,18 @@ final class ToolPaths {
             ToolchainInstaller.Cancellation cancellation) throws Exception {
         cancellation.check();
         File target;
+        IllegalArgumentException canonicalFailure = null;
         try {
             target = resolve(workDir, path, temporary);
         } catch (IllegalArgumentException inaccessible) {
-            if (!useRoot) throw inaccessible;
+            if (!useRoot || !causedByPathIo(inaccessible)) throw inaccessible;
+            canonicalFailure = inaccessible;
             target = lexicalAuthorized(workDir, path, temporary);
         }
-        if (!useRoot || !RootShell.available(cancellation)) return target;
+        if (!useRoot || !RootShell.available(cancellation)) {
+            if (canonicalFailure != null) throw canonicalFailure;
+            return target;
+        }
         RootShell.Out out = RootShell.exec(rootCanonical(target), null, 8192, 15000, cancellation);
         if (out.exit != 0) throw new IllegalArgumentException("无法用 root 确认路径：" + target.getPath());
         String real = new String(out.stdout, "UTF-8");
@@ -141,6 +146,7 @@ final class ToolPaths {
         try {
             return resolve(workDir, real, temporary);
         } catch (IllegalArgumentException inaccessible) {
+            if (!causedByPathIo(inaccessible)) throw inaccessible;
             // Java's canonical lookup can fail on a directory readable only by
             // root. The root command already returned readlink -f; validate that
             // absolute result lexically against the captured roots and keep the
@@ -149,14 +155,21 @@ final class ToolPaths {
         }
     }
 
+    private static boolean causedByPathIo(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause())
+            if (cause instanceof IOException) return true;
+        return false;
+    }
+
     private static File lexicalAuthorized(String workDir, String path, TemporaryWorkspace temporary) {
         if (path == null || path.length() == 0 || path.indexOf('\0') >= 0
                 || path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0)
             throw new IllegalArgumentException("路径不合法。");
         File target = new File(path);
         if (!target.isAbsolute()) {
-            if (workDir == null || workDir.length() == 0) throw new IllegalArgumentException("路径必须是绝对路径。");
-            target = new File(workDir, path);
+            String directory = temporary == null ? workDir : temporary.projectDirectory(workDir);
+            if (directory == null || directory.length() == 0) throw new IllegalArgumentException("路径必须是绝对路径。");
+            target = new File(directory, path);
         }
         target = Paths.get(target.getAbsolutePath()).normalize().toFile();
         if (temporary != null && temporary.isPrivateStorageLexical(target))
@@ -280,7 +293,8 @@ final class ToolPaths {
             throw new IllegalArgumentException("命令不合法。");
         }
         try {
-            String cwd = temporaryCommand && temporary != null ? temporary.directory().getPath() : workDir;
+            String cwd = temporaryCommand && temporary != null ? temporary.directory().getPath()
+                    : temporary == null ? workDir : temporary.projectDirectory(workDir);
             scanCommand(workDir, new ShellLocation(cwd), shellWords(command), temporary, temporaryCommand);
         } catch (IllegalArgumentException error) {
             throw error;
@@ -326,7 +340,8 @@ final class ToolPaths {
             TemporaryWorkspace temporary, boolean temporaryCommand) throws Exception {
         ToolCatalog.get(id);
         if (arguments.size() > 128) throw new IllegalArgumentException("工具参数过多。");
-        String cwd = temporaryCommand && temporary != null ? temporary.directory().getPath() : workDir;
+        String cwd = temporaryCommand && temporary != null ? temporary.directory().getPath()
+                : temporary == null ? workDir : temporary.projectDirectory(workDir);
         if (temporaryCommand && temporary == null) throw new IllegalArgumentException("当前没有临时材料管理器。");
         for (int i = 0; i < arguments.size(); i++) {
             String value = arguments.get(i);
@@ -630,7 +645,7 @@ final class ToolPaths {
                     }
                 }
             } else if (word.syntax) {
-                checkArguments(workDir, location, arguments, temporary);
+                checkArguments(workDir, location, arguments, temporary, temporaryCommand);
                 arguments.clear();
                 if ("(".equals(word.text)) parents.add(new ShellLocation(location));
                 if (")".equals(word.text) && !parents.isEmpty()) location = parents.remove(parents.size() - 1);
@@ -638,10 +653,10 @@ final class ToolPaths {
                 arguments.add(word.text);
             }
         }
-        checkArguments(workDir, location, arguments, temporary);
+        checkArguments(workDir, location, arguments, temporary, temporaryCommand);
     }
 
-    private static void checkArguments(String workDir, ShellLocation location, List<String> arguments, TemporaryWorkspace temporary) {
+    private static void checkArguments(String workDir, ShellLocation location, List<String> arguments, TemporaryWorkspace temporary, boolean temporaryCommand) {
         if (arguments.isEmpty()) return;
         int start = 0;
         while (start < arguments.size() && arguments.get(start).matches("[A-Za-z_][A-Za-z0-9_]*=.*")) {
@@ -651,6 +666,14 @@ final class ToolPaths {
         String executable = arguments.get(start++);
         checkPath(workDir, location, executable, temporary);
         String tool = new File(executable).getName();
+        if ("sh".equals(tool) || "bash".equals(tool) || "su".equals(tool)) {
+            for (int i = start; i + 1 < arguments.size(); i++) {
+                if ("-c".equals(arguments.get(i))) {
+                    scanCommand(workDir, location, shellWords(arguments.get(i + 1)), temporary, temporaryCommand);
+                    return;
+                }
+            }
+        }
         if ("tee".equals(tool)) throw new IllegalArgumentException("写文件请使用 write 或 edit，不要使用 tee。");
         if ("cd".equals(tool)) {
             if (arguments.size() - start != 1 || arguments.get(start).indexOf('$') >= 0) {
@@ -722,9 +745,19 @@ final class ToolPaths {
         String path = equal >= 0 ? value.substring(equal + 1) : value;
         if ("/dev/null".equals(path)) return;
         if (path.startsWith("/") || path.equals("..") || path.startsWith("../")
-                || path.contains("/../") || path.endsWith("/..")) {
+                || path.contains("/../") || path.endsWith("/..")
+                || (!path.startsWith("-") && path.indexOf('$') < 0 && path.indexOf('*') < 0
+                    && path.indexOf('?') < 0 && !path.contains("://") && existingRelative(location, path))) {
             for (String cwd : location.directories) resolve(workDir, absolute(cwd, path).getPath(), temporary);
         }
+    }
+
+    private static boolean existingRelative(ShellLocation location, String path) {
+        for (String cwd : location.directories) {
+            File file = new File(cwd, path);
+            if (file.exists() || Files.isSymbolicLink(file.toPath())) return true;
+        }
+        return false;
     }
 
     // cd may fail, so later relative paths must be valid from every possible directory.

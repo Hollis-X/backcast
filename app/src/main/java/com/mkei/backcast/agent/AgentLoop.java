@@ -1394,7 +1394,28 @@ public class AgentLoop {
 
     private void beginTemporaryTurn() {
         ToolRegistry tools = turnTools.get();
-        if (tools != null) tools.beginTurn();
+        List<String> paths = humanWorkspacePaths();
+        synchronized (lock) {
+            for (int i = history.size() - 1; i >= 0; i--) {
+                Message message = history.get(i);
+                if (Message.USER.equals(message.role) && !Goal.isSteer(message.content)
+                        && !Goal.isNote(message.content) && message.coordinationIds == null) {
+                    message.taskPaths = TaskScope.snapshot(paths);
+                    message.workDir = workspace;
+                    break;
+                }
+            }
+        }
+        if (tools != null) {
+            tools.beginTurn();
+            tools.restrictWorkspace(paths);
+        }
+    }
+
+    private List<String> humanWorkspacePaths() {
+        AgentLoop parent = delegationParent;
+        if (parent != null) return parent.humanWorkspacePaths();
+        synchronized (lock) { return TaskScope.paths(history, workspace); }
     }
 
     /** Called while claiming a turn under lock, before retarget can replace its registry. */
@@ -1543,6 +1564,8 @@ public class AgentLoop {
         handoff.resumeAfterCompaction = followup;
         handoff.delegationAuthorized = Boolean.valueOf(explicitDelegationAuthorized());
         handoff.delegationForbidden = delegationForbidden();
+        handoff.taskPaths = TaskScope.snapshot(humanWorkspacePaths());
+        handoff.workDir = workspace;
         handoff.goalFinalReply = followup && lastToolsClosedGoal();
         List<Message> fresh;
         synchronized (lock) {
@@ -1594,6 +1617,7 @@ public class AgentLoop {
                         tail.delegatedRequest = m.delegatedRequest;
                         tail.delegationAuthorized = m.delegationAuthorized;
                         tail.delegationForbidden = m.delegationForbidden;
+                        tail.taskPaths = m.taskPaths;
                         users.add(0, tail);
                     }
                     break;

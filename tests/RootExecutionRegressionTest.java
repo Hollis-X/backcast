@@ -19,6 +19,36 @@ public final class RootExecutionRegressionTest {
     }
     private static void child(String mode, File directory) throws Exception {
         ShellTool shell = new ShellTool(false, directory.getPath(), null);
+        if ("not-root".equals(mode)) {
+            File target = new File(directory, "must-not-run-without-root");
+            String command = "touch " + RootShell.quote(target.getPath());
+            check(!RootShell.available(), "Non-root UID was accepted as authorization");
+            RootShell.Out result = RootShell.exec(command, null, 100, 2000);
+            check(result.exit != 0 && !target.exists(), "Unprivileged su ran a business root command");
+            check(rootedShell(shell, command).startsWith("错误：") && !target.exists(), "Shell launched business command despite non-root su");
+            System.out.println("PASS non-root UID cannot authorize or execute a root business command"); return;
+        }
+        if ("restricted-proc".equals(mode)) {
+            System.setSecurityManager(new SecurityManager() {
+                @Override public void checkPermission(java.security.Permission permission) { }
+                @Override public void checkRead(String path) {
+                    if (path.startsWith("/proc/") && path.endsWith("/stat"))
+                        throw new SecurityException("Fixture models Android hidden root /proc stat");
+                }
+            });
+            final AtomicBoolean stopped = new AtomicBoolean(), ended = new AtomicBoolean();
+            RootShell.Out restricted = RootShell.exec("id -u", null, 100, 2000);
+            check(restricted.exit == 0, "Hidden /proc root status failed: " + restricted.exit + " " + restricted.stderr);
+            check(RootShell.available(), "Root handshake depended on App access to root /proc");
+            check(RootShell.exec("printf restricted-success", null, 100, 2000).exit == 0, "Hidden /proc root command did not finish");
+            Process process = RootShell.start("sleep 30; printf forbidden-late", () -> { if (stopped.get()) throw new InterruptedException(); });
+            Thread reader = new Thread(() -> { try { process.getInputStream().read(); } catch (Exception expected) { ended.set(true); } });
+            reader.start(); Thread.sleep(150); stopped.set(true); reader.join(3000);
+            check(!reader.isAlive() && ended.get(), "Hidden /proc cancellation left root output blocked/recursive");
+            process.destroy(); check(RootShell.available(), "Hidden /proc cancellation corrupted authorization cache");
+            System.setSecurityManager(null);
+            System.out.println("PASS root handshake and cancellation when Java cannot read /proc"); return;
+        }
         if ("silent".equals(mode)) {
             for (String command : Arrays.asList("printf hello", "false", "test -f missing.apk", "not_a_backcast_program --version")) {
                 String output = rootedShell(shell, command);
@@ -40,13 +70,25 @@ public final class RootExecutionRegressionTest {
             checkedAt.setLong(null, System.nanoTime() - 6000000000L);
             check(RootShell.available(), "Authorizing root after a failed probe stayed unavailable forever");
         } else {
+            if ("cleanup-silent".equals(mode)) {
+                check(RootShell.available(), "Initial real uid probe failed");
+                for (int i = 0; i < 4; i++) {
+                    String success = rootedShell(shell, "id");
+                    check(success.contains("exit=0\nuid=0"), "Business root command failed: " + success);
+                    check(RootShell.available(), "A cleanup/status failure poisoned successful root authorization at repetition " + i);
+                    RootShell.Out read = RootShell.exec("printf immediately-readable", null, 100, 2000);
+                    check(read.exit == 0 && new String(read.stdout, "UTF-8").equals("immediately-readable"), "Root file path failed immediately after root shell cleanup");
+                }
+                System.out.println("PASS cleanup failure does not poison successful root authorization");
+                return;
+            }
             check(rootedShell(shell, "printf '中文-output'; exit 7").startsWith("exit=7\n中文-output"), "Forked su lost real output or exit");
             check(rootedShell(shell, "false").startsWith("exit=1"), "False became successful");
             check(rootedShell(shell, "test -f missing.apk").startsWith("exit=1"), "Missing file test became successful");
             check(rootedShell(shell, "not_a_backcast_program --version").startsWith("exit=127"), "Missing program became successful");
             check(shell.run(new JSONObject().put("command", "printf plain-output; false")).startsWith("exit=1\nplain-output"), "Forked setsid lost ordinary shell status");
             RootShell.Out out = RootShell.exec("printf 'binary\\000tail'; exit 9", null, 100, 2000);
-            check(out.exit == 9 && Arrays.equals(out.stdout, new byte[]{98,105,110,97,114,121,0,116,97,105,108}), "Root control frames changed binary stdout or exit: " + out.exit);
+            check(out.exit == 9 && Arrays.equals(out.stdout, new byte[]{98,105,110,97,114,121,0,116,97,105,108}), "Root control frames changed binary stdout or exit: " + out.exit + " " + out.stderr);
             File target = new File(directory, "root-write-" + mode); byte[] input = new byte[]{0,1,2,10,(byte)255};
             out = RootShell.exec("cat > " + RootShell.quote(target.getPath()), input, 100, 2000);
             check(out.exit == 0 && Arrays.equals(input, Files.readAllBytes(target.toPath())), "Root stdin was swallowed by owner wrapper");
@@ -76,9 +118,10 @@ public final class RootExecutionRegressionTest {
             };
             final Process process = RootShell.start("sleep 30; printf late", cancellation);
             final AtomicBoolean readFailed = new AtomicBoolean();
-            Thread reader = new Thread(() -> { try { process.getInputStream().read(); } catch (Exception expected) { readFailed.set(true); } });
+            final java.util.concurrent.atomic.AtomicInteger firstByte = new java.util.concurrent.atomic.AtomicInteger(-999);
+            Thread reader = new Thread(() -> { try { firstByte.set(process.getInputStream().read()); } catch (Exception expected) { readFailed.set(true); } });
             reader.start(); Thread.sleep(150); stopped.set(true); reader.join(3000);
-            check(!reader.isAlive() && readFailed.get(), "Cancellation left a root stream blocked or succeeded"); process.destroy();
+            check(!reader.isAlive() && readFailed.get(), "Cancellation left a root stream blocked or succeeded; alive=" + reader.isAlive() + ", firstByte=" + firstByte.get()); process.destroy();
             long started = System.nanoTime();
             out = RootShell.exec("sleep 30", null, 100, 200);
             check(out.exit != 0 && (System.nanoTime() - started) / 1000000 < 3000, "Root timeout waited for a blocked stream");
@@ -95,15 +138,15 @@ public final class RootExecutionRegressionTest {
         try {
             check(bin.mkdir(), "No fixture bin");
             File su = new File(bin, "su");
-            Files.write(su.toPath(), ("#!/bin/sh\ncase \"$BACKCAST_TEST_SU\" in\nsilent) exit 0;;\ndetached) exec 3<&0; sh -c \"$2\" <&3 & exit 0;;\n*) exec sh -c \"$2\";;\nesac\n").getBytes("UTF-8"));
+            Files.write(su.toPath(), ("#!/bin/sh\ncase \"$BACKCAST_TEST_SU\" in\nsilent) exit 0;;\ncleanup-silent) case \"$2\" in *__backcast_root_start_*kill*) exit 0;; esac; exec sh -c \"$2\";;\ndetached) exec 3<&0; sh -c \"$2\" <&3 & exit 0;;\n*) exec sh -c \"$2\";;\nesac\n").getBytes("UTF-8"));
             check(su.setExecutable(true), "Fake su is not executable");
             File setsid = new File(bin, "setsid");
             Files.write(setsid.toPath(), "#!/bin/sh\nexec 3<&0\n\"$@\" <&3 &\nexit 0\n".getBytes("UTF-8"));
             check(setsid.setExecutable(true), "Fake setsid is not executable");
             File id = new File(bin, "id");
-            Files.write(id.toPath(), "#!/bin/sh\nprintf 'uid=0(root) gid=0(root)\\n'\n".getBytes("UTF-8"));
+            Files.write(id.toPath(), "#!/bin/sh\nif [ \"$1\" = -u ]; then if [ \"$BACKCAST_TEST_SU\" = not-root ]; then printf '1000\\n'; else printf '0\\n'; fi; else printf 'uid=0(root) gid=0(root)\\n'; fi\n".getBytes("UTF-8"));
             check(id.setExecutable(true), "Fake root probe id is not executable");
-            for (String mode : Arrays.asList("normal", "detached", "silent")) {
+            for (String mode : Arrays.asList("cleanup-silent", "normal", "detached", "silent", "restricted-proc", "not-root")) {
                 ProcessBuilder child = new ProcessBuilder(new File(System.getProperty("java.home"), "bin/java").getPath(),
                         "-cp", System.getProperty("java.class.path"), RootExecutionRegressionTest.class.getName(), mode, directory.getPath());
                 child.environment().put("PATH", bin.getPath() + ":/usr/bin:/bin"); child.environment().put("BACKCAST_TEST_SU", mode);

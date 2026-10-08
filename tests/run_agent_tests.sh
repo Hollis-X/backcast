@@ -41,6 +41,7 @@ javac -proc:none -encoding UTF-8 -source 8 -target 8 -Xlint:-options -cp "$json"
     "$root"/tests/TemporaryCleanupRegressionTest.java \
     "$root"/tests/ProcessIsolationRegressionTest.java \
     "$root"/tests/RootExecutionRegressionTest.java \
+    "$root"/tests/TaskWorkspaceRegressionTest.java \
     "$root"/tests/ShellGuardRegressionTest.java \
     "$root"/tests/FileSubAgentStoreRegressionTest.java \
     "$root"/tests/SubAgentRegressionTest.java \
@@ -73,6 +74,10 @@ if [ "${3:-}" = "root-execution" ]; then
 fi
 if [ "${3:-}" = "file-search" ]; then
     java -cp "$build:$json" com.mkei.backcast.tool.FileSearchRegressionTest
+    exit "$?"
+fi
+if [ "${3:-}" = "task-workspace" ]; then
+    java -cp "$build:$json" com.mkei.backcast.tool.TaskWorkspaceRegressionTest
     exit "$?"
 fi
 if [ "${3:-}" = "mcp" ]; then
@@ -239,6 +244,7 @@ process_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.RootExecutionRegressionTest
 root_execution_status=$?
 if [ "$root_execution_status" -ne 0 ]; then exit 1; fi
+java -cp "$build:$json" com.mkei.backcast.tool.TaskWorkspaceRegressionTest || exit "$?"
 java -cp "$build:$json" com.mkei.backcast.tool.ShellGuardRegressionTest
 shell_status=$?
 java -cp "$build:$json" FileSubAgentStoreRegressionTest

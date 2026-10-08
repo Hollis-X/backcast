@@ -17,6 +17,15 @@ public class ToolRegistry {
         void abort();
     }
 
+    public interface WorkspaceScoped {
+        void restrictWorkspace(List<String> humanPaths);
+    }
+
+    public void restrictWorkspace(List<String> humanPaths) {
+        for (Tool tool : tools.values()) if (tool instanceof WorkspaceScoped)
+            ((WorkspaceScoped) tool).restrictWorkspace(humanPaths);
+    }
+
     private final Map<String, Tool> tools = new LinkedHashMap<String, Tool>();
     private final List<Source> sources = new ArrayList<Source>();
 

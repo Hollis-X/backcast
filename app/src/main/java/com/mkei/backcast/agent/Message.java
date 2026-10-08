@@ -38,6 +38,8 @@ public class Message {
     public JSONArray coordinationIds;
     public Boolean delegationAuthorized;
     public boolean delegationForbidden;
+    /** Locally captured human path scope, never included in API messages. */
+    public JSONArray taskPaths;
 
     public Message(String role, String content) {
         this.role = role;
@@ -129,6 +131,8 @@ public class Message {
             if (coordinationIds != null) item.put("coordination_ids", coordinationIds);
             if (delegationAuthorized != null) item.put("delegation_authorized", delegationAuthorized);
             if (delegationForbidden) item.put("delegation_forbidden", true);
+            if (taskPaths != null) item.put("task_paths", taskPaths);
+            if (workDir != null && !workDir.isEmpty()) item.put("work_dir", workDir);
             return item;
         } catch (Exception invalid) {
             throw new IllegalStateException("Invalid context checkpoint message", invalid);
@@ -146,6 +150,8 @@ public class Message {
         message.coordinationIds = item.optJSONArray("coordination_ids");
         if (item.has("delegation_authorized")) message.delegationAuthorized = Boolean.valueOf(item.optBoolean("delegation_authorized"));
         message.delegationForbidden = item.optBoolean("delegation_forbidden", false);
+        message.taskPaths = item.optJSONArray("task_paths");
+        message.workDir = item.optString("work_dir", "");
         return message;
     }
 }
