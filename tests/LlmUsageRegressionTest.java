@@ -477,8 +477,8 @@ public final class LlmUsageRegressionTest {
         } finally { server.stop(); }
     }
 
-    private static void maxAndUltraReachTheWireUnchanged() throws Exception {
-        for (String effort : new String[]{"max", "ultra"}) {
+    private static void xhighMaxAndUltraReachTheWireUnchanged() throws Exception {
+        for (String effort : new String[]{"xhigh", "max", "ultra"}) {
             Server server = new Server(jsonSuccess("selected effort"));
             try {
                 LlmClient.Reply reply = server.client(effort).send(messages(), null, null);
@@ -550,7 +550,7 @@ public final class LlmUsageRegressionTest {
                 "existingPolicyIsNotDuplicated", "unsupportedVerbosityWaitsForManualRequestAndPreservesPolicy",
                 "usageThenVerbosityRequireThreeManualRequests", "verbosityThenUsageRequireThreeManualRequests",
                 "rejectedVerbosityNeverAutomaticallyRetries", "unrelatedVerbosityErrorDoesNotRetry",
-                "cancellationBeforeAttemptDoesNotStartHttp", "maxAndUltraReachTheWireUnchanged",
+                "cancellationBeforeAttemptDoesNotStartHttp", "xhighMaxAndUltraReachTheWireUnchanged",
                 "officialSdkFetchesCompatibleModelListsWithoutRetry" };
         for (String name : tests) run(name);
         if (failures != 0) throw new AssertionError(failures + " usage tests failed");

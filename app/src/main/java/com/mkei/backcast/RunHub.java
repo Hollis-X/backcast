@@ -116,11 +116,15 @@ public final class RunHub {
         durability = new AgentLoop.Durability() {
             @Override
             public void save(long sessionId, boolean running, String goal, String status, long elapsedMs,
-                        long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget,
+                        long turnElapsedMs, Long turnThinkMs, long tokensUsed, long tokenBudget,
                         boolean budgetWrapFinished) {
-                store.saveRun(sessionId, running, goal, status, elapsedMs, turnAt, turnWall, seenAt,
+                store.saveRun(sessionId, running, goal, status, elapsedMs, turnElapsedMs, turnThinkMs,
                         tokensUsed, tokenBudget, budgetWrapFinished);
                 syncService(running);
+            }
+            @Override
+            public void saveClock(long sessionId, long elapsedMs, long turnElapsedMs, Long turnThinkMs) {
+                store.saveClock(sessionId, elapsedMs, turnElapsedMs, turnThinkMs);
             }
         };
     }
@@ -235,7 +239,7 @@ public final class RunHub {
         loop.restoreGoal(run.goal, run.status, run.elapsedMs, run.tokensUsed, run.tokenBudget,
                 run.budgetWrapFinished);
         loop.loadHistory(settings.fullSystemPrompt(), context);
-        if (run.running) loop.restoreTurnClock(run.turnAt, run.turnWall, run.seenAt);
+        if (run.running) loop.restoreTurnClock(run.turnElapsedMs, run.turnThinkMs);
     }
 
     /** 还没落库的新会话。不碰别的会话上正在跑的循环。 */

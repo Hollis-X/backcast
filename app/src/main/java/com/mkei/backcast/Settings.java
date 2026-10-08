@@ -81,6 +81,7 @@ public class Settings {
     public static final String EFFORT_LOW = "low";
     public static final String EFFORT_MEDIUM = "medium";
     public static final String EFFORT_HIGH = "high";
+    public static final String EFFORT_XHIGH = "xhigh";
     public static final String EFFORT_MAX = "max";
     public static final String EFFORT_ULTRA = "ultra";
 
@@ -593,7 +594,8 @@ public class Settings {
     private static String normalizeReasoningEffort(String effort) {
         String value = effort == null ? "" : effort.trim();
         if (EFFORT_OFF.equals(value) || EFFORT_LOW.equals(value) || EFFORT_MEDIUM.equals(value)
-                || EFFORT_HIGH.equals(value) || EFFORT_MAX.equals(value) || EFFORT_ULTRA.equals(value)) return value;
+                || EFFORT_HIGH.equals(value) || EFFORT_XHIGH.equals(value)
+                || EFFORT_MAX.equals(value) || EFFORT_ULTRA.equals(value)) return value;
         return DEFAULT_REASONING_EFFORT;
     }
 

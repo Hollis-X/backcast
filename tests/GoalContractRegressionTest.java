@@ -37,7 +37,7 @@ public final class GoalContractRegressionTest {
         @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
             calls++;
             check(calls <= 20, "Fixture kept requesting new goal turns");
-            origins.add(Long.valueOf(fixture.loop.activeTurnStart()));
+            origins.add(Long.valueOf(fixture.loop.turnClock().elapsedMs));
             SystemClock.advance(10L);
             try {
                 return script.next(fixture, messages, tools);
@@ -78,7 +78,7 @@ public final class GoalContractRegressionTest {
             });
             loop.setDurability(new AgentLoop.Durability() {
                 @Override public void save(long sessionId, boolean running, String goal, String status,
-                        long elapsedMs, long turnAt, long turnWall, long seenAt, long tokensUsed,
+                        long elapsedMs, long turnElapsedMs, Long turnThinkMs, long tokensUsed,
                         long tokenBudget, boolean budgetWrapFinished) {
                     savedBudgetFinished.add(Boolean.valueOf(budgetWrapFinished));
                 }
@@ -156,7 +156,7 @@ public final class GoalContractRegressionTest {
                     check(prompt.contains("finish the fixture"), "First request omitted the objective");
                     check(prompt.contains("update_goal"), "First request omitted explicit completion tool");
                     check(f.steers == 0, "Initial goal rules started a visible continuation turn");
-                    check(f.loop.activeTurnStart() == 100000L, "Initial goal rules reset the user turn clock");
+                    check(f.loop.turnClock().elapsedMs == 90L, "Initial goal rules reset the user turn clock");
                     return call("update_goal", "{\"status\":\"complete\"}");
                 }
                 return text("fixture finished");
@@ -166,7 +166,7 @@ public final class GoalContractRegressionTest {
         fixture.submit("finish the fixture");
         check(fixture.client.calls == 2, "Goal did not produce a final answer after completion");
         check(fixture.steers == 0, "Completed initial goal automatically continued");
-        check(fixture.client.origins.get(0).longValue() == 100000L, "Initial goal reset its clock");
+        check(fixture.client.origins.get(0).longValue() == 80L, "Initial goal reset its clock");
     }
 
     private static void ordinaryToolRequestGetsItsFinalAnswer() throws Exception {

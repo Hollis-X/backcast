@@ -179,7 +179,7 @@ public final class SettingsChoiceRegressionTest {
         String[] keys={"output_verbosity","reasoning_summary","output_language","agent_concurrency","reasoning_effort"};
         String[][] values={{"default","low","medium","high"},{"auto","concise","detailed","none"},
                 {"zh-CN","zh-TW","en","ja","ko","es","fr","de"},
-                {"1","2","3","4"},{"off","low","medium","high","max","ultra"}};
+                {"1","2","3","4"},{"off","low","medium","high","xhigh","max","ultra"}};
         for(int k=0;k<keys.length;k++) {
             String[] labels=array(strings,keys[k]+"_labels"),descriptions=array(strings,keys[k]+"_descriptions");
             check(labels.length==values[k].length && descriptions.length==labels.length,"aligned arrays "+keys[k]);
@@ -234,14 +234,14 @@ public final class SettingsChoiceRegressionTest {
         Object activity=type.getConstructor().newInstance(), settings=field(activity,"settings");
         field(field(activity,"systemPrompt"),"text","systemPrompt");
         String[] spinners={"outputVerbosity","reasoningSummary","outputLanguage","agentConcurrency","reasoningEffort"};
-        int[] selected={2,3,2,3,5};
+        int[] selected={2,3,2,3,6};
         for(int i=0;i<spinners.length;i++) field(field(activity,spinners[i]),"position",selected[i]);
         call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
         @SuppressWarnings("unchecked") Map<String,Object> values=(Map<String,Object>)field(settings,"preferences");
         check(values.isEmpty() && (Integer)field(settings,"writes")==0,"unsaved preview wrote settings");
         check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
                 && "ultra".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"ultra was mapped to another effort or locked the selector");
-        check((Integer)field(field(activity,"reasoningEffort"),"position")==5,"ultra was not an independent effort choice");
+        check((Integer)field(field(activity,"reasoningEffort"),"position")==6,"ultra was not an independent effort choice");
         check("false/ultra/4".equals(field(field(activity,"envContext"),"text")),"unsaved mode/count preview was stale");
         pass("ultra preview keeps the selected ultra value without persisting the draft");
         Object back=field(activity,"backAction");
@@ -255,7 +255,7 @@ public final class SettingsChoiceRegressionTest {
                 && "none".equals(values.get("summary")) && "medium".equals(values.get("verbosity")),"save ignored one of the choices");
         check((Integer)field(activity,"finishes")==2,"save did not retain the existing return behavior");
         pass("explicit save writes all agent and response choices before returning");
-        field(field(activity,"reasoningEffort"),"position",4);
+        field(field(activity,"reasoningEffort"),"position",5);
         call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
         check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
                 && (Boolean)field(field(activity,"agentConcurrency"),"enabled")

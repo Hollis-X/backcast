@@ -54,12 +54,10 @@ public class ChatStore extends SQLiteOpenHelper {
         public String status = "";
         public long elapsedMs;
         public boolean running;
-        /** 这一轮起点的开机时间。0 表示没有正在计的一轮。 */
-        public long turnAt;
-        /** 起点的墙钟，用来确认还是同一次开机。 */
-        public long turnWall;
-        /** 第一次有内容的开机时间。0 表示还没有。 */
-        public long seenAt;
+        /** Null marks a legacy run without a duration checkpoint. */
+        public Long turnElapsedMs;
+        /** Null means no first content event has been recorded in this turn. */
+        public Long turnThinkMs;
         /** 目标累计用掉的 token，跨重启保留。 */
         public long tokensUsed;
         /** 目标 token 预算，0 表示没设。 */
@@ -69,7 +67,7 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public ChatStore(Context context) {
-        super(context.getApplicationContext(), "backcast.db", null, 12);
+        super(context.getApplicationContext(), "backcast.db", null, 13);
     }
 
     @Override
@@ -132,6 +130,10 @@ public class ChatStore extends SQLiteOpenHelper {
         if (oldVersion < 11) createRequestEvents(db);
         if (oldVersion == 11) db.execSQL("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''");
         if (oldVersion < 12) createDiagnosticErrors(db);
+        if (oldVersion >= 4 && oldVersion < 13) {
+            db.execSQL("ALTER TABLE runs ADD COLUMN turn_elapsed_ms INTEGER");
+            db.execSQL("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER");
+        }
     }
 
     private static void createRequestEvents(SQLiteDatabase db) {
@@ -208,6 +210,8 @@ public class ChatStore extends SQLiteOpenHelper {
                 + "turn_at INTEGER NOT NULL DEFAULT 0,"
                 + "turn_wall INTEGER NOT NULL DEFAULT 0,"
                 + "seen_at INTEGER NOT NULL DEFAULT 0,"
+                + "turn_elapsed_ms INTEGER,"
+                + "turn_think_ms INTEGER,"
                 + "tokens_used INTEGER NOT NULL DEFAULT 0,"
                 + "token_budget INTEGER NOT NULL DEFAULT 0,"
                 + "budget_wrap_finished INTEGER)");
@@ -651,7 +655,7 @@ public class ChatStore extends SQLiteOpenHelper {
 
     /** 记下这个会话还在不在跑，以及目标。进程被杀掉后靠它接上。 */
     public synchronized void saveRun(long sessionId, boolean running, String goal,
-            String status, long elapsedMs, long turnAt, long turnWall, long seenAt,
+            String status, long elapsedMs, long turnElapsedMs, Long turnThinkMs,
             long tokensUsed, long tokenBudget, boolean budgetWrapFinished) {
         if (sessionId < 0) {
             return;
@@ -662,20 +666,32 @@ public class ChatStore extends SQLiteOpenHelper {
         cv.put("goal", goal == null ? "" : goal);
         cv.put("status", status == null ? "" : status);
         cv.put("elapsed_ms", Long.valueOf(elapsedMs < 0 ? 0 : elapsedMs));
-        cv.put("turn_at", Long.valueOf(turnAt < 0 ? 0 : turnAt));
-        cv.put("turn_wall", Long.valueOf(turnWall < 0 ? 0 : turnWall));
-        cv.put("seen_at", Long.valueOf(seenAt < 0 ? 0 : seenAt));
+        cv.put("turn_elapsed_ms", Long.valueOf(Math.max(0L, turnElapsedMs)));
+        cv.put("turn_think_ms", turnThinkMs == null ? null : Long.valueOf(Math.max(0L, turnThinkMs.longValue())));
         cv.put("tokens_used", Long.valueOf(tokensUsed < 0 ? 0 : tokensUsed));
         cv.put("token_budget", Long.valueOf(tokenBudget < 0 ? 0 : tokenBudget));
         cv.put("budget_wrap_finished", Integer.valueOf(budgetWrapFinished ? 1 : 0));
         getWritableDatabase().insertWithOnConflict(
                 "runs", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
+
+    /** Duration heartbeat never creates a run or changes its running state. */
+    public synchronized void saveClock(long sessionId, long elapsedMs, long turnElapsedMs,
+            Long turnThinkMs) {
+        if (sessionId < 0) return;
+        ContentValues cv = new ContentValues();
+        cv.put("elapsed_ms", Long.valueOf(Math.max(0L, elapsedMs)));
+        cv.put("turn_elapsed_ms", Long.valueOf(Math.max(0L, turnElapsedMs)));
+        cv.put("turn_think_ms", turnThinkMs == null ? null : Long.valueOf(Math.max(0L, turnThinkMs.longValue())));
+        getWritableDatabase().update("runs", cv, "session_id=? AND running=1",
+                new String[]{String.valueOf(sessionId)});
+    }
+
     public synchronized Run readRun(long sessionId) {
         Run run = new Run();
         Cursor c = getReadableDatabase().query(
                 "runs", new String[]{"running", "goal", "status", "elapsed_ms",
-                        "turn_at", "turn_wall", "seen_at", "tokens_used", "token_budget", "budget_wrap_finished"},
+                        "turn_elapsed_ms", "turn_think_ms", "tokens_used", "token_budget", "budget_wrap_finished"},
                 "session_id=?", new String[]{String.valueOf(sessionId)},
                 null, null, null);
         try {
@@ -686,12 +702,11 @@ public class ChatStore extends SQLiteOpenHelper {
             run.goal = c.getString(1) == null ? "" : c.getString(1);
             run.status = c.getString(2) == null ? "" : c.getString(2);
             run.elapsedMs = c.getLong(3);
-            run.turnAt = c.getLong(4);
-            run.turnWall = c.getLong(5);
-            run.seenAt = c.getLong(6);
-            run.tokensUsed = c.getLong(7);
-            run.tokenBudget = c.getLong(8);
-            if (!c.isNull(9)) run.budgetWrapFinished = Boolean.valueOf(c.getInt(9) != 0);
+            if (!c.isNull(4)) run.turnElapsedMs = Long.valueOf(c.getLong(4));
+            if (!c.isNull(5)) run.turnThinkMs = Long.valueOf(c.getLong(5));
+            run.tokensUsed = c.getLong(6);
+            run.tokenBudget = c.getLong(7);
+            if (!c.isNull(8)) run.budgetWrapFinished = Boolean.valueOf(c.getInt(8) != 0);
             return run;
         } finally {
             c.close();

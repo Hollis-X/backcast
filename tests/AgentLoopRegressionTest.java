@@ -4,6 +4,7 @@ import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
+import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.agent.Tool;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.mkei.backcast.agent.TemporaryCleanup;
@@ -34,7 +35,7 @@ public final class AgentLoopRegressionTest {
         @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
             calls++;
             lastSink = sink;
-            origins.add(Long.valueOf(loop.activeTurnStart()));
+            origins.add(Long.valueOf(loop.turnClock().elapsedMs));
             SystemClock.advance(100L);
             Reply reply = new Reply();
             if (retry && calls == 1) {
@@ -83,65 +84,76 @@ public final class AgentLoopRegressionTest {
         field.setAccessible(true);
         field.set(loop, value);
     }
-    private static void oldClock(AgentLoop loop, long elapsed) throws Exception {
-        field(loop, "turnStartedAt", Long.valueOf(elapsed));
-        field(loop, "turnWall", Long.valueOf(System.currentTimeMillis()));
-        field(loop, "firstEventAt", Long.valueOf(elapsed + 10));
-    }
-
     private static void newClockPublishedBeforePersistence() throws Exception {
         SystemClock.set(100000);
         Client client = new Client();
         Recorder recorder = new Recorder();
         final AgentLoop loop = loop(client, recorder);
         loop.loadHistory("system", Arrays.asList(Message.user("previous"), Message.assistant("done", null)));
-        oldClock(loop, 100000);
         SystemClock.advance(16000);
         recorder.userHook = new Runnable() {
             @Override public void run() {
-                check(loop.activeTurnStart() == 116000,
-                        "New user message exposed the previous turn's 16-second-old clock");
-                check(loop.activeFirstEvent() == 0, "New turn inherited the previous first event");
-                check(loop.activeTurnStart(loop.generation(), 2) == 116000,
-                        "Owning UI cannot read its turn clock");
-                check(loop.activeTurnStart(loop.generation(), 1) == 0,
-                        "Previous UI can read the new turn clock");
-                check(loop.activeTurnStart(loop.generation() - 1, 2) == 0,
-                        "Previous generation can read the new turn clock");
+                AgentLoop.TurnClock clock = loop.turnClock();
+                check(clock != null && clock.elapsedMs == 0,
+                        "New turn clock was not published before recording");
+                check(!clock.firstSeen, "New turn inherited the previous first event");
+                check(loop.turnClock(loop.generation(), 2) != null, "Owning UI cannot read its turn clock");
+                check(loop.turnClock(loop.generation(), 1) == null, "Previous UI can read the new turn clock");
+                check(loop.turnClock(loop.generation() - 1, 2) == null, "Previous generation can read the new turn clock");
             }
         };
         loop.submit("next", 1, loop.generation(), 2);
         check(recorder.answer().elapsedMs == 100, "New answer inherited old elapsed time");
+        AgentLoop.TurnClock stopped = loop.turnClock(loop.generation(), 2);
+        check(stopped != null && stopped.elapsedMs == 100,
+                "Finished owned clock was unavailable or still running");
+        SystemClock.advance(16000);
+        check(loop.turnClock().elapsedMs == 100, "Finished clock counted idle time");
     }
-    private static void failedRequestAndExplicitResumeKeepOriginalClock() throws Exception {
+    private static void failedRequestAndExplicitResumeKeepAccumulatedClock() throws Exception {
         SystemClock.set(100000);
         Client client = new Client();
         client.retry = true;
         Recorder recorder = new Recorder();
         AgentLoop loop = loop(client, recorder);
         loop.loadHistory("system", Arrays.asList(Message.user("unfinished")));
-        loop.restoreTurnClock(100000, System.currentTimeMillis(), 0);
+        loop.restoreTurnClock(20000L, null);
         SystemClock.advance(20000);
+        check(loop.turnClock().elapsedMs == 20000,
+                "Restoration started a live segment");
         loop.resume(1, 9);
         check(client.calls == 1 && recorder.saved.isEmpty() && !loop.busy(),
                 "Failed background request was automatically retried or persisted an answer");
+        check(loop.turnClock().elapsedMs == 20100,
+                "Failure did not freeze completed work");
+        SystemClock.advance(50000);
+        check(loop.turnClock().elapsedMs == 20100L, "Failed request clock counted idle time");
         loop.resume(1, 10);
         check(client.calls == 2, "Explicit resume did not make the next request");
-        check(client.origins.equals(Arrays.asList(Long.valueOf(100000), Long.valueOf(100000))),
-                "Failed request or explicit resume reset the original clock");
-        check(recorder.answer().elapsedMs == 20200, "Background waiting time was discarded");
+        check(client.origins.equals(Arrays.asList(Long.valueOf(20000), Long.valueOf(20100))),
+                "Resume discarded work or included offline time");
+        check(recorder.answer().elapsedMs == 20200 && recorder.answer().thinkMs == 20200,
+                "Time to first output included offline waiting");
     }
-    private static void stoppedClockIsNotPublished() throws Exception {
+    private static void stoppedClockRemainsOwnedAndFrozen() throws Exception {
         SystemClock.set(100000);
         Client client = new Client();
         AgentLoop loop = loop(client, new Recorder());
         loop.loadHistory("system", Arrays.asList(Message.user("stopped")));
-        oldClock(loop, 100000);
+        loop.restoreTurnClock(400L, 100L);
         field(loop, "busy", Boolean.TRUE);
         field(loop, "cancelled", Boolean.FALSE);
-        check(loop.activeTurnStart() == 100000, "Fixture did not publish a running clock");
+        field(loop, "acceptedUi", Integer.valueOf(7));
+        field(loop, "turnSegmentStart", Long.valueOf(SystemClock.elapsedRealtime()));
+        SystemClock.advance(80L);
+        check(loop.turnClock().elapsedMs == 480L, "Fixture did not count its live segment");
         loop.cancel();
-        check(loop.activeTurnStart() == 0, "Stopped turn still published an active clock");
+        AgentLoop.TurnClock clock = loop.turnClock(loop.generation(), 7);
+        check(clock != null && clock.elapsedMs == 480 && clock.thinkMs == 100,
+                "Canceled owned clock was unavailable or still running");
+        check(!loop.accepts(loop.generation(), 7), "Stopped worker still accepted UI events");
+        SystemClock.advance(90000L);
+        check(loop.turnClock(loop.generation(), 7).elapsedMs == 480, "Stopped clock counted idle time");
     }
     private static void retargetKeepsRunningRequestCancellable() throws Exception {
         SystemClock.set(100000);
@@ -461,7 +473,7 @@ public final class AgentLoopRegressionTest {
         Recorder recorder = new Recorder();
         AgentLoop loop = loop(client, recorder);
         loop.loadHistory("custom prompt without a safety rule", Arrays.asList(Message.user(DISCLOSE)));
-        loop.restoreTurnClock(100000, System.currentTimeMillis(), 0);
+        loop.restoreTurnClock(3000L, null);
         SystemClock.advance(3000);
         loop.resume(1, 0);
         check(client.calls == 0, "Headless recovery bypassed prompt protection");
@@ -509,22 +521,369 @@ public final class AgentLoopRegressionTest {
                 previous.onReasoning("late reasoning");
                 previous.onContent("late body");
                 previous.onToolCall(0, "old", "fixture", "{}");
-                check(loop.activeFirstEvent() == 0, "Old stream changed the new first event");
+                check(!loop.turnClock().firstSeen, "Old stream changed the new first event");
             }
         };
         loop.submit("next", 1, loop.generation(), 2);
         check(recorder.answer().thinkMs == 100, "Old stream polluted persisted timing");
     }
-    private static void longBackgroundResumeKeepsClock() throws Exception {
-        SystemClock.set(300000);
-        Client client = new Client();
+    private static void trueBackgroundWorkKeepsCounting() throws Exception {
+        SystemClock.set(100000);
+        final CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
         Recorder recorder = new Recorder();
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                started.countDown();
+                try { check(release.await(5, TimeUnit.SECONDS), "Background fixture stayed blocked"); }
+                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                Reply reply = new Reply(); reply.content = "done";
+                sink.onContent(reply.content);
+                return reply;
+            }
+        };
+        final AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
+        loop.bindSession(1); loop.reset("system"); loop.setRecorder(recorder);
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try { loop.submit("background work", 1, loop.generation(), 8); }
+                catch (Throwable error) { failure.set(error); }
+            }
+        });
+        worker.start();
+        try {
+            check(started.await(5, TimeUnit.SECONDS), "Background fixture never started");
+            loop.setListener(new AgentLoop.Quiet());
+            SystemClock.advance(200000L);
+            check(loop.turnClock().elapsedMs == 200000,
+                    "Detaching UI stopped the actual worker clock");
+            release.countDown(); worker.join(5000L);
+            check(!worker.isAlive() && failure.get() == null, "Background worker failed: " + failure.get());
+            check(recorder.answer().elapsedMs == 200000, "Actual background work was discarded");
+        } finally { release.countDown(); worker.join(5000L); }
+    }
+
+    private static void rebootRestorePreservesWorkAndFirstOutput() throws Exception {
+        SystemClock.set(500000L);
+        Client client = new Client(); Recorder recorder = new Recorder();
         AgentLoop loop = loop(client, recorder);
         loop.loadHistory("system", Arrays.asList(Message.user("unfinished")));
-        loop.restoreTurnClock(100000, System.currentTimeMillis() - 200000, 0);
-        loop.resume(1, 8);
-        check(recorder.answer().elapsedMs == 200100, "Long background time was discarded");
+        loop.restoreGoal("goal", Goal.ACTIVE, 73000L, 0L, 0L, Boolean.FALSE);
+        loop.restoreTurnClock(31000L, 11000L);
+        SystemClock.set(20L);
+        check(loop.goalElapsed() == 73000L && loop.turnClock().elapsedMs == 31000L,
+                "Reboot or recovery counted process downtime");
+        // A tool closes the goal through the real active worker before final output.
+        loop.setGoal("");
+        loop.resume(1L, 3);
+        check(recorder.answer().elapsedMs == 31100L && recorder.answer().thinkMs == 11000L,
+                "Reboot discarded saved work or changed the first output boundary");
     }
+
+    private static void legacyRestoreUsesSavedAssistantWorkOnly() throws Exception {
+        SystemClock.set(100000L);
+        Client client = new Client(); Recorder recorder = new Recorder();
+        AgentLoop loop = loop(client, recorder);
+        JSONArray calls = new JSONArray().put(new JSONObject().put("id", "fixture")
+                .put("type", "function").put("function", new JSONObject().put("name", "missing")
+                        .put("arguments", "{}")));
+        Message previous = Message.assistant("previous", null); previous.elapsedMs = 80000L;
+        Message partial = Message.assistant("working", calls); partial.elapsedMs = 12000L; partial.thinkMs = 4000L;
+        loop.loadHistory("system", Arrays.asList(Message.user("previous"), previous,
+                Message.user("unfinished"), partial, Message.toolResult("fixture", "done")));
+        loop.restoreTurnClock(null, null);
+        SystemClock.advance(90000L);
+        loop.resume(1L, 2);
+        check(recorder.answer().elapsedMs == 12100L && recorder.answer().thinkMs == 4000L,
+                "Legacy restoration used uptime or a previous turn instead of saved assistant work");
+        loop.loadHistory("system", Arrays.asList(Message.user("previous"), previous, Message.user("new")));
+        loop.restoreTurnClock(null, null);
+        check(loop.turnClock().elapsedMs == 0L && !loop.turnClock().firstSeen,
+                "Legacy user-only turn inherited the previous assistant timing");
+    }
+    private static void restoredGoalCountsOnlyActualSegments() throws Exception {
+        SystemClock.set(100000L);
+        final AgentLoop[] holder = new AgentLoop[1]; final int[] calls = new int[1];
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                calls[0]++; SystemClock.advance(100L);
+                Reply reply = new Reply();
+                if (calls[0] == 1) reply.error = "SocketTimeoutException: fixture";
+                else {
+                    holder[0].closeGoal(Goal.BLOCKED, "fixture work reached an external blocker");
+                    reply.content = "done"; sink.onContent(reply.content);
+                }
+                return reply;
+            }
+        };
+        AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet()); holder[0] = loop;
+        loop.bindSession(1); loop.reset("system");
+        loop.loadHistory("system", Arrays.asList(Message.user("unfinished")));
+        loop.restoreGoal("finish work", Goal.ACTIVE, 73000L, 0L, 0L, Boolean.FALSE);
+        loop.restoreTurnClock(12000L, null);
+        SystemClock.advance(60000L);
+        check(loop.goalElapsed() == 73000L, "Restoring an active goal started idle accounting");
+        loop.resume(1L, 1);
+        check(loop.goalElapsed() == 73100L && loop.turnClock().elapsedMs == 12100L,
+                "Request failure did not preserve and stop goal work");
+        SystemClock.advance(80000L); loop.markGoalActive(); SystemClock.advance(40000L);
+        check(loop.turnClock().elapsedMs == 12100L, "Idle restored turn continued counting");
+        check(loop.goalElapsed() == 73100L, "Marking a goal active counted time before a worker started");
+        loop.resume(1L, 2);
+        check(loop.goalElapsed() == 73200L && loop.turnClock().elapsedMs == 12200L,
+                "Goal resume counted offline time or reset accumulated work");
+    }
+
+    private static void periodicCheckpointCannotOvertakeFinalStop() throws Exception {
+        SystemClock.set(100000L);
+        final CountDownLatch requestStarted = new CountDownLatch(1), requestRelease = new CountDownLatch(1);
+        final CountDownLatch checkpointStarted = new CountDownLatch(1), checkpointRelease = new CountDownLatch(1);
+        final CountDownLatch aborted = new CountDownLatch(1);
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        final List<String> writes = java.util.Collections.synchronizedList(new ArrayList<String>());
+        final long[] checkpointTimes = new long[2]; final Long[] checkpointThink = new Long[1];
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                requestStarted.countDown();
+                try { check(requestRelease.await(8, TimeUnit.SECONDS), "Checkpoint request never released"); }
+                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                Reply reply = new Reply(); reply.content = "canceled"; return reply;
+            }
+            @Override public void abort() { aborted.countDown(); requestRelease.countDown(); }
+        };
+        final AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
+        loop.bindSession(1L); loop.reset("system");
+        loop.restoreGoal("work", Goal.ACTIVE, 7000L, 0L, 0L, Boolean.FALSE);
+        Field stateField = AgentLoop.class.getDeclaredField("lock"); stateField.setAccessible(true);
+        final Object stateLock = stateField.get(loop);
+        loop.setDurability(new AgentLoop.Durability() {
+            @Override public void save(long sid, boolean running, String goal, String status,
+                    long goalMs, long turnMs, Long thinkMs, long used, long budget, boolean wrapped) {
+                check(!Thread.holdsLock(stateLock), "Durability save ran under the state lock");
+                writes.add(running ? "running" : "stopped");
+            }
+            @Override public void saveClock(long sid, long goalMs, long turnMs, Long thinkMs) {
+                check(!Thread.holdsLock(stateLock), "Clock checkpoint ran under the state lock");
+                checkpointTimes[0] = goalMs; checkpointTimes[1] = turnMs; checkpointThink[0] = thinkMs;
+                checkpointStarted.countDown();
+                boolean interrupted = false;
+                while (true) {
+                    try { check(checkpointRelease.await(8, TimeUnit.SECONDS), "Blocked checkpoint never released"); break; }
+                    catch (InterruptedException stop) { interrupted = true; }
+                }
+                writes.add("clock");
+                if (interrupted) Thread.currentThread().interrupt();
+            }
+        });
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try { loop.submit("work", 1L, loop.generation(), 9); }
+                catch (Throwable error) { failure.set(error); }
+            }
+        });
+        Thread stopper = new Thread(new Runnable() {
+            @Override public void run() { try { loop.cancel(); } catch (Throwable error) { failure.set(error); } }
+        });
+        worker.start();
+        try {
+            check(requestStarted.await(5, TimeUnit.SECONDS), "Checkpoint request did not start");
+            final int token = loop.runToken(), gen = loop.generation();
+            SystemClock.advance(500L);
+            check(checkpointStarted.await(5, TimeUnit.SECONDS), "2s periodic clock checkpoint did not occur");
+            check(checkpointTimes[0] == 7500L && checkpointTimes[1] == 500L && checkpointThink[0] == null,
+                    "Checkpoint lost goal/turn work or invented a first output");
+            stopper.start();
+            check(aborted.await(5, TimeUnit.SECONDS), "Clock I/O blocked cancellation under the state lock");
+            check(loop.turnClock(gen, 9) != null && loop.turnClock(gen, 9).elapsedMs == 500L,
+                    "Clock I/O blocked access to the frozen owned snapshot");
+            SystemClock.advance(100L);
+            check(loop.turnClock(gen, 9).elapsedMs == 500L, "Blocked final save resumed the stopped clock");
+            checkpointRelease.countDown(); stopper.join(5000L); worker.join(5000L);
+            check(!stopper.isAlive() && !worker.isAlive() && failure.get() == null,
+                    "Checkpoint/cancellation race failed: " + failure.get());
+            check("stopped".equals(writes.get(writes.size() - 1)), "Checkpoint overtook final stopped save: " + writes);
+            java.lang.reflect.Method checkpoint = AgentLoop.class.getDeclaredMethod("checkpointClock", int.class, int.class);
+            checkpoint.setAccessible(true); int savedCount = writes.size();
+            check(Boolean.FALSE.equals(checkpoint.invoke(loop, token, gen)) && writes.size() == savedCount,
+                    "Stale heartbeat wrote after the final stopped record");
+        } finally {
+            checkpointRelease.countDown(); requestRelease.countDown();
+            if (worker.isAlive()) loop.cancel();
+            worker.join(5000L); if (stopper.isAlive()) stopper.join(5000L);
+        }
+    }
+
+    private static void staleFinalSaveCannotStopReplacementWorker() throws Exception {
+        Client client = new Client(); final AgentLoop loop = loop(client, new Recorder());
+        loop.loadHistory("system", Arrays.asList(Message.user("unfinished")));
+        loop.restoreTurnClock(100L, null);
+        field(loop, "busy", Boolean.TRUE); field(loop, "busyToken", Integer.valueOf(1));
+        field(loop, "runToken", Integer.valueOf(1)); field(loop, "acceptedUi", Integer.valueOf(0));
+        field(loop, "cancelled", Boolean.FALSE);
+        final List<Boolean> writes = java.util.Collections.synchronizedList(new ArrayList<Boolean>());
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        loop.setDurability(new AgentLoop.Durability() {
+            @Override public void save(long sid, boolean running, String goal, String status,
+                    long goalMs, long turnMs, Long thinkMs, long used, long budget, boolean wrapped) {
+                writes.add(Boolean.valueOf(running));
+            }
+        });
+        Field laneField = AgentLoop.class.getDeclaredField("persistenceLock"); laneField.setAccessible(true);
+        final java.lang.reflect.Method finish = AgentLoop.class.getDeclaredMethod("finishBusy", int.class, int.class);
+        finish.setAccessible(true); final int gen = loop.generation();
+        Thread oldFinalizer = new Thread(new Runnable() {
+            @Override public void run() { try { finish.invoke(loop, 1, gen); } catch (Throwable error) { failure.set(error); } }
+        });
+        synchronized (laneField.get(loop)) {
+            oldFinalizer.start(); long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+            while (loop.busy() && System.nanoTime() < deadline) Thread.yield();
+            check(!loop.busy(), "Old finalizer did not reach its save boundary");
+            // Headless recovery reuses UI token 0; the worker token must guard the write.
+            field(loop, "busyToken", Integer.valueOf(2)); field(loop, "runToken", Integer.valueOf(2));
+            field(loop, "busy", Boolean.TRUE);
+        }
+        oldFinalizer.join(5000L);
+        check(!oldFinalizer.isAlive() && failure.get() == null && writes.isEmpty(),
+                "Stale finalizer stopped the replacement persisted worker: " + writes + " / " + failure.get());
+    }
+
+    private static void automaticGoalContinuationKeepsUserRequestLedger() throws Exception {
+        SystemClock.set(100000L);
+        final AgentLoop[] holder = new AgentLoop[1]; final int[] calls = new int[1];
+        final List<Long> continuationClocks = new ArrayList<Long>(); final List<Message> saved = new ArrayList<Message>();
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                calls[0]++;
+                SystemClock.advance(calls[0] == 1 ? 10000L : 2000L);
+                Reply reply = new Reply(); reply.content = calls[0] == 1 ? "working" : "done";
+                sink.onContent(reply.content);
+                if (calls[0] == 2) holder[0].closeGoal(Goal.BLOCKED, "fixture reached a verified external blocker");
+                return reply;
+            }
+        };
+        AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet() {
+            @Override public void onSteer(int gen) { continuationClocks.add(Long.valueOf(holder[0].turnClock().elapsedMs)); }
+        });
+        holder[0] = loop; loop.bindSession(1L); loop.reset("system");
+        loop.setRecorder(new AgentLoop.Recorder() {
+            @Override public void record(long sid, Message message) { if (Message.ASSISTANT.equals(message.role)) saved.add(message); }
+            @Override public void replace(long sid, List<Message> messages) { }
+        });
+        loop.setGoal("complete work"); loop.submit("complete work", 1L, loop.generation(), 1);
+        AgentLoop.TurnClock clock = loop.turnClock(loop.generation(), 1);
+        check(calls[0] == 2 && continuationClocks.equals(Arrays.asList(Long.valueOf(10000L))),
+                "Automatic continuation reset the visible user request clock: " + continuationClocks);
+        check(clock != null && clock.elapsedMs == 12000L && clock.firstSeen && clock.thinkMs == 10000L,
+                "Continuation did not preserve 10s + 2s work and its first output");
+        SystemClock.advance(50000L);
+        check(loop.turnClock().elapsedMs == 12000L, "Stopped continuation counted idle time");
+        check(saved.size() == 2 && saved.get(0).elapsedMs == 10000L && saved.get(1).elapsedMs == 12000L
+                && saved.get(1).thinkMs == 10000L && loop.goalElapsed() == 12000L,
+                "Persisted assistant timing diverged from continuation or goal work");
+        loop.submit("new explicit request", 1L, loop.generation(), 2);
+        check(loop.turnClock().elapsedMs == 2000L && loop.turnClock().thinkMs == 2000L,
+                "An explicit new request inherited automatic continuation timing");
+    }
+
+    private static void uiTokenReservationSurvivesActivityRecreation() throws Exception {
+        SystemClock.set(100000L);
+        Client client = new Client(); AgentLoop loop = loop(client, new Recorder());
+        loop.submit("first request", 1L, loop.generation(), 1);
+        AgentLoop.TurnClock oldClock = loop.turnClock(loop.generation(), 1);
+        check(oldClock != null && oldClock.elapsedMs == 100L, "Fixture has no completed owner clock");
+        int rebuiltActivity = loop.nextUiToken(0);
+        int pendingSecond = loop.nextUiToken(0), pendingThird = loop.nextUiToken(rebuiltActivity);
+        check(rebuiltActivity == 2 && pendingSecond == 3 && pendingThird == 4,
+                "Recreated Activity or pending workers reused an existing UI owner");
+        check(loop.turnClock(loop.generation(), rebuiltActivity) == null
+                && loop.turnClock(loop.generation(), pendingSecond) == null,
+                "A reserved unclaimed UI token adopted the old turn clock");
+        AgentLoop.TurnClock after = loop.turnClock(loop.generation(), 1);
+        check(after != null && after.elapsedMs == oldClock.elapsedMs && after.thinkMs == oldClock.thinkMs
+                && after.firstSeen == oldClock.firstSeen
+                && loop.accepts(loop.generation(), 1) && !loop.busy(),
+                "Reserving a UI token changed the current ownership, timing or cancellation");
+        check(loop.nextUiToken(100) == 101 && loop.nextUiToken(0) == 102,
+                "Token reservation ignored a caller's latest token or its own pending allocation");
+        loop.cancel();
+        AgentLoop.TurnClock stopped = loop.turnClock(loop.generation(), 1);
+        check(loop.nextUiToken(0) == 103 && !loop.accepts(loop.generation(), 1)
+                && loop.turnClock(loop.generation(), 1).elapsedMs == stopped.elapsedMs,
+                "Token allocation changed a canceled owned snapshot or cancellation state");
+    }
+
+    private static void restoredGoalAfterPlainAssistantKeepsContinuationLedger() throws Exception {
+        for (String status : new String[]{Goal.ACTIVE, Goal.BUDGET_LIMITED}) {
+            SystemClock.set(100000L);
+            final AgentLoop[] holder = new AgentLoop[1]; final int[] calls = new int[1];
+            Recorder recorder = new Recorder();
+            LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+                @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                    calls[0]++; SystemClock.advance(2000L);
+                    Reply reply = new Reply(); reply.content = "recovered final"; sink.onContent(reply.content);
+                    if (holder[0].goalActive()) holder[0].closeGoal(Goal.BLOCKED, "fixture recovered the verified blocker");
+                    return reply;
+                }
+            };
+            AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet()); holder[0] = loop;
+            loop.bindSession(1L); loop.reset("system"); loop.setRecorder(recorder);
+            loop.restoreGoal("unfinished goal", status, 15000L, 100L, 100L, Boolean.FALSE);
+            Message plain = Message.assistant("working before internal continuation", null);
+            plain.elapsedMs = 15000L; plain.thinkMs = 5000L;
+            loop.loadHistory("system", Arrays.asList(Message.user("finish work"), plain));
+            loop.restoreTurnClock(15000L, 5000L);
+            check(loop.needsResume() && loop.turnClock() != null && loop.turnClock().elapsedMs == 15000L,
+                    "Recoverable " + status + " plain assistant tail lost its continuation ledger");
+            SystemClock.advance(80000L);
+            check(loop.turnClock().elapsedMs == 15000L, "Recovery counted offline time before continuing");
+            loop.resume(1L, 1);
+            check(calls[0] == 1 && recorder.answer().elapsedMs == 17000L && recorder.answer().thinkMs == 5000L
+                    && loop.turnClock().elapsedMs == 17000L && loop.goalElapsed() == 17000L,
+                    "Recovering " + status + " reset elapsed work or its first output");
+        }
+    }
+
+    private static void restoredChildSettlementAfterPlainAssistantKeepsLedger() throws Exception {
+        SystemClock.set(100000L);
+        Client client = new Client(); Recorder recorder = new Recorder(); AgentLoop loop = loop(client, recorder);
+        final List<SubAgentManager.Record> children = new ArrayList<SubAgentManager.Record>();
+        SubAgentManager.Record child = new SubAgentManager.Record(); child.id = "saved_child"; child.parentId = "main";
+        child.name = "saved"; child.task = "check evidence"; child.status = SubAgentManager.IDLE;
+        child.sessionId = 20L; child.revision = 3L; child.result = "verified evidence"; children.add(child);
+        SubAgentManager manager = new SubAgentManager(1, new SubAgentManager.Factory() {
+            @Override public AgentLoop create(SubAgentManager.Record task, AgentLoop.Listener listener, SubAgentManager owner) {
+                throw new AssertionError("Completed recovered child should not be restarted");
+            }
+        }, new SubAgentManager.Store() {
+            @Override public List<SubAgentManager.Record> load() { return children; }
+            @Override public void save(SubAgentManager.Record record) { }
+        });
+        manager.attachRoot(loop); loop.setSubAgents(manager);
+        Message provisional = Message.assistant("waiting for child settlement", null);
+        provisional.elapsedMs = 12000L; provisional.thinkMs = 4000L;
+        loop.loadHistory("system", Arrays.asList(Message.user("finish delegated work"), provisional));
+        loop.restoreTurnClock(12000L, 4000L);
+        check(loop.needsResume() && loop.turnClock() != null && loop.turnClock().elapsedMs == 12000L,
+                "Saved child settlement lost its parent continuation clock");
+        SystemClock.advance(90000L); loop.resume(1L, 1);
+        check(recorder.answer().elapsedMs == 12100L && recorder.answer().thinkMs == 4000L
+                && !manager.needsSettlement() && !loop.needsResume(),
+                "Child settlement reset the clock or remained resumable after its answer");
+    }
+
+    private static void completedOrdinaryChatDoesNotRestoreContinuationLedger() throws Exception {
+        Client client = new Client(); Recorder recorder = new Recorder(); AgentLoop loop = loop(client, recorder);
+        Message completed = Message.assistant("completed answer", null);
+        completed.elapsedMs = 15000L; completed.thinkMs = 5000L;
+        loop.loadHistory("system", Arrays.asList(Message.user("ordinary chat"), completed));
+        loop.restoreTurnClock(15000L, 5000L);
+        check(!loop.needsResume() && loop.turnClock() == null,
+                "Completed ordinary chat adopted an old continuation ledger");
+        loop.submit("new ordinary chat", 1L, loop.generation(), 1);
+        check(recorder.answer().elapsedMs == 100L && recorder.answer().thinkMs == 100L,
+                "New ordinary chat inherited a previous completed request's timing");
+    }
+
     private static void disclosureIsRefusedBeforeCompaction() throws Exception {
         SystemClock.set(100000);
         Client client = new Client();
@@ -803,6 +1162,11 @@ public final class AgentLoopRegressionTest {
         loop.setGoal("old task");
         loop.setGoalBudget(9000L);
         field(loop, "goalTokensUsed", Long.valueOf(4321L));
+        SystemClock.advance(20000L);
+        check(loop.goalElapsed() == 0L, "Idle goal counted time before real work");
+        field(loop, "busy", Boolean.TRUE);
+        field(loop, "cancelled", Boolean.FALSE);
+        loop.markGoalActive();
         SystemClock.advance(90000L);
         check(loop.goalElapsed() >= 90000L, "Clock did not run");
         loop.closeGoal("complete", "");
@@ -1064,13 +1428,17 @@ public final class AgentLoopRegressionTest {
         }
     }
     public static void main(String[] args) {
-        for (String name : new String[]{"newClockPublishedBeforePersistence", "failedRequestAndExplicitResumeKeepOriginalClock",
-                "stoppedClockIsNotPublished", "retargetKeepsRunningRequestCancellable",
+        for (String name : new String[]{"newClockPublishedBeforePersistence", "failedRequestAndExplicitResumeKeepAccumulatedClock",
+                "stoppedClockRemainsOwnedAndFrozen", "retargetKeepsRunningRequestCancellable",
                 "retargetPinsToolsSchemaCleanupAndUsageUntilNextTurn",
                 "manualCompactionPinsRegistryAndCleansItsLease", "cancelledManualCompactionCleansOnlyItsOriginalLease",
                 "disclosureNeverReachesTransport", "disclosureIsRefusedAfterRecovery",
                 "disclosureGoalStopsWithoutSpinning", "promptFileTaskIsAllowed", "staleCallbacksDoNotChangeNewTurnClock",
-                "longBackgroundResumeKeepsClock", "disclosureIsRefusedBeforeCompaction",
+                "trueBackgroundWorkKeepsCounting", "rebootRestorePreservesWorkAndFirstOutput", "legacyRestoreUsesSavedAssistantWorkOnly", "restoredGoalCountsOnlyActualSegments", "periodicCheckpointCannotOvertakeFinalStop", "staleFinalSaveCannotStopReplacementWorker", "automaticGoalContinuationKeepsUserRequestLedger", "uiTokenReservationSurvivesActivityRecreation",
+                "restoredGoalAfterPlainAssistantKeepsContinuationLedger",
+                "restoredChildSettlementAfterPlainAssistantKeepsLedger",
+                "completedOrdinaryChatDoesNotRestoreContinuationLedger",
+                "disclosureIsRefusedBeforeCompaction",
                 "repeatedToolResultsStopTheGoal", "goalWithoutToolCallsStopsAfterRepeats",
                 "goalWithoutBudgetRunsUntilTheModelFinishes", "budgetLimitGivesOneWrapUpThenStops",
                 "interleavedSummariesDoNotFalselyStall", "rewrittenObjectiveIsInjectedOnce",
@@ -1079,6 +1447,6 @@ public final class AgentLoopRegressionTest {
                 "goalStopsWhenMarkedComplete", "bareAuditClaimDoesNotFinish",
                 "emptyContinuationsBlockTheGoal", "continuationEncouragesClosingOnce"}) run(name);
         if (failures != 0) throw new AssertionError(failures + " loop tests failed");
-        System.out.println("28 loop tests passed");
+        System.out.println("Loop regression tests passed");
     }
 }

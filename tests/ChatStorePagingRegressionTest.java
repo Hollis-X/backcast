@@ -60,7 +60,16 @@ public final class ChatStorePagingRegressionTest {
                 + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5;"
                 + "private static final List<Map<String,Object>> rows=new ArrayList<Map<String,Object>>(); private static long next=1;"
                 + "public static final List<String> statements=new ArrayList<String>();public static boolean requestDiagnosticColumn;"
-                + "public static void reset(){rows.clear();next=1;statements.clear();requestDiagnosticColumn=false;} public void execSQL(String s){statements.add(s);"
+                + "public static final Set<String> runColumns=new HashSet<String>();"
+                + "public static void legacyRuns(int version){runColumns.clear();if(version<4)return;"
+                + "runColumns.addAll(Arrays.asList(\"session_id\",\"running\",\"goal\",\"status\",\"elapsed_ms\"));"
+                + "if(version>=5)runColumns.addAll(Arrays.asList(\"turn_at\",\"turn_wall\",\"seen_at\"));"
+                + "if(version>=9)runColumns.addAll(Arrays.asList(\"tokens_used\",\"token_budget\"));if(version>=10)runColumns.add(\"budget_wrap_finished\");}"
+                + "public static void reset(){rows.clear();next=1;statements.clear();requestDiagnosticColumn=false;runColumns.clear();} public void execSQL(String s){statements.add(s);"
+                + "if(s.startsWith(\"CREATE TABLE IF NOT EXISTS runs (\")&&runColumns.isEmpty())"
+                + "for(String field:s.substring(s.indexOf('(')+1,s.length()-1).split(\",\"))runColumns.add(field.trim().split(\" \")[0]);"
+                + "if(s.startsWith(\"ALTER TABLE runs ADD COLUMN \")){String column=s.substring(28).split(\" \")[0];"
+                + "if(!runColumns.add(column))throw new AssertionError(\"Duplicate runs column: \"+column);}"
                 + "if(s.startsWith(\"CREATE TABLE IF NOT EXISTS request_events\")&&s.contains(\"diagnostic TEXT\"))requestDiagnosticColumn=true;"
                 + "if(s.startsWith(\"ALTER TABLE request_events ADD COLUMN diagnostic\")){if(requestDiagnosticColumn)throw new AssertionError(\"Duplicate diagnostic column\");"
                 + "requestDiagnosticColumn=true;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"request_events\"))row.put(\"diagnostic\",\"\");}}"
@@ -75,11 +84,14 @@ public final class ChatStorePagingRegressionTest {
                 + "while(selected.size()>200)rows.remove(selected.remove(0));}"
                 + "public void beginTransaction(){} public void setTransactionSuccessful(){} public void endTransaction(){}"
                 + "public long insert(String table,String nullColumn,ContentValues values){Map<String,Object> row=new HashMap<String,Object>(values);"
-                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\"))rows.add(row);return id;}"
-                + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){return insert(t,n,v);}"
+                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\")||table.equals(\"runs\"))rows.add(row);return id;}"
+                + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){if(t.equals(\"runs\"))"
+                + "delete(t,\"session_id=?\",new String[]{v.get(\"session_id\").toString()});return insert(t,n,v);}"
                 + "public int update(String t,ContentValues v,String s,String[] a){if(t.equals(\"sessions\"))return 0;"
-                + "if(!s.equals(\"id=?\"))throw new AssertionError(s);int changed=0;for(Map<String,Object> row:rows)"
-                + "if(row.get(\"table\").equals(t)&&((Number)row.get(\"id\")).longValue()==Long.parseLong(a[0])){row.putAll(v);changed++;}return changed;}"
+                + "boolean clock=s.equals(\"session_id=? AND running=1\");if(!s.equals(\"id=?\")&&!clock)throw new AssertionError(s);"
+                + "int changed=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(t)"
+                + "&&((Number)row.get(clock?\"session_id\":\"id\")).longValue()==Long.parseLong(a[0])"
+                + "&&(!clock||((Number)row.get(\"running\")).intValue()==1)){row.putAll(v);changed++;}return changed;}"
                 + "public int delete(String t,String s,String[] a){if(!s.equals(\"session_id=?\")&&!t.equals(\"sessions\"))throw new AssertionError(s);"
                 + "int changed=0;for(Iterator<Map<String,Object>> i=rows.iterator();i.hasNext();){Map<String,Object> row=i.next();"
                 + "if(row.get(\"table\").equals(t)&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(a[0])){i.remove();changed++;}}return changed;}"
@@ -89,6 +101,7 @@ public final class ChatStorePagingRegressionTest {
                 + "for(Map<String,Object> row:rows){if(!row.get(\"table\").equals(table))continue;boolean include=true;int arg=0;"
                 + "for(String condition:selection.split(\" AND \")){"
                 + "if(condition.equals(\"session_id=?\")){if(((Number)row.get(\"session_id\")).longValue()!=Long.parseLong(args[arg++]))include=false;}"
+                + "else if(condition.equals(\"running=1\")){if(((Number)row.get(\"running\")).intValue()!=1)include=false;}"
                 + "else if(condition.equals(\"id<?\")){if(((Number)row.get(\"id\")).longValue()>=Long.parseLong(args[arg++]))include=false;}"
                 + "else if(condition.equals(\"id>?\")){if(((Number)row.get(\"id\")).longValue()<=Long.parseLong(args[arg++]))include=false;}"
                 + "else if(condition.equals(\"role=?\")){if(!args[arg++].equals(row.get(\"role\")))include=false;}"
@@ -269,12 +282,13 @@ public final class ChatStorePagingRegressionTest {
     private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
         Object store = fresh();
         Object db = databaseType.getConstructor().newInstance();
-        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 12,
-                "Fresh databases do not request the diagnostics schema version");
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 12);
+        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 13,
+                "Fresh databases do not request the duration checkpoint schema version");
+        databaseType.getMethod("legacyRuns", int.class).invoke(null, 10);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 13);
         @SuppressWarnings("unchecked")
         List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 4 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
+        check(sql.size() == 6 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
                         && sql.get(0).contains("diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).contains("request_events(session_id,id)")
                         && sql.get(2).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
@@ -300,9 +314,10 @@ public final class ChatStorePagingRegressionTest {
         old.put("purpose", "compact"); old.put("outcome", "cancelled"); old.put("reason", "old reason"); old.put("retry_count", 2);
         long oldId = (Long) databaseType.getMethod("insert", String.class, String.class, valuesType)
                 .invoke(db, "request_events", null, old);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 12);
+        databaseType.getMethod("legacyRuns", int.class).invoke(null, 11);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 13);
         @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 3 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
+        check(sql.size() == 5 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
                         && sql.get(2).contains("diagnostic_errors(session_id,id)"),
                 "Version 11 migration recreated request history or did not apply the additive column default");
@@ -318,6 +333,125 @@ public final class ChatStorePagingRegressionTest {
                         && "grok".equals(new JSONObject((String) field(after.get(0), "diagnostic")).getString("provider"))
                         && "preserved conversation".equals(messages(page(store, 7, -1, 48)).get(0).content),
                 "New diagnostic writes after migration changed the old log or conversation");
+    }
+
+    private static Object run(Object store, long sid) throws Exception {
+        return storeType.getMethod("readRun", long.class).invoke(store, sid);
+    }
+
+    private static void saveRun(Object store, long sid, boolean running, long goalMs, long turnMs,
+            Long thinkMs) throws Exception {
+        storeType.getMethod("saveRun", long.class, boolean.class, String.class, String.class,
+                long.class, long.class, Long.class, long.class, long.class, boolean.class)
+                .invoke(store, sid, running, "saved goal", "active", goalMs, turnMs, thinkMs, 42L, 200L, true);
+    }
+
+    private static void saveClock(Object store, long sid, long goalMs, long turnMs, Long thinkMs) throws Exception {
+        storeType.getMethod("saveClock", long.class, long.class, long.class, Long.class)
+                .invoke(store, sid, goalMs, turnMs, thinkMs);
+    }
+
+    private static void runDurationsRoundTripWithoutLosingNullOrZero() throws Exception {
+        Object store = fresh();
+        check(field(run(store, 7L), "turnElapsedMs") == null && field(run(store, 7L), "turnThinkMs") == null,
+                "Missing runs were mistaken for a new checkpoint");
+        saveRun(store, 7L, true, 15000L, 5000L, null);
+        Object saved = run(store, 7L);
+        check(number(saved, "elapsedMs") == 15000L && number(saved, "turnElapsedMs") == 5000L
+                        && field(saved, "turnThinkMs") == null && (Boolean) field(saved, "running")
+                        && number(saved, "tokensUsed") == 42L && number(saved, "tokenBudget") == 200L
+                        && Boolean.TRUE.equals(field(saved, "budgetWrapFinished"))
+                        && "saved goal".equals(field(saved, "goal")) && "active".equals(field(saved, "status")),
+                "Durations or run state changed on persistence roundtrip");
+        saveRun(store, 7L, true, 0L, 0L, 0L);
+        saved = run(store, 7L);
+        check(Long.valueOf(0L).equals(field(saved, "turnElapsedMs"))
+                        && Long.valueOf(0L).equals(field(saved, "turnThinkMs")) && records("runs", 7L).size() == 1,
+                "A real zero checkpoint or zero first event became legacy/null or duplicated its row");
+        Map<String, Object> row = records("runs", 7L).get(0);
+        check(!row.containsKey("turn_at") && !row.containsKey("turn_wall") && !row.containsKey("seen_at"),
+                "New runs persisted obsolete clock anchors");
+        saveRun(store, 7L, false, -10L, -20L, -30L);
+        saved = run(store, 7L);
+        check(number(saved, "elapsedMs") == 0 && number(saved, "turnElapsedMs") == 0
+                        && number(saved, "turnThinkMs") == 0 && !(Boolean) field(saved, "running"),
+                "Negative checkpoint values were not clamped or final state was lost");
+    }
+
+    private static void durationHeartbeatOnlyUpdatesExistingRunningSession() throws Exception {
+        Object store = fresh();
+        saveRun(store, 7L, true, 15000L, 5000L, null);
+        saveRun(store, 8L, false, 6000L, 2000L, 300L);
+        saveClock(store, 7L, 17000L, 7000L, 0L);
+        Object saved = run(store, 7L);
+        check(number(saved, "elapsedMs") == 17000L && number(saved, "turnElapsedMs") == 7000L
+                        && Long.valueOf(0L).equals(field(saved, "turnThinkMs"))
+                        && (Boolean) field(saved, "running") && number(saved, "tokensUsed") == 42L
+                        && number(saved, "tokenBudget") == 200L && Boolean.TRUE.equals(field(saved, "budgetWrapFinished"))
+                        && "saved goal".equals(field(saved, "goal")),
+                "Heartbeat failed to update durations or overwrote unrelated run state");
+        saveClock(store, 8L, 99000L, 88000L, null);
+        saveClock(store, 9L, 99000L, 88000L, null);
+        saveClock(store, -1L, 99000L, 88000L, null);
+        Object stopped = run(store, 8L);
+        check(number(stopped, "elapsedMs") == 6000L && number(stopped, "turnElapsedMs") == 2000L
+                        && number(stopped, "turnThinkMs") == 300L && !(Boolean) field(stopped, "running")
+                        && records("runs", 9L).isEmpty() && records("runs", -1L).isEmpty(),
+                "Heartbeat created a row, updated an idle session, or crossed its session boundary");
+        saveRun(store, 7L, false, 18000L, 8000L, 0L);
+        saveClock(store, 7L, 19000L, 9000L, null);
+        saved = run(store, 7L);
+        check(number(saved, "turnElapsedMs") == 8000L && Long.valueOf(0L).equals(field(saved, "turnThinkMs")),
+                "Late heartbeat rewrote a final stopped checkpoint");
+    }
+
+    private static void everyLegacyVersionUpgradesWithNullableDurationColumns() throws Exception {
+        for (int version = 1; version <= 12; version++) {
+            Object store = fresh(), db = databaseType.getConstructor().newInstance();
+            databaseType.getMethod("legacyRuns", int.class).invoke(null, version);
+            if (version >= 4) {
+                Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
+                @SuppressWarnings("unchecked") Map<String, Object> legacy = (Map<String, Object>) valuesType.getConstructor().newInstance();
+                legacy.put("session_id", 7L); legacy.put("running", 1); legacy.put("goal", "old goal");
+                legacy.put("status", "active"); legacy.put("elapsed_ms", 123L);
+                if (version >= 5) {
+                    legacy.put("turn_at", 10L); legacy.put("turn_wall", 20L); legacy.put("seen_at", 30L);
+                }
+                databaseType.getMethod("insert", String.class, String.class, valuesType).invoke(db, "runs", null, legacy);
+            }
+            if (version >= 12) databaseType.getField("requestDiagnosticColumn").setBoolean(null, true);
+            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 13);
+            @SuppressWarnings("unchecked") Set<String> columns = (Set<String>) databaseType.getField("runColumns").get(null);
+            check(columns.containsAll(Arrays.asList("turn_at", "turn_wall", "seen_at", "turn_elapsed_ms",
+                            "turn_think_ms", "tokens_used", "token_budget", "budget_wrap_finished")),
+                    "Version " + version + " omitted old compatibility or new duration columns");
+            @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
+            int elapsedAlters = 0, thinkAlters = 0;
+            for (String statement : sql) {
+                if (statement.equals("ALTER TABLE runs ADD COLUMN turn_elapsed_ms INTEGER")) elapsedAlters++;
+                if (statement.equals("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER")) thinkAlters++;
+            }
+            check(elapsedAlters == (version < 4 ? 0 : 1) && thinkAlters == (version < 4 ? 0 : 1),
+                    "Version " + version + " altered duration columns after creating their latest schema");
+            if (version >= 4) {
+                Object restored = run(store, 7L);
+                check(field(restored, "turnElapsedMs") == null && field(restored, "turnThinkMs") == null
+                                && number(restored, "elapsedMs") == 123L && (Boolean) field(restored, "running")
+                                && "old goal".equals(field(restored, "goal")),
+                        "Version " + version + " invented a checkpoint from old clock anchors or lost its run");
+            }
+            saveRun(store, 7L, true, 500L, 250L, null);
+            check(number(run(store, 7L), "turnElapsedMs") == 250L && field(run(store, 7L), "turnThinkMs") == null,
+                    "Version " + version + " could not persist new checkpoint values after migration");
+        }
+        Object store = fresh(), db = databaseType.getConstructor().newInstance();
+        storeType.getMethod("onCreate", databaseType).invoke(store, db);
+        @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
+        boolean nullable = false;
+        for (String statement : sql) if (statement.startsWith("CREATE TABLE IF NOT EXISTS runs (")) {
+            nullable = statement.contains("turn_elapsed_ms INTEGER,turn_think_ms INTEGER,");
+        }
+        check(nullable, "Fresh schema did not create both nullable duration checkpoints");
     }
 
     private static String repeated(char value, int count) {
@@ -478,6 +612,8 @@ public final class ChatStorePagingRegressionTest {
                         "messageMetadataSurvivesPaging", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
                         "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
                         "legacyDatabaseUpgradeAddsLocalRequestDiagnostics", "versionElevenMigrationPreservesRequestRows",
+                        "runDurationsRoundTripWithoutLosingNullOrZero", "durationHeartbeatOnlyUpdatesExistingRunningSession",
+                        "everyLegacyVersionUpgradesWithNullableDurationColumns",
                         "structuredRequestDiagnosticsAreRedactedAndBounded", "configurationDiagnosticsAreRetainedAndSessionIsolated")) {
                     ChatStorePagingRegressionTest.class.getDeclaredMethod(name).invoke(null);
                     System.out.println("PASS " + name);

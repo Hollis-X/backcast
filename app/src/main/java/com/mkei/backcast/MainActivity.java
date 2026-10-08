@@ -264,9 +264,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 重画时最后一轮。还在跑就接着用它，不再另起一行「工作了」。 */
     private TurnTrace replayTailTrace;
     private LinearLayout replayTailRows;
-    /** 界面上的起点。循环里还有更早的起点时以更早的为准，重进不能改成刚刚。 */
+    /** UI fallback until the owning worker publishes its accumulated clock. */
     private long turnStartedAt;
     private long firstEventAt;
+    private long fallbackElapsedMs;
+    private long fallbackThinkMs;
     /** 新发送的界面只接这一轮的时钟；重进会话时用 -1 接回运行中的轮次。 */
     private int turnUiToken = -1;
     private int sheetToken;
@@ -947,17 +949,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return row;
     }
 
-    private String accessLabel() {
-        String level = settings.accessLevel();
-        if (ApprovalGate.ACCESS_GUARDED.equals(level)) {
-            return getString(R.string.access_guarded);
-        }
-        if (ApprovalGate.ACCESS_STRICT.equals(level)) {
-            return getString(R.string.access_strict);
-        }
-        return getString(R.string.access_full);
-    }
-
     /** 工作文件夹：主目录和附加目录同时授权，历史候选需要明确添加。 */
     private void showWorkDirSheet() {
         LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
@@ -1514,7 +1505,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /**
      * 顶部模型胶囊的弹出菜单。
-     * 已配置供应商的模型、思考强度与工具权限。
+     * 智能档位首页与同一弹窗内的模型选择页。
      */
     private void showModelPopup() {
         if (modelPopup != null && modelPopup.isShowing()) {
@@ -1525,62 +1516,98 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackgroundResource(R.drawable.bg_popup);
-        card.setPadding(dp(24), dp(22), dp(18), dp(18));
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
+        ScrollView menu = new ScrollView(this);
+        menu.setBackgroundResource(R.drawable.bg_popup);
+        menu.setFillViewport(true);
+        menu.addView(card);
+        modelPopup = new PopupWindow(menu, dp(280), ViewGroup.LayoutParams.WRAP_CONTENT, true);
+        modelPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        modelPopup.setOutsideTouchable(true);
+        showIntelligencePage(card);
+        card.startAnimation(AnimationUtils.loadAnimation(this, R.anim.popup_in));
+    }
 
-        TextView title = popupText(getString(R.string.popup_model), 20,
-                R.color.text_primary);
+    private void showIntelligencePage(final LinearLayout card) {
+        card.removeAllViews();
+        TextView title = popupText(getString(R.string.popup_intelligence), 14, R.color.text_secondary);
+        title.setPadding(dp(12), dp(6), dp(12), dp(8));
         card.addView(title, wrapParams());
-
-        TextView current = popupText(activeModelLabel(), 16,
-                R.color.text_secondary);
-        current.setPadding(0, dp(4), 0, dp(12));
-        card.addView(current, wrapParams());
-        appendModelPicker(card);
-
-        TextView reasoningTitle = popupText(getString(R.string.popup_reasoning), 18,
-                R.color.text_primary);
-        reasoningTitle.setPadding(0, dp(12), 0, dp(4));
-        card.addView(reasoningTitle, wrapParams());
-
-        addEffortOption(card, "关闭", Settings.EFFORT_OFF);
         addEffortOption(card, "低", Settings.EFFORT_LOW);
         addEffortOption(card, "中", Settings.EFFORT_MEDIUM);
         addEffortOption(card, "高", Settings.EFFORT_HIGH);
-        addEffortOption(card, "最大 (max)", Settings.EFFORT_MAX);
-        addEffortOption(card, "Ultra (ultra)", Settings.EFFORT_ULTRA);
-        TextView permissions = popupText(getString(R.string.more_access) + " · " + accessLabel(), 16, R.color.text_primary);
-        permissions.setMinHeight(dp(48));
-        permissions.setGravity(Gravity.CENTER_VERTICAL);
-        permissions.setPadding(dp(12), dp(8), dp(12), 0);
-        permissions.setCompoundDrawables(Icons.tinted(this, Icons.SHIELD, 0xFF3C3C43, dp(20)), null, null, null);
-        permissions.setCompoundDrawablePadding(dp(8));
-        permissions.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                if (modelPopup != null) modelPopup.dismiss();
-                showAccessSheet();
-            }
+        addEffortOption(card, "极高", Settings.EFFORT_XHIGH);
+        addEffortOption(card, "Max", Settings.EFFORT_MAX);
+        addEffortOption(card, "Ultra", Settings.EFFORT_ULTRA);
+        View divider = new View(this);
+        divider.setBackgroundColor(0xFFE8E8E8);
+        LinearLayout.LayoutParams separator = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        separator.setMargins(dp(12), dp(8), dp(12), dp(8));
+        card.addView(divider, separator);
+        LinearLayout model = new LinearLayout(this);
+        model.setTag("model-menu-entry");
+        model.setOrientation(LinearLayout.HORIZONTAL);
+        model.setGravity(Gravity.CENTER_VERTICAL);
+        model.setPadding(dp(12), dp(8), dp(12), dp(8));
+        model.setMinimumHeight(dp(64));
+        LinearLayout labels = new LinearLayout(this);
+        labels.setOrientation(LinearLayout.VERTICAL);
+        labels.addView(popupText(getString(R.string.popup_model), 17, R.color.text_primary), wrapParams());
+        TextView current = popupText(activeModelLabel(), 13, R.color.text_secondary);
+        current.setMaxLines(2);
+        current.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        labels.addView(current, wrapParams());
+        model.addView(labels, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView arrow = popupText("›", 24, R.color.text_secondary);
+        model.addView(arrow, new LinearLayout.LayoutParams(dp(24), ViewGroup.LayoutParams.WRAP_CONTENT));
+        model.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { showModelPage(card); }
         });
-        card.addView(permissions, wrapParams());
+        card.addView(model, wrapParams());
+        layoutModelPopup(card);
+    }
 
-        card.measure(View.MeasureSpec.makeMeasureSpec(dp(280), View.MeasureSpec.EXACTLY),
+    private void showModelPage(final LinearLayout card) {
+        card.removeAllViews();
+        TextView back = popupText(getString(R.string.popup_model), 17, R.color.text_primary);
+        back.setTag("model-menu-back");
+        back.setContentDescription(getString(R.string.popup_model_back));
+        back.setMinHeight(dp(48));
+        back.setGravity(Gravity.CENTER_VERTICAL);
+        back.setPadding(dp(12), 0, dp(12), 0);
+        Icons.left(back, Icons.BACK, 0xFF3C3C43, dp(20));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { showIntelligencePage(card); }
+        });
+        card.addView(back, wrapParams());
+        appendModelPicker(card);
+        layoutModelPopup(card);
+    }
+
+    private void layoutModelPopup(LinearLayout card) {
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        int width = Math.max(1, Math.min(dp(280), screenWidth - dp(16)));
+        card.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int height = Math.min(card.getMeasuredHeight(), getResources().getDisplayMetrics().heightPixels - dp(64));
-        ScrollView menu = new ScrollView(this);
-        menu.addView(card);
-        modelPopup = new PopupWindow(menu, dp(280), Math.max(dp(120), height), true);
-        modelPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        modelPopup.setOutsideTouchable(true);
-        // 不用 elevation：部分机型会渲染成硬边灰块，改用 drawable 自绘阴影。
-        card.startAnimation(AnimationUtils.loadAnimation(this, R.anim.popup_in));
+        int height = Math.max(1, Math.min(card.getMeasuredHeight(), screenHeight - dp(32)));
+        ((ScrollView) modelPopup.getContentView()).scrollTo(0, 0);
         View anchor = modelChipAnchor != null ? modelChipAnchor : modelChip;
-        showAbove(modelPopup, anchor, dp(280));
+        if (anchor == null) return;
+        int[] location = new int[2];
+        anchor.getLocationOnScreen(location);
+        int left = Math.max(dp(8), Math.min(location[0], screenWidth - width - dp(8)));
+        int top = Math.max(dp(8), Math.min(location[1] - height - dp(8), screenHeight - height - dp(8)));
+        if (modelPopup.isShowing()) modelPopup.update(left, top, width, height);
+        else {
+            modelPopup.setWidth(width);
+            modelPopup.setHeight(height);
+            modelPopup.showAtLocation(anchor, Gravity.NO_GRAVITY, left, top);
+        }
     }
 
     /** Saved provider/model choices are grouped without displaying credentials or endpoints. */
     private void appendModelPicker(LinearLayout card) {
-        TextView title = popupText(getString(R.string.popup_providers), 18, R.color.text_primary);
-        title.setPadding(0, dp(10), 0, dp(4));
-        card.addView(title, wrapParams());
         boolean available = false;
         for (Settings.AiProfile profile : settings.aiProfiles()) {
             if (profile.baseUrl.length() == 0 || profile.apiKey.length() == 0) continue;
@@ -1628,8 +1655,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         row.setPadding(dp(12), 0, dp(12), 0);
         Settings.AiProfile active = settings.activeAiProfile();
         if (providerId.equals(active.id) && model.equals(active.model)) {
-            row.setBackgroundResource(R.drawable.bg_popup_selected);
-            row.setText("✓ " + displayModelName(model));
+            row.setSelected(true);
+            Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, 0xFF3C3C43, dp(20));
         }
         row.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { chooseAiModel(providerId, model, sid, target, token); }
@@ -1696,7 +1723,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private String activeModelLabel() {
         Settings.AiProfile profile = settings.activeAiProfile();
-        return profile.name + " · " + displayModelName(profile.model);
+        return displayModelName(profile.model);
     }
 
     private void showToolkit() {
@@ -1737,15 +1764,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private void addEffortOption(LinearLayout card, String label, final String effort) {
         final TextView row = popupText(label, 17, R.color.text_primary);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinHeight(dp(50));
+        row.setMinHeight(dp(48));
         row.setPadding(dp(12), 0, dp(12), 0);
         if (effort.equals(settings.effectiveReasoningEffort())) {
-            row.setBackgroundResource(R.drawable.bg_popup_selected);
+            row.setSelected(true);
+            Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, 0xFF3C3C43, dp(20));
         }
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 settings.setReasoningEffort(effort);
+                RunHub.get(MainActivity.this).retargetIfNeeded();
                 updateStatus();
                 if (modelPopup != null) {
                     modelPopup.dismiss();
@@ -1862,6 +1891,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         currentTrace = null;
         turnStartedAt = 0;
         firstEventAt = 0;
+        fallbackElapsedMs = 0;
+        fallbackThinkMs = 0;
         setBusy(false);
         send.setEnabled(true);
         stop.setEnabled(true);
@@ -1889,6 +1920,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         currentTrace = null;
         turnStartedAt = 0;
         firstEventAt = 0;
+        fallbackElapsedMs = 0;
+        fallbackThinkMs = 0;
         sessionOpening = true;
         setBusy(false);
         send.setEnabled(false);
@@ -2116,11 +2149,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (Settings.EFFORT_HIGH.equals(effort)) {
             return "高";
         }
+        if (Settings.EFFORT_XHIGH.equals(effort)) {
+            return "极高";
+        }
         if (Settings.EFFORT_MAX.equals(effort)) {
-            return "max";
+            return "Max";
         }
         if (Settings.EFFORT_ULTRA.equals(effort)) {
-            return "ultra";
+            return "Ultra";
         }
         return "";
     }
@@ -2352,11 +2388,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final AgentLoop target = loop;
         final long sid = sessionId;
         final int gen = target.generation();
-        liveToken++;
-        final int token = liveToken;
+        final int token = liveToken = target.nextUiToken(liveToken);
         turnUiToken = token;
         turnStartedAt = SystemClock.elapsedRealtime();
         firstEventAt = 0;
+        fallbackElapsedMs = 0;
+        fallbackThinkMs = 0;
         setBusy(true);
         // 压缩自己那一行由 onCompactStart 建，不借用「工作了」。
         new Thread(new Runnable() {
@@ -2415,7 +2452,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final AgentLoop target = loop;
         final long sid = ensureSession(text);
         final int gen = target.generation();
-        final int token = ++liveToken;
+        final int token = liveToken = target.nextUiToken(liveToken);
         prompt.setText("");
         sealLiveAnswer();
         sealCurrentTurn();
@@ -2425,6 +2462,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         turnUiToken = token;
         turnStartedAt = SystemClock.elapsedRealtime();
         firstEventAt = 0;
+        fallbackElapsedMs = 0;
+        fallbackThinkMs = 0;
         beginWorkRow();
         setBusy(true);
         refreshGoal();
@@ -2670,61 +2709,28 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         syncMarquee();
     }
 
-    private long loopTurnStart() {
-        if (loop == null) {
-            return 0L;
-        }
-        return turnUiToken < 0 ? loop.activeTurnStart()
-                : loop.activeTurnStart(loop.generation(), turnUiToken);
+    private AgentLoop.TurnClock loopClock() {
+        if (loop == null) return null;
+        return turnUiToken < 0 ? loop.turnClock()
+                : loop.turnClock(loop.generation(), turnUiToken);
     }
 
-    private long loopFirstEvent() {
-        if (loop == null) {
-            return 0L;
-        }
-        return turnUiToken < 0 ? loop.activeFirstEvent()
-                : loop.activeFirstEvent(loop.generation(), turnUiToken);
-    }
-
-    /** Adopt an earlier clock only from the current turn; re-entry accepts the running turn. */
+    /** Worker snapshots already include prior execution, without the offline interval. */
     private void adoptLoopClock() {
-        long loopAt = loopTurnStart();
-        if (loopAt > 0 && (turnStartedAt <= 0 || loopAt < turnStartedAt)) {
-            turnStartedAt = loopAt;
-        }
-        long loopFirst = loopAt > 0 ? loopFirstEvent() : 0L;
-        if (loopFirst > turnStartedAt && (firstEventAt == 0 || loopFirst < firstEventAt)) {
-            firstEventAt = loopFirst;
-        }
-        if (turnStartedAt == 0) {
+        if (loopClock() == null && turnStartedAt == 0) {
             turnStartedAt = SystemClock.elapsedRealtime();
         }
     }
 
-    /** 界面和循环各有一个起点时，用更早的那个。答完后循环不再对外报起点。 */
-    private long liveOrigin() {
-        long loopAt = loopTurnStart();
-        if (loopAt > 0 && turnStartedAt > 0) {
-            return Math.min(loopAt, turnStartedAt);
+    private long displayThink(TurnTrace trace) {
+        if (trace == currentTrace) {
+            AgentLoop.TurnClock clock = loopClock();
+            if (clock != null) return Math.max(1L, clock.firstSeen ? clock.thinkMs : clock.elapsedMs);
+            if (fallbackThinkMs > 0) return fallbackThinkMs;
+            if (firstEventAt > 0 && turnStartedAt > 0)
+                return Math.max(1L, fallbackElapsedMs + firstEventAt - turnStartedAt);
         }
-        return loopAt > 0 ? loopAt : turnStartedAt;
-    }
-
-    /** 第一次有内容的时刻。没有就返回 0，调用方按「还在等」处理。 */
-    private long liveFirst() {
-        long origin = liveOrigin();
-        if (origin <= 0) {
-            return 0L;
-        }
-        long loopFirst = loopFirstEvent();
-        long first = 0L;
-        if (loopFirst > origin) {
-            first = loopFirst;
-        }
-        if (firstEventAt > origin && (first == 0L || firstEventAt < first)) {
-            first = firstEventAt;
-        }
-        return first;
+        return trace.thinkMs > 0 ? trace.thinkMs : displayElapsed(trace);
     }
 
     private void noteFirstEvent() {
@@ -2768,17 +2774,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         turnFlow = flowOf(rows);
         restoreFlow(turnFlow);
         turnRendered = trace.order.size();
-        long loopAt = loopTurnStart();
-        if (loopAt > 0 && (turnStartedAt <= 0 || loopAt < turnStartedAt)) {
-            turnStartedAt = loopAt;
-            long loopFirst = loopFirstEvent();
-            firstEventAt = loopFirst > loopAt ? loopFirst : 0L;
-        } else if (turnStartedAt <= 0) {
-            // 库里这条已经带了耗时，就从那个耗时往回推，不要从现在重计。
-            long now = SystemClock.elapsedRealtime();
-            turnStartedAt = already > 0 ? now - already : now;
-            firstEventAt = 0L;
-        }
+        fallbackElapsedMs = Math.max(0L, already);
+        fallbackThinkMs = trace.thinkMs;
+        turnStartedAt = 0;
+        firstEventAt = 0;
+        adoptLoopClock();
         trace.beginRound();
         markTurn();
         startTick();
@@ -3194,18 +3194,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             turnChevron = null;
             turnStartedAt = 0;
             firstEventAt = 0;
+            fallbackElapsedMs = 0;
+            fallbackThinkMs = 0;
             turnUiToken = -1;
             return;
         }
-        long now = SystemClock.elapsedRealtime();
-        long origin = liveOrigin();
-        if (currentTrace.elapsedMs <= 0 && origin > 0) {
-            currentTrace.elapsedMs = Math.max(1L, now - origin);
-        }
+        long elapsed = displayElapsed(currentTrace);
+        long think = displayThink(currentTrace);
+        if (currentTrace.elapsedMs <= 0) currentTrace.elapsedMs = elapsed;
         if (currentTrace.thinkMs <= 0) {
-            long first = liveFirst();
-            long end = first > origin ? first : now;
-            long think = origin > 0 ? end - origin : currentTrace.elapsedMs;
             currentTrace.thinkMs = Math.max(1L, think);
         }
         if (currentTrace.elapsedMs <= 0) {
@@ -3232,6 +3229,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         currentTrace = null;
         turnStartedAt = 0;
         firstEventAt = 0;
+        fallbackElapsedMs = 0;
+        fallbackThinkMs = 0;
         turnUiToken = -1;
     }
 
@@ -3734,10 +3733,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private long displayElapsed(TurnTrace trace) {
         if (trace == currentTrace) {
-            long origin = liveOrigin();
-            if (origin > 0) {
-                return Math.max(1L, SystemClock.elapsedRealtime() - origin);
-            }
+            AgentLoop.TurnClock clock = loopClock();
+            if (clock != null) return Math.max(1L, clock.elapsedMs);
+            if (turnStartedAt > 0)
+                return Math.max(1L, fallbackElapsedMs + Math.max(0L, SystemClock.elapsedRealtime() - turnStartedAt));
+            if (fallbackElapsedMs > 0) return fallbackElapsedMs;
         }
         if (trace.elapsedMs > 0) {
             return trace.elapsedMs;
@@ -4588,8 +4588,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             return;
         }
         final long sid = target.sessionKey();
-        liveToken++;
-        final int token = liveToken;
+        final int token = liveToken = target.nextUiToken(liveToken);
         if (target == loop) {
             settleCompact();
             turnUiToken = -1;

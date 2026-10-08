@@ -67,14 +67,16 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.AgentService", "public class AgentService {public static int starts;public static void start(android.content.Context c) {starts++;} }");
         add(files, "com.mkei.backcast.ChatStore",
                 "public class ChatStore {"
-                + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,turnAt,turnWall,seenAt,tokensUsed,tokenBudget; public boolean running; public Boolean budgetWrapFinished; }"
+                + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,tokensUsed,tokenBudget; public Long turnElapsedMs,turnThinkMs; public boolean running; public Boolean budgetWrapFinished; }"
                 + "private static final java.util.Map<Long,Run> runs=new java.util.HashMap<Long,Run>();"
                 + "public static long pausedRead=-1; public static java.util.concurrent.CountDownLatch readStarted,readRelease;"
+                + "public static int runSaves,clockSaves;"
                 + "public static long requestSession,requestElapsed,diagnosticSession;public static String requestPurpose,requestOutcome,requestReason,requestDiagnostic,diagnosticSource,diagnosticSummary,diagnosticDetail;public static int requestRetry,diagnosticCalls;"
                 + "public static void pauseRead(long sid) { pausedRead=sid; readStarted=new java.util.concurrent.CountDownLatch(1); readRelease=new java.util.concurrent.CountDownLatch(1); }"
                 + "public ChatStore(android.content.Context c) {}"
-                + "public static void reset() { runs.clear(); pausedRead=-1;requestSession=requestElapsed=diagnosticSession=0;requestRetry=diagnosticCalls=0;requestPurpose=requestOutcome=requestReason=requestDiagnostic=diagnosticSource=diagnosticSummary=diagnosticDetail=null; }"
-                + "public static void pending(long sid) { Run r=new Run(); r.running=true; r.turnAt=10; r.turnWall=20; runs.put(sid,r); }"
+                + "public static void reset() { runs.clear(); pausedRead=-1;runSaves=clockSaves=0;requestSession=requestElapsed=diagnosticSession=0;requestRetry=diagnosticCalls=0;requestPurpose=requestOutcome=requestReason=requestDiagnostic=diagnosticSource=diagnosticSummary=diagnosticDetail=null; }"
+                + "public static void pending(long sid) { checkpoint(sid,true,5000L,null); }"
+                + "public static void checkpoint(long sid,boolean running,Long elapsed,Long think) { Run r=new Run();r.running=running;r.turnElapsedMs=elapsed;r.turnThinkMs=think;runs.put(sid,r); }"
                 + "public static void pendingBudget(long sid,Boolean finished) { pending(sid); Run r=runs.get(sid); r.goal=\"spent goal\"; r.status=\"budget_limited\"; r.budgetWrapFinished=finished; }"
                 + "public Run readRun(long sid) { Run r=runs.get(sid); return r==null?new Run():r; }"
                 + "public java.util.List<Long> runningIds() { java.util.List<Long> out=new java.util.ArrayList<Long>(); for(java.util.Map.Entry<Long,Run> e:runs.entrySet()) if(e.getValue().running) out.add(e.getKey()); return out; }"
@@ -83,7 +85,9 @@ public final class RunHubRecoveryTest {
                 + "public void replaceAll(long sid,java.util.List<com.mkei.backcast.agent.Message> m) {}"
                 + "public void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String detail){requestSession=sid;requestPurpose=purpose;requestElapsed=elapsed;requestOutcome=outcome;requestReason=reason;requestRetry=retry;requestDiagnostic=detail;}"
                 + "public void recordDiagnostic(long sid,String source,String summary,String detail){diagnosticSession=sid;diagnosticSource=source;diagnosticSummary=summary;diagnosticDetail=detail;diagnosticCalls++;}"
-                + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished) {} }");
+                + "public void saveRun(long sid,boolean running,String goal,String status,long ms,long elapsed,Long think,long used,long budget,boolean budgetWrapFinished) {"
+                + "runSaves++;Run r=new Run();r.running=running;r.goal=goal;r.status=status;r.elapsedMs=ms;r.turnElapsedMs=elapsed;r.turnThinkMs=think;r.tokensUsed=used;r.tokenBudget=budget;r.budgetWrapFinished=budgetWrapFinished;runs.put(sid,r);}"
+                + "public void saveClock(long sid,long ms,long elapsed,Long think){clockSaves++;Run r=runs.get(sid);if(r!=null&&r.running){r.elapsedMs=ms;r.turnElapsedMs=elapsed;r.turnThinkMs=think;}} }");
         add(files, "com.mkei.backcast.agent.AgentLoop",
                 "public class AgentLoop {"
                 + "public static final int DEFAULT_CONTEXT_LIMIT=456000;"
@@ -91,7 +95,7 @@ public final class RunHubRecoveryTest {
                 + "public interface Recorder { void record(long sid,Message m); void replace(long sid,java.util.List<Message> m); }"
                 + "public interface DetailedRequestRecorder {void recordRequest(long sid,String purpose,long elapsed,String outcome,String reason,int retry,String diagnostic);}"
                 + "public interface ErrorRecorder {void recordDiagnostic(long sid,String source,String summary,String detail);}"
-                + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long at,long wall,long seen,long used,long budget,boolean budgetWrapFinished); }"
+                + "public interface Durability { void save(long sid,boolean running,String goal,String status,long ms,long elapsed,Long think,long used,long budget,boolean budgetWrapFinished);default void saveClock(long sid,long ms,long elapsed,Long think){} }"
                 + "public interface UsageObserver{void onUsage(long tokens);}public UsageObserver usageObserver;"
                 + "public LlmClient client;public ToolRegistry registry;public SubAgentManager children;public String access=\"full\",environment,directory,resetPrompt;"
                 + "public int limit=DEFAULT_CONTEXT_LIMIT,retargets,externalUsage;public float ratio;public ApprovalGate gate;"
@@ -100,13 +104,14 @@ public final class RunHubRecoveryTest {
                 + "public static long pausedLoad=-1; public static java.util.concurrent.CountDownLatch loadStarted,loadRelease;"
                 + "public static void reset() { pausedLoad=-1; }"
                 + "public static void pauseLoad(long sid) { pausedLoad=sid; loadStarted=new java.util.concurrent.CountDownLatch(1); loadRelease=new java.util.concurrent.CountDownLatch(1); }"
-                + "public Boolean restoredBudgetWrapFinished;"
+                + "public Boolean restoredBudgetWrapFinished;public Long restoredTurnElapsedMs,restoredTurnThinkMs;"
                 + "public AgentLoop(LlmClient c,ToolRegistry r,Listener l) { client=c;registry=r;listener=l; }"
                 + "public void bindSession(long id) { sid=id; } public long sessionKey() { return sid; }"
                 + "public boolean busy() { return busyState; }"
                 + "public Listener listener() { return listener; } public void setListener(Listener l) { listener=l; }"
                 + "public void loadHistory(String s,java.util.List<Message> m) { loads++; if(pausedLoad==sid) { loadStarted.countDown(); try { loadRelease.await(5,java.util.concurrent.TimeUnit.SECONDS); } catch(InterruptedException e) { throw new RuntimeException(e); } } }"
-                + "public void restoreGoal(String g,String s,long ms) {} public void restoreGoal(String g,String s,long ms,long used,long budget,Boolean budgetWrapFinished) { restoredBudgetWrapFinished=budgetWrapFinished; } public void restoreTurnClock(long at,long wall,long seen) { clockRestores++; }"
+                + "public void restoreGoal(String g,String s,long ms) {} public void restoreGoal(String g,String s,long ms,long used,long budget,Boolean budgetWrapFinished) { restoredBudgetWrapFinished=budgetWrapFinished; }"
+                + "public void restoreTurnClock(Long elapsed,Long think) {if(loads!=1)throw new AssertionError(\"Clock restored before history\");clockRestores++;restoredTurnElapsedMs=elapsed;restoredTurnThinkMs=think;}"
                 + "public void resume(long id,int token) { resumes++; }"
                 + "public Recorder recorder;public Durability durability;public void setRecorder(Recorder r) {recorder=r;} public void setDurability(Durability d) {durability=d;}"
                 + "public DetailedRequestRecorder diagnosticRecorder;public ErrorRecorder errorRecorder;public void setDiagnosticRecorder(DetailedRequestRecorder r,ErrorRecorder e){diagnosticRecorder=r;errorRecorder=e;}"
@@ -251,7 +256,8 @@ public final class RunHubRecoveryTest {
         check(currentListener(loop).getClass().getSimpleName().equals("Quiet"), "headless recovery attached a UI");
         check(count(loop, "clockRestores") == 1, "persisted clock was not restored");
         recover(hub);
-        check(count(loop, "resumes") == 1, "recovery was not idempotent");
+        check(count(loop, "resumes") == 1 && count(loop, "loads") == 1 && count(loop, "clockRestores") == 1,
+                "Recovery duplicated work, reloaded history, or reapplied its duration checkpoint");
     }
     private static void switchedSessionsKeepOwnership() throws Exception {
         Object hub = freshHub(), ui = listener();
@@ -290,6 +296,58 @@ public final class RunHubRecoveryTest {
             Object restored = loopType.getField("restoredBudgetWrapFinished").get(loop);
             check(java.util.Objects.equals(finished, restored), "Recovery lost budget wrap-up state " + finished);
         }
+    }
+
+    private static void durationCheckpointsAreRestoredAfterHistoryExactlyOnce() throws Exception {
+        for (Long[] checkpoint : new Long[][]{{null, null}, {0L, null}, {0L, 0L}, {7200L, 350L}}) {
+            Object hub = freshHub(), ui = listener();
+            storeType.getMethod("checkpoint", long.class, boolean.class, Long.class, Long.class)
+                    .invoke(null, 8L, true, checkpoint[0], checkpoint[1]);
+            Object loop = bind(hub, 8L, ui);
+            check(java.util.Objects.equals(checkpoint[0], field(loop, "restoredTurnElapsedMs"))
+                            && java.util.Objects.equals(checkpoint[1], field(loop, "restoredTurnThinkMs"))
+                            && count(loop, "loads") == 1 && count(loop, "clockRestores") == 1,
+                    "Recovery lost a legacy/null, zero, or populated duration checkpoint");
+            check(bind(hub, 8L, ui) == loop, "Binding replaced a restored loop");
+            recover(hub); awaitResume(loop); recover(hub);
+            check(count(loop, "loads") == 1 && count(loop, "clockRestores") == 1 && count(loop, "resumes") == 1,
+                    "Repeated recovery reapplied durations or resumed twice");
+        }
+        Object hub = freshHub();
+        storeType.getMethod("checkpoint", long.class, boolean.class, Long.class, Long.class)
+                .invoke(null, 8L, false, 9000L, 300L);
+        Object idle = bind(hub, 8L, listener());
+        recover(hub);
+        check(count(idle, "loads") == 1 && count(idle, "clockRestores") == 0 && count(idle, "resumes") == 0,
+                "An idle run's old duration was restored into a live turn");
+    }
+
+    private static void heartbeatPersistsDurationWithoutRestartingForegroundService() throws Exception {
+        Object hub = freshHub(), root = bind(hub, 9L, listener()), durability = field(root, "durability");
+        Class<?> contract = loopType.getClassLoader().loadClass("com.mkei.backcast.agent.AgentLoop$Durability");
+        Class<?> service = hubType.getClassLoader().loadClass("com.mkei.backcast.AgentService");
+        Object app = field(hub, "app"), store = field(hub, "store");
+        service.getField("starts").setInt(null, 0);
+        app.getClass().getField("serviceStops").setInt(app, 0);
+        Method save = contract.getMethod("save", long.class, boolean.class, String.class, String.class,
+                long.class, long.class, Long.class, long.class, long.class, boolean.class);
+        Method saveClock = contract.getMethod("saveClock", long.class, long.class, long.class, Long.class);
+        save.invoke(durability, 9L, true, "goal", "active", 10000L, 5000L, null, 42L, 200L, true);
+        for (long elapsed : new long[]{7000L, 9000L, 11000L}) saveClock.invoke(durability, 9L, elapsed + 5000L, elapsed, 0L);
+        Object saved = storeType.getMethod("readRun", long.class).invoke(store, 9L);
+        check(service.getField("starts").getInt(null) == 1 && app.getClass().getField("serviceStops").getInt(app) == 0
+                        && storeType.getField("runSaves").getInt(null) == 1 && storeType.getField("clockSaves").getInt(null) == 3
+                        && Long.valueOf(11000L).equals(field(saved, "turnElapsedMs"))
+                        && Long.valueOf(0L).equals(field(saved, "turnThinkMs")) && (Long) field(saved, "elapsedMs") == 16000L
+                        && (Long) field(saved, "tokensUsed") == 42L && (Long) field(saved, "tokenBudget") == 200L
+                        && Boolean.TRUE.equals(field(saved, "budgetWrapFinished")) && "goal".equals(field(saved, "goal")),
+                "Heartbeat restarted/stopped the service or failed to preserve run metadata");
+        save.invoke(durability, 9L, false, "goal", "stopped", 17000L, 12000L, 0L, 42L, 200L, true);
+        saveClock.invoke(durability, 9L, 18000L, 13000L, null);
+        saved = storeType.getMethod("readRun", long.class).invoke(store, 9L);
+        check(service.getField("starts").getInt(null) == 1 && app.getClass().getField("serviceStops").getInt(app) == 1
+                        && Long.valueOf(12000L).equals(field(saved, "turnElapsedMs")) && !(Boolean) field(saved, "running"),
+                "Late heartbeat restarted stopped work or changed its final duration");
     }
 
     private static void preparedSessionPreservesCurrentListenerAndLoadsOnce() throws Exception {
@@ -592,8 +650,8 @@ public final class RunHubRecoveryTest {
         Object durability = field(root, "durability");
         Class<?> durabilityType = loopType.getClassLoader().loadClass("com.mkei.backcast.agent.AgentLoop$Durability");
         durabilityType.getMethod("save", long.class, boolean.class, String.class, String.class, long.class,
-                long.class, long.class, long.class, long.class, long.class, boolean.class)
-                .invoke(durability, 29L, false, "", "", 0L, 0L, 0L, 0L, 0L, 0L, false);
+                long.class, Long.class, long.class, long.class, boolean.class)
+                .invoke(durability, 29L, false, "", "", 0L, 0L, null, 0L, 0L, false);
         check(app.getClass().getField("serviceStops").getInt(app) == 0,
                 "Idle parent persistence stopped the service while its child was active");
         call(manager, "live", new Class<?>[]{boolean.class}, false);
@@ -684,7 +742,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

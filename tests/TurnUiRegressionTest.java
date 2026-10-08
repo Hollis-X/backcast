@@ -168,7 +168,7 @@ public final class TurnUiRegressionTest {
                 + "import com.mkei.backcast.ui.TurnTrace;import com.mkei.backcast.ui.MarkdownRenderQueue;import java.lang.ref.WeakReference;import com.mkei.backcast.tool.ToolCatalog;import com.mkei.backcast.tool.EmbeddedToolchain;import com.mkei.backcast.tool.ToolchainInstaller; import java.util.*; import org.json.*;"
                 + "class UiActivity {protected void onStop(){}protected void onDestroy(){}}"
                 + "public class TurnUiFixture extends UiActivity implements ApprovalGate {"
-                + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt; int turnUiToken=-1;"
+                + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt,fallbackElapsedMs,fallbackThinkMs; int turnUiToken=-1;"
                 + "AgentLoop errorToastSource;int errorToastToken=-1,errorToastGeneration=-1;boolean compactLive;int settled,goalRefreshes;List<String>toasts=new ArrayList<String>();"
                 + "static class Toast{static final int LENGTH_SHORT=0;TurnUiFixture owner;String text;static Toast makeText(TurnUiFixture o,String t,int d){Toast v=new Toast();v.owner=o;v.text=t;return v;}"
                 + "static Toast makeText(TurnUiFixture o,int id,int d){return makeText(o,String.valueOf(id),d);}void show(){owner.toasts.add(text);}}"
@@ -334,8 +334,8 @@ public final class TurnUiRegressionTest {
             check(METHODS.containsKey(name), "Missing UI constant " + name);
             source.append(METHODS.get(name));
         }
-        for (String name : Arrays.asList("loopTurnStart", "loopFirstEvent", "adoptLoopClock",
-                "liveOrigin", "liveFirst", "renderSlice", "renderPage", "seedReplayTools",
+        for (String name : Arrays.asList("loopClock", "adoptLoopClock", "displayThink",
+                "renderSlice", "renderPage", "seedReplayTools",
                 "loadEarlierPage", "insertEarlierPage", "resetHistoryLoading", "stripCompactionAsks", "host", "autoScroll",
                 "stuckAtEnd", "latestScrollY", "updateLatestButton", "scrollToLatest", "jumpToLatest", "cancelLatestJumpAnimation",
                 "pinLastMessage",
@@ -382,42 +382,68 @@ public final class TurnUiRegressionTest {
         field(loop, "busy", Boolean.TRUE);
         field(loop, "cancelled", Boolean.FALSE);
         field(loop, "acceptedUi", Integer.valueOf(token));
-        field(loop, "turnStartedAt", Long.valueOf(origin));
-        field(loop, "turnWall", Long.valueOf(System.currentTimeMillis()));
+        field(loop, "turnClockInitialized", Boolean.TRUE);
+        field(loop, "turnSegmentStart", Long.valueOf(origin));
         return loop;
     }
 
     private static void clocks() throws Exception {
         SystemClock.set(116000);
         AgentLoop loop = running(100000, 1);
-        field(loop, "firstEventAt", Long.valueOf(100050));
-        Object view = viewType.getConstructor().newInstance();
+        field(loop, "turnThinkMs", Long.valueOf(50));
+        Object view = progressFixture();
         field(view, "loop", loop);
-        field(view, "turnUiToken", Integer.valueOf(2));
+        int nextToken = loop.nextUiToken(0);
+        check(nextToken > 1, "Recreated Activity reused a frozen turn's UI token");
+        field(view, "turnUiToken", Integer.valueOf(nextToken));
         field(view, "turnStartedAt", Long.valueOf(116000));
+        Object trace = get(view, "currentTrace");
         call(view, "adoptLoopClock");
-        check(((Long) call(view, "liveOrigin")) == 116000, "New UI adopted an older turn's clock");
-        check(((Long) call(view, "liveFirst")) == 0, "New UI adopted an older first event");
+        check(call(view, "loopClock") == null, "New UI adopted an older turn's clock");
+        check((Long) invoke(view, "displayElapsed", trace) == 1L, "New UI inherited previous turn's elapsed time");
+        check(METHODS.get("startText").contains("target.nextUiToken(liveToken)")
+                        && METHODS.get("runCompact").contains("target.nextUiToken(liveToken)")
+                        && METHODS.get("kick").contains("target.nextUiToken(liveToken)"),
+                "UI request paths did not reserve an owner token from the loop");
         pass("newUiRejectsOldTurnBeforeSubmit");
 
         field(loop, "acceptedUi", Integer.valueOf(2));
-        field(loop, "turnStartedAt", Long.valueOf(116000));
-        field(loop, "firstEventAt", Long.valueOf(116020));
+        field(loop, "turnSegmentStart", Long.valueOf(116000));
+        field(loop, "turnThinkMs", Long.valueOf(20));
         SystemClock.advance(40);
         call(view, "adoptLoopClock");
-        check(((Long) call(view, "liveOrigin")) == 116000, "Accepted turn lost its start");
-        check(((Long) call(view, "liveFirst")) == 116020, "Accepted turn lost its first event");
+        check((Long) invoke(view, "displayElapsed", trace) == 40L, "Accepted turn lost its elapsed time");
+        check((Long) invoke(view, "displayThink", trace) == 20L, "Accepted turn lost first-output time");
         pass("sameTurnAdoptsFirstEventWithoutChangingOrigin");
 
         field(view, "turnUiToken", Integer.valueOf(-1));
         field(view, "turnStartedAt", Long.valueOf(0));
         field(view, "firstEventAt", Long.valueOf(0));
-        field(loop, "turnStartedAt", Long.valueOf(100000));
-        field(loop, "firstEventAt", Long.valueOf(100050));
+        field(loop, "turnSegmentStart", Long.valueOf(100000));
+        field(loop, "turnThinkMs", Long.valueOf(50));
         call(view, "adoptLoopClock");
-        check(((Long) call(view, "liveOrigin")) == 100000, "Re-entry reset a running clock");
-        check(((Long) call(view, "liveFirst")) == 100050, "Re-entry lost the persisted first event");
+        check((Long) invoke(view, "displayElapsed", trace) == 16040L, "Re-entry reset running elapsed time");
+        check((Long) invoke(view, "displayThink", trace) == 50L, "Re-entry lost first-output time");
         pass("reentryKeepsRunningTurnClock");
+
+        field(loop, "busy", Boolean.FALSE);
+        field(loop, "turnSegmentStart", Long.valueOf(-1));
+        field(loop, "turnAccumMs", Long.valueOf(20805000));
+        field(loop, "turnThinkMs", Long.valueOf(1200));
+        SystemClock.set(500);
+        call(view, "adoptLoopClock");
+        check((Long) invoke(view, "displayElapsed", trace) == 20805000L, "Restored duration depended on uptime or UI origin");
+        SystemClock.advance(500000);
+        check((Long) invoke(view, "displayElapsed", trace) == 20805000L, "Idle/offline interval entered restored duration");
+        check((Long) invoke(view, "displayThink", trace) == 1200L, "Restored thinking duration changed while idle");
+        pass("restoredAccumulatedClockIsFrozenAndIndependentOfUptime");
+
+        field(loop, "cancelled", Boolean.TRUE);
+        field(view, "turnUiToken", Integer.valueOf(2));
+        check(call(view, "loopClock") != null, "Canceled owning UI lost its final frozen snapshot");
+        field(view, "turnUiToken", Integer.valueOf(3));
+        check(call(view, "loopClock") == null, "Next UI accepted canceled previous snapshot");
+        pass("frozenSnapshotKeepsItsOwnerAfterCancellation");
     }
 
     private static String reasoningText(Object trace) throws Exception {
@@ -1480,11 +1506,13 @@ public final class TurnUiRegressionTest {
         pass("uiTokenWiringIsComplete");
     }
     private static void conversationMenusSeparateEffortPermissionsAndTaskPage() {
-        String model=METHODS.get("showModelPopup"),more=METHODS.get("showMoreSheet"),open=METHODS.get("showSubAgents");
-        check(model.contains("Settings.EFFORT_MAX") && model.contains("Settings.EFFORT_ULTRA"),
+        String model=METHODS.get("showModelPopup"),intelligence=METHODS.get("showIntelligencePage"),more=METHODS.get("showMoreSheet"),open=METHODS.get("showSubAgents");
+        check(intelligence.contains("Settings.EFFORT_MAX") && intelligence.contains("Settings.EFFORT_ULTRA")
+                && intelligence.contains("Settings.EFFORT_XHIGH"),
                 "max and ultra are not independent menu choices");
-        check(model.contains("showAccessSheet()") && !model.contains("showSubAgents()")
-                && !model.contains("showToolkit()"), "Effort popup still contains unrelated task or download controls");
+        check(!model.contains("showAccessSheet()") && !intelligence.contains("showAccessSheet()")
+                && !model.contains("showSubAgents()") && !model.contains("showToolkit()"),
+                "Effort popup still contains unrelated task or duplicate permission controls");
         check(more.contains("showSubAgents()") && more.contains("showToolkit()") && !more.contains("showAccessSheet()"),
                 "More menu does not provide task/tools entries or duplicates permissions");
         check(open.contains("SubAgentsActivity.class") && open.contains("EXTRA_SESSION_ID") && open.contains("sessionId"),

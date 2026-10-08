@@ -247,7 +247,7 @@ public final class ResponsePreferencesRegressionTest {
         Object context=context(), settings=settings(context);
         check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3,
                 "Fresh settings do not choose manual mode and three children");
-        for(String effort:new String[]{"off","low","max","ultra"}) {
+        for(String effort:new String[]{"off","low","xhigh","max","ultra"}) {
             set(settings,"setReasoningEffort",effort);
             check(("ultra".equals(effort)?"ultra":"manual").equals(get(settings(context),"agentMode")),"Delegation mode did not derive from the saved effort");
         }
@@ -255,7 +255,7 @@ public final class ResponsePreferencesRegressionTest {
             concurrency(settings,count);
             check(concurrency(settings(context))==count,"Child concurrency did not persist");
         }
-        for(String effort:new String[]{"off","low","medium","high","max","ultra"}) {
+        for(String effort:new String[]{"off","low","medium","high","xhigh","max","ultra"}) {
             set(settings,"setReasoningEffort",effort);
             check(effort.equals(get(settings(context),"reasoningEffort")),"Reasoning effort did not persist");
         }
@@ -283,7 +283,7 @@ public final class ResponsePreferencesRegressionTest {
     private static void maxAndUltraRemainSeparateWhilePreservingLanguage() throws Exception {
         Object settings=settings(context());
         set(settings,"setOutputLanguage","ja");
-        for(String effort:new String[]{"off","max","ultra","max","low"}) {
+        for(String effort:new String[]{"off","xhigh","max","ultra","max","xhigh","low"}) {
             set(settings,"setReasoningEffort",effort);
             check(effort.equals(get(settings,"reasoningEffort")),"Selected effort was changed");
             check(effort.equals(get(settings,"effectiveReasoningEffort")),"Selected effort was mapped to another value");

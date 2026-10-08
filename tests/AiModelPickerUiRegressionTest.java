@@ -84,6 +84,13 @@ public final class AiModelPickerUiRegressionTest {
         for (Object child : children(card)) if (text.equals(get(child, "text"))) return child;
         throw new AssertionError("Missing row: " + text);
     }
+    private static Object tagged(Object card, String tag) throws Exception {
+        for (Object child : children(card)) if (tag.equals(get(child, "tag"))) return child;
+        throw new AssertionError("Missing tagged row: " + tag);
+    }
+    private static Object popupCard(Object view) throws Exception {
+        return get(get(get(view, "modelPopup"), "content"), "content");
+    }
     private static Object configuredView() throws Exception {
         Object view = view();
         addProfile(view, "deepseek", "DeepSeek", "https://deepseek.test/v1", "deepseek-secret", "same-model", "same-model", "other-model");
@@ -115,24 +122,92 @@ public final class AiModelPickerUiRegressionTest {
         invoke(view, "appendModelPicker", card);
         List<String> labels = new ArrayList<>();
         for (Object child : children(card)) labels.add((String) get(child, "text"));
-        check(labels.equals(Arrays.asList("供应商与模型", "DeepSeek", "✓ same-model", "other-model",
+        check(labels.equals(Arrays.asList("DeepSeek", "same-model", "other-model",
                         "OpenAI", "same-model", "gpt-model", "Grok", "grok-model", "配置供应商与模型")),
                 "Provider/model grouping or current selection is ambiguous: " + labels);
         check(!labels.toString().contains("secret") && !labels.toString().contains("https://")
                         && !labels.contains("hidden-model"), "Picker exposed credentials or an unconfigured provider");
-        check(invoke(view, "activeModelLabel").equals("DeepSeek · same-model"), "Composer omitted active provider");
-        check(methods.get("showModelPopup").contains("appendModelPicker(card)")
-                        && methods.get("showModelPopup").contains("Settings.EFFORT_MAX")
-                        && methods.get("showModelPopup").contains("Settings.EFFORT_ULTRA")
+        check(invoke(view, "activeModelLabel").equals("same-model"), "Composer added a provider prefix");
+        check(methods.get("showModelPage").contains("appendModelPicker(card)")
+                        && methods.get("showIntelligencePage").contains("Settings.EFFORT_MAX")
+                        && methods.get("showIntelligencePage").contains("Settings.EFFORT_ULTRA")
                         && methods.get("updateStatus").contains("activeModelLabel()"),
                 "Actual popup/chip did not connect provider choices or dropped effort options");
         pass("providerGroupsKeepSavedModelsAndDistinguishSameNamedModels");
+    }
+    private static void twoPagePopupKeepsHierarchyAndSelection() throws Exception {
+        Object view = configuredView();
+        addProfile(view, "custom-ready", "自定义", "https://custom.test/v1", "custom-secret", "local-model", "local-model");
+        invoke(view, "showModelPopup");
+        Object popup = get(view, "modelPopup"), card = popupCard(view);
+        List<String> labels = new ArrayList<>();
+        for (Object child : children(card)) if (get(child, "text") != null) labels.add((String) get(child, "text"));
+        check(labels.equals(Arrays.asList("智能", "低", "中", "高", "极高", "Max", "Ultra")),
+                "First page contains models, off, speed or permission choices: " + labels);
+        check((Integer) get(row(card, "智能"), "color") == 2, "Intelligence title is not secondary text");
+        for (String label : Arrays.asList("低", "中", "高", "极高", "Max", "Ultra")) {
+            Object effort = row(card, label);
+            check(((Integer) get(effort, "rightIcon") != 0) == label.equals("高"), "Selected check is missing/on wrong effort");
+            check((Integer) get(effort, "leftIcon") == 0, "Selected effort check is on the left");
+        }
+        Object entry = tagged(card, "model-menu-entry"), column = children(entry).get(0);
+        check(children(column).size() == 2 && get(children(column).get(0), "text").equals("模型")
+                        && get(children(column).get(1), "text").equals("same-model")
+                        && (Integer) get(children(column).get(1), "color") == 2,
+                "Model entry lost its separate gray current-model line");
+        invoke(entry, "click");
+        check(get(view, "modelPopup") == popup && (Boolean) get(popup, "showing")
+                        && !(Boolean) get(popup, "dismissed"), "Model navigation created/dismissed the popup");
+        check((Integer) get(row(card, "same-model"), "rightIcon") != 0
+                        && row(card, "自定义") != null && row(card, "local-model") != null,
+                "Model page lost active check or configured custom provider");
+        invoke(tagged(card, "model-menu-back"), "click");
+        check(get(view, "modelPopup") == popup && (Integer) get(row(card, "高"), "rightIcon") != 0,
+                "Back navigation lost popup/selection state");
+        invoke(tagged(card, "model-menu-entry"), "click");
+        invoke(row(card, "local-model"), "click");
+        check((Boolean) get(popup, "dismissed") && invoke(view, "activeModelLabel").equals("local-model"),
+                "Custom model selection did not close or leaked custom prefix into composer");
+        pass("twoPagePopupRetainsChecksBackNavigationAndCustomModels");
+    }
+    private static void effortChangeRetargetsWithoutCancellingAndOffHasNoCheck() throws Exception {
+        Object view = configuredView(); Client client = new Client(); AgentLoop loop = liveLoop(client);
+        set(view, "loop", loop); invoke(view, "showModelPopup");
+        invoke(row(popupCard(view), "极高"), "click");
+        check(get(get(view, "settings"), "effort").equals("xhigh") && (Integer) get(view, "retargets") == 1
+                        && (Integer) get(view, "statusUpdates") == 1 && !(Boolean) get(loop, "cancelled")
+                        && loop.goalActive() && client.calls == 0 && (Integer) get(view, "liveToken") == 0
+                        && get(view, "dialog") == null, "Effort selection restarted/cancelled a running request");
+        check(invoke(view, "effortLabel", "xhigh").equals("极高"), "Composer cannot label xhigh");
+        invoke(view, "showModelPopup");
+        check((Integer) get(row(popupCard(view), "极高"), "rightIcon") != 0, "Reopened popup lost xhigh selection");
+        invoke(view, "showModelPopup");
+        set(get(view, "settings"), "effort", "off"); invoke(view, "showModelPopup");
+        for (Object child : children(popupCard(view))) check((Integer) get(child, "rightIcon") == 0,
+                "Off preference falsely selected one of the six menu efforts");
+        pass("effortSelectionTargetsNextRequestWithoutInterruptingCurrentWork");
+    }
+    private static void popupPagesFitSmallScreensAndScroll() throws Exception {
+        Object view = configuredView(), metrics = get(get(view, "resources"), "metrics");
+        set(metrics, "widthPixels", 220); set(metrics, "heightPixels", 320);
+        for (int i = 0; i < 30; i++) addProfile(view, "provider" + i, "Provider " + i, "https://fixture", "key", "model" + i);
+        invoke(view, "showModelPopup"); Object popup = get(view, "modelPopup"), card = popupCard(view);
+        invoke(tagged(card, "model-menu-entry"), "click");
+        check((Integer) get(popup, "width") <= 204 && (Integer) get(popup, "height") <= 288
+                        && (Integer) get(popup, "x") + (Integer) get(popup, "width") <= 220
+                        && (Integer) get(popup, "y") + (Integer) get(popup, "height") <= 320,
+                "Popup escaped screen bounds");
+        Object scroll = get(popup, "content");
+        check(scroll.getClass().getSimpleName().equals("ScrollView") && (Integer) get(scroll, "scrollY") == 0
+                        && children(card).size() > 50 && (Integer) get(card, "measuredHeight") > (Integer) get(popup, "height"),
+                "Long provider list was clipped without scrolling or navigation retained stale scroll position");
+        pass("bothPopupPagesUseScreenBoundsAndLongModelListScrolls");
     }
     private static void emptyConfigurationRoutesToAiConfiguration() throws Exception {
         Object view = view(), card = create("LinearLayout");
         addProfile(view, "deepseek", "DeepSeek", "https://deepseek.test/v1", "", "same-model", "same-model");
         invoke(view, "appendModelPicker", card);
-        check(children(card).size() == 2, "Unconfigured provider received selectable model rows");
+        check(children(card).size() == 1, "Unconfigured provider received selectable model rows");
         invoke(row(card, "尚未保存模型，前往 AI 配置"), "click");
         check(((Class<?>) get(get(view, "launched"), "target")).getSimpleName().equals("AiConfigActivity")
                         && (Boolean) get(get(view, "modelPopup"), "dismissed"),
@@ -194,16 +269,64 @@ public final class AiModelPickerUiRegressionTest {
                 if (declaration instanceof ClassTree) for (Tree member : ((ClassTree) declaration).getMembers())
                     if (member instanceof MethodTree) methods.put(((MethodTree) member).getName().toString(), member.toString());
         }
-        StringBuilder source = new StringBuilder("import java.util.*;import com.mkei.backcast.agent.*;public class ModelPickerFixture{")
-                .append("static class View{interface OnClickListener{void onClick(View v);}OnClickListener listener;void setOnClickListener(OnClickListener l){listener=l;}void click(){if(listener!=null)listener.onClick(this);}}").append("static class TextView extends View{String text;int background;void setText(String v){text=v;}void setPadding(int a,int b,int c,int d){}void setMinHeight(int n){}void setGravity(int n){}void setBackgroundResource(int n){background=n;}}").append("static class LinearLayout{List<TextView> children=new ArrayList<TextView>();void addView(TextView v,Object p){children.add(v);}}").append("static class PopupWindow{boolean dismissed;void dismiss(){dismissed=true;}}PopupWindow modelPopup=new PopupWindow();")
-                .append("static class R{static class color{static final int text_primary=1,text_secondary=2;}static class drawable{static final int bg_popup_selected=3;}static class string{static final int popup_providers=4,popup_configure_ai=5,popup_models_empty=6,popup_switch_running_title=7,popup_switch_running_body=8,popup_switch_confirm=9;}}static class Gravity{static final int CENTER_VERTICAL=1;}")
-                .append("static class AiConfigActivity{}static class Intent{Class<?> target;Intent(Object c,Class<?> t){target=t;}}Intent launched;void startActivity(Intent i){launched=i;}")
-                .append("long sessionId=7;AgentLoop loop;int liveToken;boolean activityDestroyed,sessionOpening,compactLive;int retargets,statusUpdates,settles;boolean isFinishing(){return false;}int dp(int n){return n;}Object wrapParams(){return null;}String displayModelName(String raw){return raw;}TextView popupText(String t,int n,int c){TextView v=new TextView();v.text=t;return v;}")
-                .append("String getString(int n,Object...args){if(n==4)return \"供应商与模型\";if(n==5)return \"配置供应商与模型\";if(n==6)return \"尚未保存模型，前往 AI 配置\";if(n==8)return \"停止当前轮并切换到 \"+args[0]+\" · \"+args[1];return Integer.toString(n);}")
-                .append("static class Settings{static class AiProfile{final String id,name,baseUrl,apiKey,model;final List<String> modelList;AiProfile(String i,String n,String u,String k,String m,List<String> list){id=i;name=n;baseUrl=u;apiKey=k;model=m;modelList=list;}}List<AiProfile> profiles=new ArrayList<AiProfile>();String active=\"deepseek\";int selections;List<AiProfile> aiProfiles(){return profiles;}String activeProviderId(){return active;}AiProfile activeAiProfile(){for(AiProfile p:profiles)if(p.id.equals(active))return p;throw new AssertionError(active);}String model(){return activeAiProfile().model;}void selectAiModel(String id,String model){for(int n=0;n<profiles.size();n++){AiProfile p=profiles.get(n);if(p.id.equals(id)){profiles.set(n,new AiProfile(p.id,p.name,p.baseUrl,p.apiKey,model,p.modelList));active=id;selections++;return;}}throw new AssertionError(id);}}Settings settings=new Settings();")
-                .append("static class RunHub{ModelPickerFixture owner;static RunHub get(ModelPickerFixture v){RunHub h=new RunHub();h.owner=v;return h;}void retargetIfNeeded(){owner.retargets++;}}void updateStatus(){statusUpdates++;}void hidePending(){}void settleWork(){settles++;}void dropCompactRow(){}void settleCompact(){}void setBusy(boolean busy){}void refreshGoal(){}void cancelApprovals(){}")
-                .append("AlertDialog dialog;static class AlertDialog{String message;android.content.DialogInterface.OnClickListener positive;void confirm(){positive.onClick(null,1);}static class Builder{ModelPickerFixture owner;AlertDialog d=new AlertDialog();Builder(ModelPickerFixture o){owner=o;}Builder setTitle(int n){return this;}Builder setMessage(String s){d.message=s;return this;}Builder setNegativeButton(int n,Object l){return this;}Builder setPositiveButton(int n,android.content.DialogInterface.OnClickListener l){d.positive=l;return this;}void show(){owner.dialog=d;}}}");
-        for (String name : Arrays.asList("appendModelPicker", "savedModels", "addModelOption", "modelSelectionCurrent",
+        StringBuilder source = new StringBuilder("""
+                import java.util.*;import com.mkei.backcast.agent.*;public class ModelPickerFixture{
+                static class View {
+                    static class MeasureSpec {static final int EXACTLY=1,UNSPECIFIED=0;static int makeMeasureSpec(int n,int mode){return n;}}
+                    interface OnClickListener{void onClick(View v);} OnClickListener listener;
+                    String text;Object tag;int background,minHeight,measuredHeight;boolean selected;int leftIcon,rightIcon;Object description;
+                    View(){}View(Object context){}void setOnClickListener(OnClickListener l){listener=l;}void click(){if(listener!=null)listener.onClick(this);}
+                    void setTag(Object t){tag=t;}void setSelected(boolean b){selected=b;}void setPadding(int a,int b,int c,int d){}
+                    void setBackgroundResource(int n){background=n;}void setBackgroundColor(int n){background=n;}
+                    void setMinimumHeight(int n){minHeight=n;}void setContentDescription(Object d){description=d;}
+                    void startAnimation(Object a){}void measure(int width,int height){measuredHeight=Math.max(minHeight,32);}
+                    int getMeasuredHeight(){return measuredHeight;}void getLocationOnScreen(int[] a){a[0]=290;a[1]=720;}
+                }
+                static class ViewGroup extends View{static class LayoutParams{static final int MATCH_PARENT=-1,WRAP_CONTENT=-2;}}
+                static class TextView extends View{int color,maxLines;TextView(){}TextView(Object o){}void setText(String v){text=v;}
+                    void setMinHeight(int n){minHeight=n;}void setGravity(int n){}void setMaxLines(int n){maxLines=n;}void setEllipsize(Object o){}}
+                static class LinearLayout extends ViewGroup{static final int VERTICAL=1,HORIZONTAL=0;int orientation;
+                    List<View> children=new ArrayList<View>();LinearLayout(){}LinearLayout(Object c){}void setOrientation(int n){orientation=n;}
+                    void addView(View v,Object p){children.add(v);}void removeAllViews(){children.clear();}void setGravity(int n){}
+                    @Override void measure(int width,int height){measuredHeight=24;for(View v:children){v.measure(width,height);measuredHeight+=v.getMeasuredHeight();}}
+                    static class LayoutParams extends ViewGroup.LayoutParams{LayoutParams(int w,int h){}LayoutParams(int w,int h,int weight){}void setMargins(int a,int b,int c,int d){}}
+                }
+                static class ScrollView extends View{View content;int scrollY=5;boolean fillViewport;ScrollView(Object c){}void addView(View v){content=v;}
+                    void setFillViewport(boolean b){fillViewport=b;}void scrollTo(int x,int y){scrollY=y;}}
+                static class PopupWindow{boolean dismissed,showing;View content;int width,height,x,y,updates;
+                    PopupWindow(){}PopupWindow(View c,int w,int h,boolean focus){content=c;width=w;height=h;}
+                    void dismiss(){dismissed=true;showing=false;}boolean isShowing(){return showing;}View getContentView(){return content;}
+                    void setBackgroundDrawable(Object d){}void setOutsideTouchable(boolean b){}void setWidth(int n){width=n;}void setHeight(int n){height=n;}
+                    void showAtLocation(View a,int gravity,int xx,int yy){showing=true;x=xx;y=yy;}void update(int xx,int yy,int w,int h){x=xx;y=yy;width=w;height=h;updates++;}}
+                PopupWindow modelPopup=new PopupWindow();View modelChipAnchor=new View(),modelChip=new View();
+                static class Metrics{int widthPixels=320,heightPixels=760;}static class Resources{Metrics metrics=new Metrics();Metrics getDisplayMetrics(){return metrics;}}
+                Resources resources=new Resources();Resources getResources(){return resources;}
+                static class R{static class color{static final int text_primary=1,text_secondary=2;}
+                    static class drawable{static final int bg_popup_selected=3,bg_popup=10,ic_ds_checkmark_lg_regular_24=11;}
+                    static class anim{static final int popup_in=12;}
+                    static class string{static final int popup_providers=4,popup_configure_ai=5,popup_models_empty=6,popup_switch_running_title=7,popup_switch_running_body=8,popup_switch_confirm=9,popup_intelligence=13,popup_model=14,popup_model_back=15;}}
+                static class Gravity{static final int CENTER_VERTICAL=1,NO_GRAVITY=0;}static class Color{static final int TRANSPARENT=0;}
+                static class ColorDrawable{ColorDrawable(int c){}}static class AnimationUtils{static Object loadAnimation(Object c,int n){return null;}}
+                static class Icons{static final int BACK=20;static void left(View v,int res,int color,int size){v.leftIcon=res;}static void right(View v,int res,int color,int size){v.rightIcon=res;}}
+                static class AiConfigActivity{}static class Intent{Class<?> target;Intent(Object c,Class<?> t){target=t;}}Intent launched;void startActivity(Intent i){launched=i;}
+                long sessionId=7;AgentLoop loop;int liveToken;boolean activityDestroyed,sessionOpening,compactLive;int retargets,statusUpdates,settles;
+                boolean isFinishing(){return false;}int dp(int n){return n;}Object wrapParams(){return null;}String displayModelName(String raw){return raw;}
+                TextView popupText(String t,int n,int c){TextView v=new TextView();v.text=t;v.color=c;return v;}
+                String getString(int n,Object...args){if(n==4)return "供应商与模型";if(n==5)return "配置供应商与模型";if(n==6)return "尚未保存模型，前往 AI 配置";
+                    if(n==8)return "停止当前轮并切换到 "+args[0]+" · "+args[1];if(n==13)return "智能";if(n==14)return "模型";if(n==15)return "返回智能菜单";return Integer.toString(n);}
+                static class Settings{static final String EFFORT_OFF="off",EFFORT_LOW="low",EFFORT_MEDIUM="medium",EFFORT_HIGH="high",EFFORT_XHIGH="xhigh",EFFORT_MAX="max",EFFORT_ULTRA="ultra";
+                    static class AiProfile{final String id,name,baseUrl,apiKey,model;final List<String> modelList;AiProfile(String i,String n,String u,String k,String m,List<String> list){id=i;name=n;baseUrl=u;apiKey=k;model=m;modelList=list;}}
+                    List<AiProfile> profiles=new ArrayList<AiProfile>();String active="deepseek",effort="high";int selections;
+                    String effectiveReasoningEffort(){return effort;}void setReasoningEffort(String e){effort=e;}
+                    List<AiProfile> aiProfiles(){return profiles;}String activeProviderId(){return active;}AiProfile activeAiProfile(){for(AiProfile p:profiles)if(p.id.equals(active))return p;throw new AssertionError(active);}
+                    String model(){return activeAiProfile().model;}void selectAiModel(String id,String model){for(int n=0;n<profiles.size();n++){AiProfile p=profiles.get(n);if(p.id.equals(id)){profiles.set(n,new AiProfile(p.id,p.name,p.baseUrl,p.apiKey,model,p.modelList));active=id;selections++;return;}}throw new AssertionError(id);}}
+                Settings settings=new Settings();static class RunHub{ModelPickerFixture owner;static RunHub get(ModelPickerFixture v){RunHub h=new RunHub();h.owner=v;return h;}void retargetIfNeeded(){owner.retargets++;}}
+                void updateStatus(){statusUpdates++;}void hidePending(){}void settleWork(){settles++;}void dropCompactRow(){}void settleCompact(){}void setBusy(boolean busy){}void refreshGoal(){}void cancelApprovals(){}
+                AlertDialog dialog;static class AlertDialog{String message;android.content.DialogInterface.OnClickListener positive;void confirm(){positive.onClick(null,1);}
+                    static class Builder{ModelPickerFixture owner;AlertDialog d=new AlertDialog();Builder(ModelPickerFixture o){owner=o;}Builder setTitle(int n){return this;}Builder setMessage(String s){d.message=s;return this;}
+                    Builder setNegativeButton(int n,Object l){return this;}Builder setPositiveButton(int n,android.content.DialogInterface.OnClickListener l){d.positive=l;return this;}void show(){owner.dialog=d;}}}
+                """);
+        for (String name : Arrays.asList("showModelPopup", "showIntelligencePage", "showModelPage", "layoutModelPopup", "addEffortOption", "effortLabel", "appendModelPicker", "savedModels", "addModelOption", "modelSelectionCurrent",
                 "modelChoice", "chooseAiModel", "applyAiModelSelection", "cancelForModelSwitch", "activeModelLabel")) {
             check(methods.containsKey(name), "Missing actual picker method: " + name);
             source.append(methods.get(name).replace("MainActivity.this", "ModelPickerFixture.this"));
@@ -211,6 +334,7 @@ public final class AiModelPickerUiRegressionTest {
         source.append('}');
         List<JavaFileObject> sources = Arrays.asList(new Source("ModelPickerFixture", source.toString()),
                 new Source("android/R", "package android;public final class R{public static class string{public static final int cancel=0;}}"),
+                new Source("android/text/TextUtils", "package android.text;public final class TextUtils{public enum TruncateAt{END}}"),
                 new Source("android/content/DialogInterface", "package android.content;public interface DialogInterface{interface OnClickListener{void onClick(DialogInterface d,int n);}}"));
         try (StandardJavaFileManager files = compiler.getStandardFileManager(null, null, null)) {
             check(compiler.getTask(null, files, null, Arrays.asList("-proc:none", "-encoding", "UTF-8", "-source", "8",
@@ -225,6 +349,9 @@ public final class AiModelPickerUiRegressionTest {
             try (URLClassLoader loader = new URLClassLoader(new URL[]{output.toUri().toURL()}, AiModelPickerUiRegressionTest.class.getClassLoader())) {
                 fixture = loader.loadClass("ModelPickerFixture");
                 groupedSavedChoicesDoNotLeakCredentials();
+                twoPagePopupKeepsHierarchyAndSelection();
+                effortChangeRetargetsWithoutCancellingAndOffHasNoCheck();
+                popupPagesFitSmallScreensAndScroll();
                 emptyConfigurationRoutesToAiConfiguration();
                 idleSelectionIsAtomicAndRejectsStalePopupRows();
                 runningSwitchRequiresConfirmationAndPreservesCompletedTools();

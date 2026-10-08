@@ -19,7 +19,6 @@
     <string name="more_new_chat">新建会话</string>
     <string name="more_work_dir">工作文件夹</string>
     <string name="dir_add">添加工作文件夹</string>
-    <string name="more_access">工具权限</string>
     <string name="more_settings">设置</string>
     <string name="earlier_messages">前 %1$d 条消息  ›</string>
     <string name="history_loading">加载中...</string>
@@ -29,7 +28,8 @@
     <string name="drawer_empty">还没有对话。</string>
     <string name="drawer_delete">删除这个会话？</string>
     <string name="popup_model">模型</string>
-    <string name="popup_reasoning">推理强度</string>
+    <string name="popup_intelligence">智能</string>
+    <string name="popup_model_back">返回智能菜单</string>
     <string name="sub_agents_title">子任务</string>
     <string name="sub_agents_queued">排队中</string>
     <string name="sub_agents_running">运行中</string>
@@ -154,7 +154,6 @@
     <string name="action_add_saved_model">添加到常用模型</string>
     <string name="action_remove_saved_model">移除</string>
     <string name="toast_need_model">请填写有效的模型名称。</string>
-    <string name="popup_providers">供应商与模型</string>
     <string name="popup_configure_ai">配置供应商与模型</string>
     <string name="popup_models_empty">尚未保存模型，前往 AI 配置</string>
     <string name="popup_switch_running_title">切换供应商与模型</string>
@@ -179,13 +178,14 @@
         <item>同时最多运行 4 个子 agent，其余任务排队</item>
     </string-array>
     <string-array name="reasoning_effort_labels">
-        <item>关闭 (off)</item><item>低 (low)</item><item>中 (medium)</item><item>高 (high)</item><item>最大 (max)</item><item>Ultra (ultra)</item>
+        <item>关闭 (off)</item><item>低 (low)</item><item>中 (medium)</item><item>高 (high)</item><item>极高 (xhigh)</item><item>Max (max)</item><item>Ultra (ultra)</item>
     </string-array>
     <string-array name="reasoning_effort_descriptions">
         <item>不发送 reasoning_effort 参数，适用于不支持此参数的接口</item>
         <item>发送 low，优先较短的思考时间</item>
         <item>发送 medium，兼顾思考时间和复杂度</item>
         <item>发送 high，增加复杂任务的思考投入</item>
+        <item>发送 xhigh，进一步增加复杂任务的思考投入；仅在你明确要求时派发子任务</item>
         <item>使用 max 思考强度；仅在你明确要求时派发子任务</item>
         <item>使用 ultra 思考强度，主动并行派发独立任务；主会话核验后汇总</item>
     </string-array>

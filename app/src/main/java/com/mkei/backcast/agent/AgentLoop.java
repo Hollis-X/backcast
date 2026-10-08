@@ -108,16 +108,28 @@ public class AgentLoop {
         void recordDiagnostic(long sessionId, String source, String summary, String detail);
     }
 
-    /** 把「还在跑」和目标写进库。进程被杀掉之后靠这个接上。 */
+    /** Persists accumulated work time; process downtime never becomes work. */
     public interface Durability {
-        /**
-         * @param turnAt 这一轮起点的开机时间，0 表示没有
-         * @param turnWall 这一轮起点的墙钟，用来确认还是同一次开机
-         * @param seenAt 第一次有内容的开机时间，0 表示还没有
-         */
-        void save(long sessionId, boolean running, String goal, String status, long elapsedMs,
-                long turnAt, long turnWall, long seenAt, long tokensUsed, long tokenBudget,
+        void save(long sessionId, boolean running, String goal, String status, long goalElapsedMs,
+                long turnElapsedMs, Long turnThinkMs, long tokensUsed, long tokenBudget,
                 boolean budgetWrapFinished);
+
+        /** Time-only checkpoint: implementations must not restart background services. */
+        default void saveClock(long sessionId, long goalElapsedMs, long turnElapsedMs,
+                Long turnThinkMs) { }
+    }
+
+    /** An atomic clock snapshot, retained after the owning turn stops. */
+    public static final class TurnClock {
+        public final long elapsedMs;
+        public final long thinkMs;
+        public final boolean firstSeen;
+
+        public TurnClock(long elapsedMs, long thinkMs, boolean firstSeen) {
+            this.elapsedMs = elapsedMs;
+            this.thinkMs = thinkMs;
+            this.firstSeen = firstSeen;
+        }
     }
 
     public interface UsageObserver {
@@ -174,6 +186,8 @@ public class AgentLoop {
     private static final ThreadLocal<AgentLoop> UI_SOURCE = new ThreadLocal<AgentLoop>();
     private static final ThreadLocal<AgentLoop> APPROVAL_SOURCE = new ThreadLocal<AgentLoop>();
     private final Object lock = new Object();
+    private final Object persistenceLock = new Object();
+    private Thread clockCheckpoint;
 
     private volatile boolean cancelled;
     /** 切换会话或新开会话时递增。进行中的循环拿旧值，写不进新历史。 */
@@ -182,6 +196,8 @@ public class AgentLoop {
     private volatile int runToken;
     /** 这一轮界面回调的记号。停止后作废，旧回调不再画到界面上。 */
     private volatile int acceptedUi = -1;
+    /** Reserved UI tokens survive Activity recreation and pre-worker submissions. */
+    private int reservedUiToken;
     /** 界面这一轮的记号，只在跑循环的那条线程上读。 */
     private final ThreadLocal<Integer> callToken = new ThreadLocal<Integer>();
     private final ThreadLocal<ToolRegistry> turnTools = new ThreadLocal<ToolRegistry>();
@@ -251,17 +267,12 @@ public class AgentLoop {
     /** 上一轮还没退出时又被要求续跑。退出时接着跑，避免界面停在转圈、目标却没人接。 */
     private boolean resumeAfter;
     private int resumeUi;
-    /**
-     * 这一轮真正开始的开机时间。
-     * 重进、退后台、断线重试都不改成「刚刚」，界面和入库读的是同一个起点。
-     */
-    private volatile long turnStartedAt;
-    private volatile long firstEventAt;
-    /** 起点对应的墙钟。开机时间在重启后会归零，对不上就不用。 */
-    private volatile long turnWall;
-    /** 同一轮未完成时，resume 接着这个起点，不重新从现在计。 */
-    private static final long TURN_CLOCK_SKEW_MS = 60000L;
-    private static final long TURN_CLOCK_LIMIT_MS = 7L * 24L * 60L * 60L * 1000L;
+    /** Saved work plus the current monotonic segment; no persisted uptime origins. */
+    private boolean turnClockInitialized;
+    private long turnAccumMs;
+    private long turnSegmentStart = -1L;
+    private Long turnThinkMs;
+    private static final long CLOCK_CHECKPOINT_MS = 2000L;
 
     public AgentLoop(LlmClient client, ToolRegistry registry, Listener listener) {
         this.client = client;
@@ -558,7 +569,7 @@ public class AgentLoop {
 
     private long elapsedLocked() {
         long extra = 0;
-        if (goalSegmentStart != 0 && Goal.ACTIVE.equals(goalStatus)) {
+        if (goalSegmentStart != 0) {
             extra = SystemClock.elapsedRealtime() - goalSegmentStart;
         }
         long total = goalAccumMs + extra;
@@ -568,6 +579,14 @@ public class AgentLoop {
     /** 界面回调还算不算这一轮。停止或换代之后返回假。 */
     public boolean accepts(int gen, int uiToken) {
         return gen == generation && uiToken == acceptedUi && !cancelled;
+    }
+
+    /** Reserve a new UI owner without replacing the currently displayed turn. */
+    public int nextUiToken(int previous) {
+        synchronized (lock) {
+            reservedUiToken = Math.max(previous, Math.max(acceptedUi, reservedUiToken)) + 1;
+            return reservedUiToken;
+        }
     }
 
     /**
@@ -587,7 +606,7 @@ public class AgentLoop {
             goalTokenBudget = tokenBudget < 0 ? 0 : tokenBudget;
             this.budgetWrapFinished = budgetWrapFinished;
             restoreBudgetWrapUpLocked();
-            goalSegmentStart = Goal.ACTIVE.equals(goalStatus) ? SystemClock.elapsedRealtime() : 0;
+            goalSegmentStart = 0;
         }
     }
 
@@ -608,7 +627,7 @@ public class AgentLoop {
             goalText = next;
             goalStatus = Goal.ACTIVE;
             goalAccumMs = 0;
-            goalSegmentStart = SystemClock.elapsedRealtime();
+            goalSegmentStart = busy && !cancelled ? SystemClock.elapsedRealtime() : 0;
             goalTokensUsed = 0;
             goalTokenBudget = 0;
             budgetWrappedUp = false;
@@ -668,9 +687,7 @@ public class AgentLoop {
             if (goalTokenBudget > 0 && goalTokensUsed >= goalTokenBudget) {
                 goalTokenBudget = goalTokensUsed + goalTokenBudget;
             }
-            if (goalSegmentStart == 0) {
-                goalSegmentStart = SystemClock.elapsedRealtime();
-            }
+            if (busy && !cancelled) startGoalClockLocked();
         }
         saveRun(busy);
     }
@@ -787,33 +804,98 @@ public class AgentLoop {
     }
 
     private void saveRun(boolean running) {
-        Durability d;
-        long sid;
-        String text;
-        String status;
-        long elapsed;
-        long used;
-        long budget;
-        boolean wrapFinished;
+        saveRun(running, -1, -1);
+    }
+
+    private void saveRun(boolean running, int token, int gen) {
+        // Snapshot after acquiring the persistence lane so an older write cannot
+        // overtake the final stopped record. Storage runs outside the state lock.
+        synchronized (persistenceLock) {
+            Durability d;
+            long sid, goalElapsed, turnElapsed, used, budget;
+            Long think;
+            String text, status;
+            boolean wrapFinished;
+            synchronized (lock) {
+                if (token >= 0 && (token != busyToken || gen != generation)) return;
+                Integer owner = callToken.get();
+                if (owner != null && owner.intValue() != acceptedUi) return;
+                d = durability;
+                sid = sessionKey;
+                text = goalText == null ? "" : goalText;
+                status = goalStatus == null ? "" : goalStatus;
+                goalElapsed = elapsedLocked();
+                turnElapsed = turnElapsedLocked();
+                think = turnThinkMs;
+                used = goalTokensUsed;
+                budget = goalTokenBudget;
+                wrapFinished = Boolean.TRUE.equals(budgetWrapFinished);
+                running = running && busy && !cancelled;
+            }
+            if (d != null && sid >= 0) {
+                d.save(sid, running, text, status, goalElapsed, turnElapsed, think,
+                        used, budget, wrapFinished);
+            }
+        }
+    }
+
+    private void startGoalClockLocked() {
+        if (goalSegmentStart == 0 && (Goal.ACTIVE.equals(goalStatus)
+                || goalAccounting && Goal.BUDGET_LIMITED.equals(goalStatus))
+                && goalText != null && goalText.length() > 0) {
+            goalSegmentStart = SystemClock.elapsedRealtime();
+        }
+    }
+
+    private void startClockCheckpoint(final int token, final int gen) {
+        final Thread checkpoint = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    while (true) {
+                        Thread.sleep(CLOCK_CHECKPOINT_MS);
+                        if (!checkpointClock(token, gen)) return;
+                    }
+                } catch (InterruptedException stopped) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }, "agent-clock-checkpoint");
+        checkpoint.setDaemon(true);
         synchronized (lock) {
-            d = durability;
-            sid = sessionKey;
-            text = goalText == null ? "" : goalText;
-            status = goalStatus == null ? "" : goalStatus;
-            elapsed = elapsedLocked();
-            used = goalTokensUsed;
-            budget = goalTokenBudget;
-            wrapFinished = Boolean.TRUE.equals(budgetWrapFinished);
+            if (stale(token, gen) || !busy || token != busyToken) return;
+            if (clockCheckpoint != null) clockCheckpoint.interrupt();
+            clockCheckpoint = checkpoint;
         }
-        if (d == null || sid < 0) {
-            return;
+        checkpoint.start();
+    }
+
+    private boolean checkpointClock(int token, int gen) {
+        synchronized (persistenceLock) {
+            Durability d;
+            long sid, goalElapsed, turnElapsed;
+            Long think;
+            synchronized (lock) {
+                if (stale(token, gen) || !busy || token != busyToken) return false;
+                d = durability;
+                sid = sessionKey;
+                goalElapsed = elapsedLocked();
+                turnElapsed = turnElapsedLocked();
+                think = turnThinkMs;
+            }
+            if (d != null && sid >= 0) d.saveClock(sid, goalElapsed, turnElapsed, think);
+            return true;
         }
-        d.save(sid, running, text, status, elapsed, turnStartedAt, turnWall, firstEventAt,
-                used, budget, wrapFinished);
+    }
+
+    private void stopClockCheckpointLocked() {
+        if (clockCheckpoint != null) {
+            clockCheckpoint.interrupt();
+            clockCheckpoint = null;
+        }
     }
 
     /** 这一轮真正结束时清掉「还在跑」。更新的一轮已经占上时不能清。 */
-    private void finishBusy(int token) {
+    private void finishBusy(int token, int gen) {
         boolean idleActive = false;
         int follow = -1;
         long sid = -1;
@@ -822,6 +904,9 @@ public class AgentLoop {
                 return;
             }
             busy = false;
+            pauseTurnClockLocked();
+            freezeClock();
+            stopClockCheckpointLocked();
             if (resumeAfter && Goal.ACTIVE.equals(goalStatus) && sessionKey >= 0) {
                 follow = resumeUi;
                 sid = sessionKey;
@@ -836,7 +921,7 @@ public class AgentLoop {
                 still = busy;
             }
             if (!still) {
-                saveRun(false);
+                saveRun(false, token, gen);
             }
             return;
         }
@@ -848,7 +933,7 @@ public class AgentLoop {
         if (idleActive) {
             freezeClock();
         }
-        saveRun(false);
+        saveRun(false, token, gen);
     }
 
     /** 收尾。已经排了续跑时不先通知界面结束，否则停止键会闪一下又卡住。 */
@@ -875,10 +960,16 @@ public class AgentLoop {
         if (token != 0 && !stale(token, gen) && !handoff
                 && children != null && children.hasPendingWork()) children.cancelAll();
         if (token != 0 && !stale(token, gen) && !handoff) {
+            synchronized (lock) {
+                if (token == busyToken) {
+                    pauseTurnClockLocked();
+                    freezeClock();
+                }
+            }
             listener.onFinish(gen);
         }
         if (token != 0) {
-            finishBusy(token);
+            finishBusy(token, gen);
         }
     }
 
@@ -1054,7 +1145,6 @@ public class AgentLoop {
             }
         }
         if (limited) {
-            freezeClock();
             saveRun(busy);
             cancelDelegatedWork();
         }
@@ -1089,6 +1179,12 @@ public class AgentLoop {
         synchronized (lock) {
             generation++;
             cancelled = true;
+            pauseTurnClockLocked();
+            freezeClock();
+            stopClockCheckpointLocked();
+            turnClockInitialized = false;
+            turnAccumMs = 0;
+            turnThinkMs = null;
             history.clear();
             history.add(Message.system(prompt));
             resetContextUsageLocked();
@@ -1100,6 +1196,12 @@ public class AgentLoop {
         synchronized (lock) {
             generation++;
             cancelled = true;
+            pauseTurnClockLocked();
+            freezeClock();
+            stopClockCheckpointLocked();
+            turnClockInitialized = false;
+            turnAccumMs = 0;
+            turnThinkMs = null;
             history.clear();
             history.add(Message.system(prompt));
             resetContextUsageLocked();
@@ -1150,9 +1252,14 @@ public class AgentLoop {
         LlmClient current;
         ToolRegistry tools;
         Tool active;
+        int ownerToken, gen;
         synchronized (lock) {
+            ownerToken = busyToken;
+            gen = generation;
             cancelled = true;
-            acceptedUi = -1;
+            pauseTurnClockLocked();
+            freezeClock();
+            stopClockCheckpointLocked();
             runToken++;
             resumeAfter = false;
             current = requestClient;
@@ -1168,6 +1275,7 @@ public class AgentLoop {
         if (active != null) active.abort();
         SubAgentManager children = subAgents;
         if (children != null) children.cancelAll();
+        saveRun(false, ownerToken, gen);
     }
 
     private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, LlmClient.Sink sink,
@@ -1248,7 +1356,14 @@ public class AgentLoop {
         } catch (RuntimeException unavailable) { }
     }
 
-    private void reportException(int gen, Exception error) {
+    private void reportException(int token, int gen, Exception error) {
+        synchronized (lock) {
+            if (token != 0 && !stale(token, gen) && token == busyToken) {
+                pauseTurnClockLocked();
+                freezeClock();
+                stopClockCheckpointLocked();
+            }
+        }
         JSONObject evidence = Diagnostics.failure(error);
         try { evidence.put("error", error.getMessage()); } catch (Exception ignored) { }
         recordError(evidence);
@@ -1296,6 +1411,7 @@ public class AgentLoop {
                 goalAccounting = goalActive() || budgetPromptDue();
                 resumeAfter = false;
                 armTurnClock();
+                startGoalClockLocked();
                 user.workDir = workspace;
                 if (user.delegatedRequest == null) {
                     String text = user.content == null ? "" : user.content.trim();
@@ -1310,13 +1426,14 @@ public class AgentLoop {
             }
             beginTemporaryTurn();
             record(sessionId, user);
-            saveRun(true);
+            saveRun(true, token, gen);
+            startClockCheckpoint(token, gen);
             SubAgentManager children = subAgents;
             if (children != null) children.resumePending();
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
             if (!stale(token, gen)) {
-                reportException(gen, e);
+                reportException(token, gen, e);
             }
         } finally {
             endTurn(token, gen, sessionId);
@@ -1356,9 +1473,10 @@ public class AgentLoop {
                     pinTurnToolsLocked(token);
                     goalAccounting = goalActive() || budgetPromptDue();
                     resumeAfter = false;
-                    if (Goal.ACTIVE.equals(goalStatus) && goalSegmentStart == 0
-                            && goalText != null && goalText.length() > 0) {
-                        goalSegmentStart = SystemClock.elapsedRealtime();
+                    startGoalClockLocked();
+                    if (shouldContinue()) {
+                        if (!keepTurnClock()) armTurnClock();
+                        else startTurnClockLocked();
                     }
                 }
             }
@@ -1371,11 +1489,8 @@ public class AgentLoop {
             }
             beginTemporaryTurn();
             repairMissingTools(sessionId);
-            // 没答完就接着原来的起点。从「刚刚」重计会把已经等过的时间裁掉。
-            if (shouldContinue() && !keepTurnClock()) {
-                armTurnClock();
-            }
-            saveRun(true);
+            saveRun(true, token, gen);
+            startClockCheckpoint(token, gen);
             if (!shouldContinue()) {
                 return;
             }
@@ -1384,7 +1499,7 @@ public class AgentLoop {
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
             if (token != 0 && !stale(token, gen)) {
-                reportException(gen, e);
+                reportException(token, gen, e);
             }
         } finally {
             endTurn(token, gen, sessionId);
@@ -1491,9 +1606,13 @@ public class AgentLoop {
                 pinTurnToolsLocked(token);
                 goalAccounting = goalActive() || budgetPromptDue();
                 resumeAfter = false;
+                if (!keepTurnClock()) armTurnClock();
+                else startTurnClockLocked();
+                startGoalClockLocked();
             }
             beginTemporaryTurn();
-            saveRun(true);
+            saveRun(true, token, gen);
+            startClockCheckpoint(token, gen);
             if (refuseDisclosure(sessionId, gen, token)) {
                 return;
             }
@@ -1502,7 +1621,7 @@ public class AgentLoop {
             }
         } catch (Exception e) {
             if (token != 0 && !stale(token, gen)) {
-                reportException(gen, e);
+                reportException(token, gen, e);
             }
         } finally {
             endTurn(token, gen, sessionId);
@@ -1684,6 +1803,7 @@ public class AgentLoop {
         if (goalActive()) {
             return;
         }
+        synchronized (lock) { pauseTurnClockLocked(); }
         listener.onError(gen, reason);
         synchronized (lock) {
             resumeAfter = false;
@@ -1698,13 +1818,15 @@ public class AgentLoop {
      * 连续空续跑不走这里，那种情况标成 blocked。
      */
     private void stopForNoProgress(String reason, long sessionId, int gen, int token) {
-        listener.onError(gen, reason);
         synchronized (lock) {
-            if (gen == generation && token == runToken) {
-                resumeAfter = false;
-            }
+            if (stale(token, gen)) return;
+            resumeAfter = false;
+            pauseTurnClockLocked();
+            freezeClock();
+            stopClockCheckpointLocked();
         }
-        saveRun(false);
+        listener.onError(gen, reason);
+        saveRun(false, token, gen);
     }
 
     private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
@@ -1712,6 +1834,9 @@ public class AgentLoop {
             if (stale(token, gen)) return;
             // A settings/goal handoff queued during the failed request must not restart it.
             resumeAfter = false;
+            pauseTurnClockLocked();
+            freezeClock();
+            stopClockCheckpointLocked();
         }
         synchronized (uiLock) {
             // Failed partial text/arguments are not committed history. A later
@@ -1798,10 +1923,8 @@ public class AgentLoop {
             if (!keepTurnClock()) {
                 armTurnClock();
             }
-            if (goalActive()) {
-                closeGoal("blocked", PromptGuard.REFUSAL);
-            }
         }
+        if (goalActive()) closeGoal("blocked", PromptGuard.REFUSAL);
         listener.onRequestStart(gen);
         refused = true;
         if (stale(token, gen)) {
@@ -2349,119 +2472,94 @@ public class AgentLoop {
 
     private void noteTurnEvent(int token, int gen) {
         synchronized (lock) {
-            if (stale(token, gen) || firstEventAt != 0) {
-                return;
-            }
-            firstEventAt = SystemClock.elapsedRealtime();
+            if (stale(token, gen) || !turnClockInitialized || turnThinkMs != null) return;
+            turnThinkMs = Long.valueOf(turnElapsedLocked());
         }
-        saveRun(true);
+        saveRun(true, token, gen);
     }
 
-    /** 新的一轮从现在起算。同一轮里的重试不能走这里。 */
+    /** A fresh explicit user submission gets its own ledger. */
     private void armTurnClock() {
-        turnStartedAt = SystemClock.elapsedRealtime();
-        firstEventAt = 0;
-        turnWall = System.currentTimeMillis();
+        synchronized (lock) {
+            turnClockInitialized = true;
+            turnAccumMs = 0;
+            turnThinkMs = null;
+            turnSegmentStart = SystemClock.elapsedRealtime();
+        }
     }
 
-    /**
-     * 这一轮还没答完，并且起点确实是这一次开机记下的。
-     * 重进或进程被拉起后续跑时接着它，不改成刚刚。
-     */
+    private void startTurnClockLocked() {
+        if (turnClockInitialized && turnSegmentStart < 0) {
+            turnSegmentStart = SystemClock.elapsedRealtime();
+        }
+    }
+
+    private long turnElapsedLocked() {
+        long extra = turnSegmentStart < 0 ? 0
+                : Math.max(0L, SystemClock.elapsedRealtime() - turnSegmentStart);
+        return Math.max(0L, turnAccumMs + extra);
+    }
+
+    private void pauseTurnClockLocked() {
+        if (turnSegmentStart >= 0) {
+            turnAccumMs = turnElapsedLocked();
+            turnSegmentStart = -1L;
+        }
+    }
+
     private boolean keepTurnClock() {
-        return turnStartedAt > 0 && turnWall > 0
-                && sameBoot(turnStartedAt, turnWall) && turnOpen();
+        synchronized (lock) { return turnClockInitialized && shouldContinue(); }
     }
 
-    /** 这一轮还没有最终答复。已经答完的不能把旧起点套到下一轮。 */
-    private boolean turnOpen() {
-        Message last = lastMeaningful();
-        if (last == null) {
-            return false;
-        }
-        if (Compactor.isSummary(last)) return last.resumeAfterCompaction;
-        if (Message.TOOL.equals(last.role) || Message.USER.equals(last.role)) {
-            return true;
-        }
-        return Message.ASSISTANT.equals(last.role)
-                && last.toolCalls != null
-                && last.toolCalls.length() > 0;
-    }
-
-    /** 墙钟和开机时间对得上，才说明起点属于这一次开机。 */
-    private static boolean sameBoot(long elapsedAt, long wallAt) {
-        if (elapsedAt <= 0 || wallAt <= 0) {
-            return false;
-        }
-        long byElapsed = SystemClock.elapsedRealtime() - elapsedAt;
-        long byWall = System.currentTimeMillis() - wallAt;
-        if (byElapsed < 0 || byWall < 0 || byWall > TURN_CLOCK_LIMIT_MS) {
-            return false;
-        }
-        long skew = byWall - byElapsed;
-        if (skew < 0) {
-            skew = -skew;
-        }
-        return skew < TURN_CLOCK_SKEW_MS;
-    }
-
-    /**
-     * 进程被拉起后还原这一轮的起点。
-     * 只有还没答完、并且墙钟对得上时才用，否则从现在起算。
-     */
-    public void restoreTurnClock(long startedAt, long wallAt, long seenAt) {
+    /** Load saved work only. Starting a worker arms a new monotonic segment. */
+    public void restoreTurnClock(Long elapsedMs, Long thinkMs) {
         synchronized (lock) {
-            if (!turnOpen() || !sameBoot(startedAt, wallAt)) {
-                return;
+            if (!shouldContinue()) return;
+            if (elapsedMs == null) {
+                // Legacy records have no accumulated fields. Recover only saved
+                // assistant work within this unfinished request, never its uptime.
+                elapsedMs = Long.valueOf(0L);
+                thinkMs = null;
+                for (int i = history.size() - 1; i >= 0; i--) {
+                    Message message = history.get(i);
+                    if (Message.USER.equals(message.role)) break;
+                    if (Message.ASSISTANT.equals(message.role) && message.elapsedMs > 0) {
+                        elapsedMs = Long.valueOf(message.elapsedMs);
+                        if (message.thinkMs > 0) thinkMs = Long.valueOf(message.thinkMs);
+                        break;
+                    }
+                }
             }
-            turnStartedAt = startedAt;
-            turnWall = wallAt;
-            if (seenAt > startedAt && seenAt <= SystemClock.elapsedRealtime()) {
-                firstEventAt = seenAt;
-            } else {
-                firstEventAt = 0;
-            }
+            turnClockInitialized = true;
+            turnAccumMs = Math.max(0L, elapsedMs.longValue());
+            turnSegmentStart = -1L;
+            turnThinkMs = thinkMs == null ? null
+                    : Long.valueOf(Math.min(turnAccumMs, Math.max(0L, thinkMs.longValue())));
         }
     }
 
-    /** Running clocks are published atomically with their owning UI token. */
-    public long activeTurnStart() {
+    public TurnClock turnClock() {
+        synchronized (lock) { return turnClockLocked(); }
+    }
+
+    public TurnClock turnClock(int gen, int uiToken) {
         synchronized (lock) {
-            return busy && !cancelled && keepTurnClock() ? turnStartedAt : 0L;
+            return gen == generation && uiToken == acceptedUi ? turnClockLocked() : null;
         }
     }
 
-    public long activeTurnStart(int gen, int uiToken) {
-        synchronized (lock) {
-            return accepts(gen, uiToken) ? activeTurnStart() : 0L;
-        }
+    private TurnClock turnClockLocked() {
+        if (!turnClockInitialized) return null;
+        return new TurnClock(turnElapsedLocked(), turnThinkMs == null ? 0L : turnThinkMs.longValue(),
+                turnThinkMs != null);
     }
 
-    /** 还没答完时，第一次有内容的开机时间。没有就是 0。 */
-    public long activeFirstEvent() {
-        synchronized (lock) {
-            long start = activeTurnStart();
-            return start > 0 && firstEventAt > start ? firstEventAt : 0L;
-        }
-    }
-
-    public long activeFirstEvent(int gen, int uiToken) {
-        synchronized (lock) {
-            return accepts(gen, uiToken) ? activeFirstEvent() : 0L;
-        }
-    }
-
-    /** 秒数跟着这条消息一起入库。界面收尾若没跟上，重开也不会丢。 */
+    /** Saved assistant timing uses the same ledger as the live display. */
     private void stampTurnTime(Message message) {
-        if (message == null || turnStartedAt <= 0) {
-            return;
-        }
-        long now = SystemClock.elapsedRealtime();
-        long elapsed = now - turnStartedAt;
-        message.elapsedMs = elapsed < 1 ? 1 : elapsed;
-        if (firstEventAt > turnStartedAt) {
-            long think = firstEventAt - turnStartedAt;
-            message.thinkMs = think < 1 ? 1 : think;
+        synchronized (lock) {
+            if (message == null || !turnClockInitialized) return;
+            message.elapsedMs = Math.max(1L, turnElapsedLocked());
+            if (turnThinkMs != null) message.thinkMs = Math.max(1L, turnThinkMs.longValue());
         }
     }
 
@@ -2580,8 +2678,8 @@ public class AgentLoop {
             if (stale(token, gen)) {
                 return;
             }
-            // Publish a goal continuation's clock with its first message too.
-            if (newTurn) armTurnClock();
+            // Automatic goal continuation belongs to the same user request ledger.
+            // Only an explicit new user submission resets elapsed and first output.
             history.add(steer);
             if (retargeted) {
                 // 新目标只说一次，之后仍按普通续跑走。
@@ -2601,7 +2699,7 @@ public class AgentLoop {
             }
             return;
         }
-        saveRun(true);
+        saveRun(true, token, gen);
         if (newTurn) listener.onSteer(gen);
     }
 

@@ -21,7 +21,7 @@ public class UserPreferencesActivity extends AppCompatActivity {
     private static final String[] REASONING_SUMMARY_VALUES = { "auto", "concise", "detailed", "none" };
     private static final String[] OUTPUT_LANGUAGE_VALUES = { "zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de" };
     private static final String[] AGENT_CONCURRENCY_VALUES = { "1", "2", "3", "4" };
-    private static final String[] REASONING_EFFORT_VALUES = { "off", "low", "medium", "high", "max", "ultra" };
+    private static final String[] REASONING_EFFORT_VALUES = { "off", "low", "medium", "high", "xhigh", "max", "ultra" };
 
     private EditText systemPrompt;
     private TextView envContext;
