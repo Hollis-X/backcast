@@ -43,7 +43,7 @@ public final class ToolBatchProbeUiRegressionTest {
                 + "boolean progressTerminal,batchTerminal,activityDestroyed,finishing,busy;ToolkitOperation active;String action,probeContext=\"\",toolId=\"\";ToolkitResult callback;"
                 + "View installProgressContainer=new View(),batchProgressContainer=new View();ProgressBar batchProgress=new ProgressBar();"
                 + "TextView batchProgressText=new TextView(),operationStatus=new TextView(),detailOutput=new TextView();"
-                + "static class Settings{boolean root;String access=\"full\";List<String> roots=new ArrayList<String>(Arrays.asList(\"/project\"));boolean useRoot(){return root;}String accessLevel(){return access;}List<String> authorizedWorkDirs(){return roots;}}"
+                + "static class Settings{boolean root;int writes;String access=\"full\";List<String> roots=new ArrayList<String>(Arrays.asList(\"/project\"));boolean useRoot(){return root;}void setUseRoot(boolean value){root=value;writes++;}String accessLevel(){return access;}List<String> authorizedWorkDirs(){return roots;}}"
                 + "static class Bundle{Map<String,String> values=new HashMap<String,String>();String getString(String key,String fallback){String v=values.get(key);return v==null?fallback:v;}}"
                 + "static class Intent{Map<String,String> extras=new HashMap<String,String>();String getStringExtra(String key){return extras.get(key);}}"
                 + "Settings settings=new Settings();JSONObject bundle=new JSONObject();Intent intent=new Intent();Intent getIntent(){return intent;}"
@@ -51,7 +51,7 @@ public final class ToolBatchProbeUiRegressionTest {
                 + "Map<String,JSONObject> probeResults=new LinkedHashMap<String,JSONObject>();Map<String,TextView> toolRows=new LinkedHashMap<String,TextView>();"
                 + "List<ToolkitOperation> operations=new ArrayList<ToolkitOperation>();List<Runnable> callbacks=new ArrayList<Runnable>();"
                 + "ExecutorService toolkitReader=Executors.newSingleThreadExecutor(),toolkitCancellation=Executors.newSingleThreadExecutor();"
-                + "static class RunHub{static class ToolkitSession{}}"
+                + "static class RunHub{int retargets;static RunHub get(BatchUiFixture a){return a.hub;}void retargetTools(){retargets++;}static class ToolkitSession{}}RunHub hub=new RunHub();int reloads;void loadTools(boolean preserve){reloads++;}"
                 + "boolean isFinishing(){return finishing;}void setBusy(boolean v){busy=v;}void finishInstallProgress(JSONObject r){}"
                 + "List<ToolkitOperation> pendingOperations(){return new ArrayList<ToolkitOperation>(operations);}"
                 + "void cancelToolkitOperation(ToolkitOperation op){op.cancelled=true;operations.remove(op);}"
@@ -62,6 +62,7 @@ public final class ToolBatchProbeUiRegressionTest {
                 + "public void drain(){List<Runnable> queued;synchronized(callbacks){queued=new ArrayList<Runnable>(callbacks);callbacks.clear();}for(Runnable callback:queued)callback.run();}"
                 + "public String row(String id){return toolRows.get(id).text;}public String label(){return batchProgressText.text;}public int completed(){return batchProgress.progress;}"
                 + "public int cached(){return probeResults.size();}public boolean busy(){return busy;}public boolean terminal(){return batchTerminal;}public String action(){return action;}"
+                + "public void root(boolean value){updateRoot(value);}public boolean rootEnabled(){return settings.root;}public int rootWrites(){return settings.writes;}public int reloads(){return reloads;}public int retargets(){return hub.retargets;}public String access(){return settings.access;}public String cachedContext(){return probeContext;}public boolean cancelled(Object op){return ((ToolkitOperation)op).cancelled;}"
                 + "public void response(JSONObject response){callback.apply(response);}public void cancel(){cancelActiveToolkit();}public void replace(){active=new ToolkitOperation();}"
                 + "public void finishing(){finishing=true;}public void stop(){onStop();}public void destroy(){onDestroy();}");
         code.append("public void restoreSnapshots()throws Exception{toolId=\"readelf\";Bundle saved=new Bundle();saved.values.put(\"probe_results\",new JSONArray().put(new JSONObject().put(\"id\",toolId).put(\"state\",\"new\")).toString());"
@@ -71,7 +72,7 @@ public final class ToolBatchProbeUiRegressionTest {
                 + "if(kind.equals(\"access\"))settings.access=\"strict\";if(kind.equals(\"workspace\"))settings.roots.add(\"/additional\");"
                 + "if(kind.equals(\"package\"))bundle.put(\"version\",\"replacement\");if(kind.equals(\"removed\"))bundle.put(\"installed\",false);invalidateProbeContext();}");
         for (String name : List.of("ToolkitOperation", "ToolkitResult", "toolkitArguments", "begin", "probeAllTools", "resetProbeRows", "queueBatchProgress", "applyBatchProgress",
-                "probeRowStatus", "currentProbeContext", "invalidateProbeContext", "restoreProbeResults", "finishBatchProbe", "finishOperation", "cancelActiveToolkit", "shortText", "onStop", "onDestroy")) code.append(methods.get(name));
+                "probeRowStatus", "currentProbeContext", "invalidateProbeContext", "restoreProbeResults", "finishBatchProbe", "finishOperation", "cancelActiveToolkit", "updateRoot", "shortText", "onStop", "onDestroy")) code.append(methods.get(name));
         code.append('}');
         try (var manager = ToolProvider.getSystemJavaCompiler().getStandardFileManager(null, null, null)) {
             check(ToolProvider.getSystemJavaCompiler().getTask(null, manager, null, List.of("-proc:none", "-source", "7", "-target", "7", "-Xlint:-options",
@@ -110,6 +111,18 @@ public final class ToolBatchProbeUiRegressionTest {
                 if (boundary.equals("cancel") || boundary.equals("stop")) check(call(stale,"row","readelf").toString().contains("not completed"), "Cancelled row retained a misleading running state");
             }
             System.out.println("PASS cancelled, stopped and replaced batches reject all late row/progress callbacks");
+            Object changedRoot=type.getConstructor().newInstance();call(changedRoot,"start");Object oldOperation=call(changedRoot,"operation");
+            call(changedRoot,"event",oldOperation,progress("finished","readelf",1,error));call(changedRoot,"drain");
+            check((int)call(changedRoot,"cached")==1,"Root test did not begin with actual cached probe evidence");
+            call(changedRoot,"root",false);
+            check(!(boolean)call(changedRoot,"cancelled",oldOperation)&&(int)call(changedRoot,"rootWrites")==0,"Unchanged Root reconfigured or cancelled work");
+            call(changedRoot,"event",oldOperation,progress("finished","objdump",2,error));call(changedRoot,"root",true);call(changedRoot,"drain");
+            check((boolean)call(changedRoot,"rootEnabled")&&(boolean)call(changedRoot,"cancelled",oldOperation)
+                    &&(int)call(changedRoot,"rootWrites")==1&&(int)call(changedRoot,"retargets")==1&&(int)call(changedRoot,"reloads")==1,
+                    "Root toggle did not immediately save, cancel, retarget and reload");
+            check((int)call(changedRoot,"cached")==0&&call(changedRoot,"cachedContext").equals("")&&call(changedRoot,"access").equals("full"),
+                    "Root toggle retained old evidence, accepted a stale callback or changed permissions");
+            System.out.println("PASS Root saves immediately, cancels old work and invalidates evidence without changing permissions");
             Object failed=type.getConstructor().newInstance();call(failed,"start");call(failed,"response",new JSONObject().put("state","error").put("error","cleanup failed"));
             check((boolean)call(failed,"terminal")&&!(boolean)call(failed,"busy")&&!call(failed,"label").toString().contains("ready"),"Cleanup failure displayed a successful batch summary");
             String source=Files.readString(root.resolve("app/src/main/java/com/mkei/backcast/ToolConfigActivity.java"));
@@ -121,7 +134,11 @@ public final class ToolBatchProbeUiRegressionTest {
             }
             DocumentBuilderFactory factory=DocumentBuilderFactory.newInstance();factory.setNamespaceAware(true);factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl",true);
             Element xml=factory.newDocumentBuilder().parse(root.resolve("app/src/main/res/layout/activity_tool_config.xml").toFile()).getDocumentElement();
-            check(xml.getElementsByTagName("ProgressBar").getLength()==2&&Files.readString(root.resolve("app/src/main/res/layout/activity_tool_config.xml")).contains("@+id/tool_batch_probe"),"Batch controls replaced or omitted installation progress");
+            String layout=Files.readString(root.resolve("app/src/main/res/layout/activity_tool_config.xml"));
+            check(xml.getElementsByTagName("ProgressBar").getLength()==2&&layout.contains("@+id/tool_batch_probe"),"Batch controls replaced or omitted installation progress");
+            check(!layout.contains("@+id/save")&&!layout.contains("permission")&&!source.contains("draft_root")&&!source.contains("draft_permission")
+                    &&layout.contains("android:saveEnabled=\"false\"")&&source.indexOf("useRoot.setChecked(settings.useRoot())")<source.indexOf("useRoot.setOnCheckedChangeListener"),
+                    "Tool page still duplicates access/save or restores a stale Root draft");
             System.out.println("PASS cleanup failure is visible and selected probe evidence navigates without persistent ready state");
         } finally {try(var files=Files.walk(temporary)){for(Path file:files.sorted(Comparator.reverseOrder()).toList())Files.deleteIfExists(file);}}
     }

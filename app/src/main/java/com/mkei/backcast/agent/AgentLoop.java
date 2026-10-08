@@ -1,6 +1,7 @@
 package com.mkei.backcast.agent;
 
 import android.os.SystemClock;
+import com.mkei.backcast.mcp.McpSelection;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -171,7 +172,6 @@ public class AgentLoop {
     private LlmClient client;
     private LlmClient requestClient;
     private Object requestLease;
-    private int requestToken, requestGeneration;
     private ToolRegistry registry;
     private final List<Message> history = new ArrayList<Message>();
     private final Object uiLock = new Object();
@@ -517,15 +517,6 @@ public class AgentLoop {
 
     public boolean busy() {
         return busy;
-    }
-
-    /** Live timing belongs to the current request, never a cancelled or replaced turn. */
-    public LlmClient.RequestActivity requestActivity() {
-        synchronized (lock) {
-            if (!busy || cancelled || requestClient == null || requestLease == null
-                    || requestToken != runToken || requestGeneration != generation) return null;
-            return requestClient.requestActivity();
-        }
     }
 
     public String goalText() {
@@ -1289,14 +1280,16 @@ public class AgentLoop {
             current = client;
             requestClient = current;
             requestLease = lease;
-            requestToken = token;
-            requestGeneration = gen;
             requestSession = sessionKey;
             requestRecorder = detailedRequestRecorder != null ? detailedRequestRecorder : recorder;
         }
         long started = SystemClock.elapsedRealtime();
         try {
             if (stale(token, gen)) return new LlmClient.Reply();
+            if ("model".equals(purpose) || "compact".equals(purpose)) {
+                ToolRegistry selectedTools = currentTools();
+                if (selectedTools != null) selectedTools.selectMcpTool(currentMcpSelection());
+            }
             LlmClient.Reply reply = current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
                 @Override public boolean isCurrent() { return !stale(token, gen); }
             });
@@ -1376,9 +1369,19 @@ public class AgentLoop {
         return token == null ? -1 : token.intValue();
     }
 
-    /** 提交一条用户消息并跑完整轮循环。阻塞，需在后台线程调用。 */
-    public void submit(String userText, long sessionId, int gen, int uiToken) {
-        submitMessage(Message.user(userText), sessionId, gen, uiToken);
+    /** Purely local preflight; does not change the active turn or schema priority. */
+    public void validateMcpSelection(McpSelection selection) {
+        ToolRegistry current;
+        synchronized (lock) { current = registry; }
+        if (current != null) current.validateMcpSelection(selection);
+        else if (selection != null) throw new IllegalStateException("所选 MCP 工具不在当前配置，请重新选择");
+    }
+
+    /** Submit human text with an optional local tool choice; runs on a worker thread. */
+    public void submit(String userText, long sessionId, int gen, int uiToken, McpSelection selection) {
+        Message user = Message.user(userText);
+        user.mcpSelection = selection;
+        submitMessage(user, sessionId, gen, uiToken);
     }
 
     public void submitDelegated(String task, String reference, long sessionId, int gen, int uiToken) {
@@ -1397,7 +1400,12 @@ public class AgentLoop {
         int token = 0;
         int seen = runToken;
         try {
+            ToolRegistry requested;
+            synchronized (lock) { requested = registry; }
+            if (requested != null) requested.validateMcpSelection(user.mcpSelection);
+            else if (user.mcpSelection != null) throw new IllegalStateException("所选 MCP 工具不在当前配置");
             synchronized (lock) {
+                if (requested != registry) throw new IllegalStateException("工具配置已变化，请重新发送");
                 if (gen != generation || runToken != seen) {
                     return;
                 }
@@ -1432,7 +1440,11 @@ public class AgentLoop {
             if (children != null) children.resumePending();
             runLoop(sessionId, gen, token);
         } catch (Exception e) {
-            if (!stale(token, gen)) {
+            if (token == 0) {
+                JSONObject evidence = Diagnostics.failure(e);
+                recordError(evidence, "mcp_selection", "所选 MCP 工具已变化，未提交请求");
+                throw e instanceof RuntimeException ? (RuntimeException) e : new IllegalStateException(e);
+            } else if (!stale(token, gen)) {
                 reportException(token, gen, e);
             }
         } finally {
@@ -1686,6 +1698,7 @@ public class AgentLoop {
         handoff.taskPaths = TaskScope.snapshot(humanWorkspacePaths());
         handoff.workDir = workspace;
         handoff.goalFinalReply = followup && lastToolsClosedGoal();
+        handoff.mcpSelection = currentMcpSelection();
         List<Message> fresh;
         synchronized (lock) {
             if (stale(token, gen)) {
@@ -1737,6 +1750,7 @@ public class AgentLoop {
                         tail.delegationAuthorized = m.delegationAuthorized;
                         tail.delegationForbidden = m.delegationForbidden;
                         tail.taskPaths = m.taskPaths;
+                        tail.mcpSelection = m.mcpSelection;
                         users.add(0, tail);
                     }
                     break;
@@ -2611,9 +2625,23 @@ public class AgentLoop {
         return sb.length() == 0 ? "（无）" : sb.toString();
     }
 
+    private McpSelection currentMcpSelection() {
+        synchronized (lock) {
+            for (int i = history.size() - 1; i >= 0; i--) {
+                Message message = history.get(i);
+                if (!Message.USER.equals(message.role) || Goal.isSteer(message.content) || Goal.isNote(message.content)
+                        || message.coordinationIds != null) continue;
+                return message.mcpSelection;
+            }
+            return null;
+        }
+    }
+
     private JSONArray requestSchema() {
         ToolRegistry tools = currentTools();
-        if (tools == null || tools.isEmpty()) return null;
+        if (tools == null) return null;
+        tools.selectMcpTool(currentMcpSelection());
+        if (tools.isEmpty()) return null;
         JSONArray all = tools.toSchema();
         if (delegationAllowed()) return all;
         JSONArray allowed = new JSONArray();

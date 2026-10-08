@@ -340,24 +340,6 @@ public class TurnTrace {
         return "正在生成参数";
     }
 
-    /** quietMs is an active request's monotonic timing; -1 means no active request. */
-    public String progressCaption(boolean live, long quietMs) {
-        String current = "";
-        if (live) {
-            if (quietMs >= 10000L) current = "等待模型响应 · 已静默 " + quietMs / 1000L + "s";
-            else if ("preview".equals(phase)) current = "正在生成参数";
-            else if ("tool_ready".equals(phase)) current = "等待执行";
-            else if ("tool_review".equals(phase)) current = "权限检查中";
-            else if ("tool_approval".equals(phase)) current = "等待授权";
-            else if ("running".equals(phase)) current = "工具执行中";
-            else if ("children".equals(phase)) current = "等待子任务";
-            else if ("thinking".equals(phase)) current = "正在思考";
-            else if ("responding".equals(phase)) current = "正在输出";
-            else current = "等待模型";
-        }
-        return current;
-    }
-
     public void fillResult(String id, String name, String result) {
         String key = id == null ? "" : id;
         String tool = name == null ? "" : name;

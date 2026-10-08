@@ -2,7 +2,6 @@ package com.mkei.backcast.mcp;
 
 import com.mkei.backcast.agent.Tool;
 import com.mkei.backcast.agent.ToolRegistry;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -24,6 +23,7 @@ public final class McpTools implements ToolRegistry.Source {
     private final Tool catalog = new Catalog();
     private volatile List<Tool> exposed = Collections.emptyList();
     private long cancellationEpoch;
+    private McpSelection selection;
 
     private McpTools(McpStore store) {
         this.store = store;
@@ -41,6 +41,41 @@ public final class McpTools implements ToolRegistry.Source {
 
     @Override public List<Tool> tools() { return exposed; }
 
+    @Override public synchronized boolean validateSelection(McpSelection selected) {
+        if (selected == null) return true;
+        store.validateSelection(selected);
+        McpServer server = servers.get(selected.serverId);
+        if (server == null) throw new IllegalStateException("所选 MCP 连接不在当前工具配置，请重新发送");
+        authorize(server);
+        Remote candidate = new Remote(server, newToolInfo(selected));
+        if (schemaBytes(candidate) + schemaBytes(catalog) + 3 > MAX_SCHEMA_BYTES)
+            throw new IllegalStateException("所选 MCP 工具定义超过请求预算，无法发送");
+        return true;
+    }
+
+    private static McpToolInfo newToolInfo(McpSelection selected) {
+        try { return new McpToolInfo(new JSONObject().put("name", selected.toolName)
+                .put("description", selected.description).put("inputSchema", selected.inputSchema())); }
+        catch (Exception invalid) { throw new IllegalStateException("MCP 工具选择无效", invalid); }
+    }
+
+    @Override public synchronized boolean select(McpSelection selected) {
+        if (selected == null) {
+            if (selection != null) { selection = null; refresh(""); }
+            return true;
+        }
+        validateSelection(selected);
+        McpServer server = servers.get(selected.serverId);
+        List<McpToolInfo> current = store.cachedTools(server.id);
+        boolean matched = false;
+        for (McpToolInfo info : current) if (selected.matches(server, info)) matched = true;
+        if (!matched) throw new IllegalStateException("所选 MCP 工具定义已变化，请重新选择");
+        schemas.put(server.id, current);
+        selection = selected; refresh(server.id);
+        for (Tool tool : exposed) if (tool.name().equals(selected.mappedName)) return true;
+        throw new IllegalStateException("所选 MCP 工具定义超过请求预算，无法发送");
+    }
+
     @Override public void abort() {
         synchronized (this) {
             cancellationEpoch++;
@@ -57,8 +92,20 @@ public final class McpTools implements ToolRegistry.Source {
         if (preferred != null) { ordered.remove(preferred); ordered.add(0, preferred); }
         int count = 0;
         int bytes = schemaBytes(catalog) + 2;
+        if (selection != null) {
+            McpServer selectedServer = servers.get(selection.serverId);
+            for (McpToolInfo info : schemas.get(selection.serverId)) if (info.name.equals(selection.toolName)) {
+                Remote selected = new Remote(selectedServer, info);
+                int cost = schemaBytes(selected) + 1;
+                if (bytes + cost > MAX_SCHEMA_BYTES)
+                    throw new IllegalStateException("所选 MCP 工具定义超过请求预算，无法发送");
+                next.add(selected); bytes += cost; count++;
+                break;
+            }
+        }
         for (McpServer server : ordered) {
             for (McpToolInfo info : schemas.get(server.id)) {
+                if (selection != null && selection.serverId.equals(server.id) && selection.toolName.equals(info.name)) continue;
                 if (count >= MAX_EXPOSED) break;
                 Remote tool = new Remote(server, info);
                 int cost = schemaBytes(tool) + 1;
@@ -159,12 +206,7 @@ public final class McpTools implements ToolRegistry.Source {
         private final String mapped;
         Remote(McpServer server, McpToolInfo info) {
             this.server = server; this.info = info;
-            try {
-                byte[] digest = MessageDigest.getInstance("SHA-256").digest((server.id + ":" + info.name).getBytes("UTF-8"));
-                StringBuilder hex = new StringBuilder();
-                for (int i = 0; i < 6; i++) hex.append(String.format(java.util.Locale.US, "%02x", digest[i] & 255));
-                mapped = "mcp_" + server.id + "_" + hex;
-            } catch (Exception invalid) { throw new IllegalStateException("MCP 工具名映射失败"); }
+            mapped = McpSelection.mappedName(server.id, info.name);
         }
         @Override public String name() { return mapped; }
         @Override public String description() {
@@ -177,6 +219,9 @@ public final class McpTools implements ToolRegistry.Source {
             long operation;
             synchronized (McpTools.this) { operation = cancellationEpoch; }
             authorize(server);
+            synchronized (McpTools.this) {
+                if (selection != null && selection.mappedName.equals(mapped)) store.validateSelection(selection);
+            }
             JSONObject result = client(server, operation).call(info.name, args);
             return modelResult(result);
         }

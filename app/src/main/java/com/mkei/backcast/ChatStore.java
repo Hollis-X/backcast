@@ -8,6 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.Diagnostics;
+import com.mkei.backcast.mcp.McpSelection;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -67,7 +68,7 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public ChatStore(Context context) {
-        super(context.getApplicationContext(), "backcast.db", null, 13);
+        super(context.getApplicationContext(), "backcast.db", null, 14);
     }
 
     @Override
@@ -87,7 +88,8 @@ public class ChatStore extends SQLiteOpenHelper {
                 + "elapsed_ms INTEGER DEFAULT 0,"
                 + "think_ms INTEGER DEFAULT 0,"
                 + "display_parts TEXT,"
-                + "work_dir TEXT)");
+                + "work_dir TEXT,"
+                + "mcp_selection TEXT NOT NULL DEFAULT '')");
         db.execSQL("CREATE INDEX idx_messages_session ON messages(session_id, id)");
         createRuns(db);
         createContext(db);
@@ -134,6 +136,7 @@ public class ChatStore extends SQLiteOpenHelper {
             db.execSQL("ALTER TABLE runs ADD COLUMN turn_elapsed_ms INTEGER");
             db.execSQL("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER");
         }
+        if (oldVersion < 14) db.execSQL("ALTER TABLE messages ADD COLUMN mcp_selection TEXT NOT NULL DEFAULT ''");
     }
 
     private static void createRequestEvents(SQLiteDatabase db) {
@@ -305,6 +308,8 @@ public class ChatStore extends SQLiteOpenHelper {
         cv.put("think_ms", Long.valueOf(message.thinkMs));
         cv.put("display_parts", message.displayParts == null ? "" : message.displayParts.toString());
         cv.put("work_dir", Message.USER.equals(message.role) ? message.workDir : "");
+        cv.put("mcp_selection", Message.USER.equals(message.role) && message.mcpSelection != null
+                ? message.mcpSelection.toJson().toString() : "");
         return cv;
     }
 
@@ -374,7 +379,7 @@ public class ChatStore extends SQLiteOpenHelper {
             args = new String[]{String.valueOf(sessionId), String.valueOf(beforeId)};
         }
         Cursor c = db.query("messages", new String[]{"id", "role", "content", "reasoning",
-                "tool_calls", "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir"},
+                "tool_calls", "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir", "mcp_selection"},
                 selection, args, null, null, "id DESC", String.valueOf(pageSize));
         long firstId = 0;
         long lastId = 0;
@@ -498,7 +503,7 @@ public class ChatStore extends SQLiteOpenHelper {
         }
         selection.append(')');
         Cursor results = db.query("messages", new String[]{"role", "content", "reasoning", "tool_calls",
-                "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir"},
+                "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir", "mcp_selection"},
                 selection.toString(), args.toArray(new String[args.size()]), null, null, "id ASC", "128");
         try {
             while (results.moveToNext()) out.add(readMessage(results, 0));
@@ -555,7 +560,7 @@ public class ChatStore extends SQLiteOpenHelper {
         Cursor c = getReadableDatabase().query(
                 "messages",
                 new String[]{"role", "content", "reasoning", "tool_calls", "tool_call_id",
-                        "elapsed_ms", "think_ms", "display_parts", "work_dir"},
+                        "elapsed_ms", "think_ms", "display_parts", "work_dir", "mcp_selection"},
                 "session_id=? AND id>?", new String[]{String.valueOf(sessionId), String.valueOf(after)},
                 null, null, "id ASC");
         try {
@@ -586,6 +591,11 @@ public class ChatStore extends SQLiteOpenHelper {
         }
         String workDir = c.getString(offset + 8);
         if (workDir != null && workDir.length() > 0) m.workDir = workDir;
+        String selection = c.getString(offset + 9);
+        if (Message.USER.equals(m.role) && selection != null && selection.length() > 0) {
+            try { m.mcpSelection = McpSelection.fromJson(new JSONObject(selection)); }
+            catch (Exception invalid) { throw new IllegalStateException("MCP 工具选择记录损坏，无法恢复此请求", invalid); }
+        }
         return m;
     }
 

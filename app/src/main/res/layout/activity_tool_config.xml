@@ -15,31 +15,11 @@
                 android:orientation="vertical">
                 <CheckBox android:id="@+id/tool_use_root" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:minHeight="48dp"
+                    android:saveEnabled="false"
                     android:text="@string/label_use_root" android:textColor="@color/text_primary" />
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:text="@string/toolkit_root_note" android:textColor="@color/text_secondary"
                     android:textSize="12sp" android:paddingBottom="12dp" />
-                <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:text="@string/access_title" android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
-                <RadioGroup android:id="@+id/tool_permission" android:layout_width="match_parent"
-                    android:layout_height="wrap_content" android:orientation="vertical">
-                    <RadioButton android:id="@+id/tool_access_full" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:minHeight="48dp"
-                        android:text="@string/access_full" android:textColor="@color/text_primary" />
-                    <RadioButton android:id="@+id/tool_access_guarded" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:minHeight="48dp"
-                        android:text="@string/access_guarded" android:textColor="@color/text_primary" />
-                    <RadioButton android:id="@+id/tool_access_strict" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:minHeight="48dp"
-                        android:text="@string/access_strict" android:textColor="@color/text_primary" />
-                </RadioGroup>
-                <TextView android:id="@+id/tool_permission_note" android:layout_width="match_parent"
-                    android:layout_height="wrap_content" android:textColor="@color/text_secondary"
-                    android:textSize="12sp" android:paddingTop="4dp" android:paddingBottom="8dp" />
-                <Button android:id="@+id/tool_save_permissions" android:layout_width="match_parent"
-                    android:layout_height="wrap_content" android:minHeight="48dp"
-                    android:text="@string/action_save" android:textAllCaps="false" />
             </LinearLayout>
             <View android:layout_width="match_parent" android:layout_height="1dp"
                 android:layout_marginTop="16dp" android:layout_marginBottom="16dp"

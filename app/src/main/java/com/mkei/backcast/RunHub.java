@@ -24,6 +24,8 @@ import com.mkei.backcast.tool.ToolkitTool;
 import com.mkei.backcast.tool.ToolchainStore;
 import com.mkei.backcast.tool.EmbeddedToolchain;
 import com.mkei.backcast.mcp.McpStore;
+import com.mkei.backcast.mcp.McpCatalog;
+import com.mkei.backcast.mcp.McpSelection;
 import com.mkei.backcast.mcp.McpTools;
 
 import java.util.ArrayList;
@@ -157,6 +159,12 @@ public final class RunHub {
     }
 
     public SubAgentManager subAgents(AgentLoop loop) { return children.get(loop); }
+
+    public List<McpCatalog.Server> cachedMcpCatalog() { return McpCatalog.cached(mcp); }
+
+    public McpCatalog.Refresh newMcpRefresh(String serverId) { return new McpCatalog.Refresh(mcp, serverId); }
+
+    public void validateMcpSelection(McpSelection selection) { mcp.validateSelection(selection); }
 
     /** UI probes use their own runner so they cannot cancel a model's active command. */
     public ToolkitSession newToolkitSession() {

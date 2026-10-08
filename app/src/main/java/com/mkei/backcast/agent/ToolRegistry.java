@@ -1,5 +1,6 @@
 package com.mkei.backcast.agent;
 
+import com.mkei.backcast.mcp.McpSelection;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -15,6 +16,8 @@ public class ToolRegistry {
     public interface Source {
         List<Tool> tools();
         void abort();
+        default boolean select(McpSelection selection) { return false; }
+        default boolean validateSelection(McpSelection selection) { return false; }
     }
 
     public interface WorkspaceScoped {
@@ -30,6 +33,20 @@ public class ToolRegistry {
     private final List<Source> sources = new ArrayList<Source>();
 
     public void addSource(Source source) { sources.add(source); }
+
+    public void validateMcpSelection(McpSelection selection) {
+        if (selection == null) return;
+        for (Source source : sources) if (source.validateSelection(selection)) return;
+        throw new IllegalStateException("所选 MCP 工具不在当前配置，请重新选择");
+    }
+
+    /** Selection affects schema priority only; normal tool approval remains in force. */
+    public void selectMcpTool(McpSelection selection) {
+        boolean matched = false;
+        for (Source source : sources) matched |= source.select(selection);
+        if (selection != null && !matched)
+            throw new IllegalStateException("所选 MCP 工具不在当前配置，请重新选择");
+    }
 
     public void register(Tool tool) {
         if (tool != null) {

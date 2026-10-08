@@ -102,7 +102,7 @@ public final class AgentLoopRegressionTest {
                 check(loop.turnClock(loop.generation() - 1, 2) == null, "Previous generation can read the new turn clock");
             }
         };
-        loop.submit("next", 1, loop.generation(), 2);
+        loop.submit("next", 1, loop.generation(), 2, null);
         check(recorder.answer().elapsedMs == 100, "New answer inherited old elapsed time");
         AgentLoop.TurnClock stopped = loop.turnClock(loop.generation(), 2);
         check(stopped != null && stopped.elapsedMs == 100,
@@ -201,7 +201,7 @@ public final class AgentLoopRegressionTest {
         final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
         Thread worker = new Thread(new Runnable() {
             @Override public void run() {
-                try { loop.submit("first", 1, loop.generation(), 1); }
+                try { loop.submit("first", 1, loop.generation(), 1, null); }
                 catch (Throwable error) { failure.set(error); }
             }
         });
@@ -220,7 +220,7 @@ public final class AgentLoopRegressionTest {
             for (Message message : recorder.saved) {
                 check(!Message.ASSISTANT.equals(message.role), "Cancelled output was persisted");
             }
-            loop.submit("next", 1, loop.generation(), 2);
+            loop.submit("next", 1, loop.generation(), 2, null);
             check(served[0] == 1 && "new configured output".equals(recorder.answer().content),
                     "Next turn did not use the replacement client");
         } finally {
@@ -308,7 +308,7 @@ public final class AgentLoopRegressionTest {
         final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
         Thread worker = new Thread(new Runnable() {
             @Override public void run() {
-                try { loop.submit("first", 1, loop.generation(), 1); }
+                try { loop.submit("first", 1, loop.generation(), 1, null); }
                 catch (Throwable error) { failure.set(error); }
             }
         });
@@ -325,7 +325,7 @@ public final class AgentLoopRegressionTest {
                     "Current turn begin/invoke/goal cleanup/end did not share one registry");
             check(newTool.begins == 0 && newTool.runs == 0 && newTool.cleanups == 0 && newTool.finishes == 0,
                     "Replacement materials were used before next turn");
-            loop.submit("next", 1, loop.generation(), 2);
+            loop.submit("next", 1, loop.generation(), 2, null);
             check(served[0] == 4 && newTool.begins == 1 && newTool.runs == 1 && newTool.finishes == 1,
                     "Next turn did not begin, execute and clean the replacement registry");
             check("next done".equals(recorder.answer().content), "Next turn output was not persisted");
@@ -406,7 +406,7 @@ public final class AgentLoopRegressionTest {
             check(newTool.begins == 0 && newTool.runs == 0 && newTool.cleanups == 0 && newTool.finishes == 0,
                     "Manual compaction touched next-turn materials");
             check(finishes[0] == 1 && "goal finished".equals(recorder.answer().content), "Compaction output or finish was duplicated");
-            loop.submit("next", 1, loop.generation(), 3);
+            loop.submit("next", 1, loop.generation(), 3, null);
             check(served[0] == 4 && newTool.begins == 1 && newTool.finishes == 1, "Next turn did not acquire the new registry");
         } finally { release.countDown(); worker.join(5000); }
     }
@@ -462,7 +462,7 @@ public final class AgentLoopRegressionTest {
         loop.setListener(new AgentLoop.Quiet() {
             @Override public void onAssistantText(int gen, String text) { visible.append(text); }
         });
-        loop.submit(DISCLOSE, 1, loop.generation(), 1);
+        loop.submit(DISCLOSE, 1, loop.generation(), 1, null);
         check(client.calls == 0, "Prompt disclosure was sent to the model");
         check(PromptGuard.REFUSAL.equals(recorder.answer().content), "Refusal was not persisted");
         check(PromptGuard.REFUSAL.equals(visible.toString()), "Streamed output was not refused");
@@ -505,7 +505,7 @@ public final class AgentLoopRegressionTest {
         Client client = new Client();
         Recorder recorder = new Recorder();
         AgentLoop loop = loop(client, recorder);
-        loop.submit("Read prompt.xml and edit the system prompt in that project file.", 1, loop.generation(), 1);
+        loop.submit("Read prompt.xml and edit the system prompt in that project file.", 1, loop.generation(), 1, null);
         check(client.calls == 1, "Legitimate prompt-file work was blocked");
         check("done".equals(recorder.answer().content), "Legitimate response changed");
     }
@@ -514,7 +514,7 @@ public final class AgentLoopRegressionTest {
         Client client = new Client();
         Recorder recorder = new Recorder();
         final AgentLoop loop = loop(client, recorder);
-        loop.submit("first", 1, loop.generation(), 1);
+        loop.submit("first", 1, loop.generation(), 1, null);
         final LlmClient.Sink previous = client.lastSink;
         recorder.userHook = new Runnable() {
             @Override public void run() {
@@ -524,7 +524,7 @@ public final class AgentLoopRegressionTest {
                 check(!loop.turnClock().firstSeen, "Old stream changed the new first event");
             }
         };
-        loop.submit("next", 1, loop.generation(), 2);
+        loop.submit("next", 1, loop.generation(), 2, null);
         check(recorder.answer().thinkMs == 100, "Old stream polluted persisted timing");
     }
     private static void trueBackgroundWorkKeepsCounting() throws Exception {
@@ -546,7 +546,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1); loop.reset("system"); loop.setRecorder(recorder);
         Thread worker = new Thread(new Runnable() {
             @Override public void run() {
-                try { loop.submit("background work", 1, loop.generation(), 8); }
+                try { loop.submit("background work", 1, loop.generation(), 8, null); }
                 catch (Throwable error) { failure.set(error); }
             }
         });
@@ -677,7 +677,7 @@ public final class AgentLoopRegressionTest {
         });
         Thread worker = new Thread(new Runnable() {
             @Override public void run() {
-                try { loop.submit("work", 1L, loop.generation(), 9); }
+                try { loop.submit("work", 1L, loop.generation(), 9, null); }
                 catch (Throwable error) { failure.set(error); }
             }
         });
@@ -769,7 +769,7 @@ public final class AgentLoopRegressionTest {
             @Override public void record(long sid, Message message) { if (Message.ASSISTANT.equals(message.role)) saved.add(message); }
             @Override public void replace(long sid, List<Message> messages) { }
         });
-        loop.setGoal("complete work"); loop.submit("complete work", 1L, loop.generation(), 1);
+        loop.setGoal("complete work"); loop.submit("complete work", 1L, loop.generation(), 1, null);
         AgentLoop.TurnClock clock = loop.turnClock(loop.generation(), 1);
         check(calls[0] == 2 && continuationClocks.equals(Arrays.asList(Long.valueOf(10000L))),
                 "Automatic continuation reset the visible user request clock: " + continuationClocks);
@@ -780,7 +780,7 @@ public final class AgentLoopRegressionTest {
         check(saved.size() == 2 && saved.get(0).elapsedMs == 10000L && saved.get(1).elapsedMs == 12000L
                 && saved.get(1).thinkMs == 10000L && loop.goalElapsed() == 12000L,
                 "Persisted assistant timing diverged from continuation or goal work");
-        loop.submit("new explicit request", 1L, loop.generation(), 2);
+        loop.submit("new explicit request", 1L, loop.generation(), 2, null);
         check(loop.turnClock().elapsedMs == 2000L && loop.turnClock().thinkMs == 2000L,
                 "An explicit new request inherited automatic continuation timing");
     }
@@ -788,7 +788,7 @@ public final class AgentLoopRegressionTest {
     private static void uiTokenReservationSurvivesActivityRecreation() throws Exception {
         SystemClock.set(100000L);
         Client client = new Client(); AgentLoop loop = loop(client, new Recorder());
-        loop.submit("first request", 1L, loop.generation(), 1);
+        loop.submit("first request", 1L, loop.generation(), 1, null);
         AgentLoop.TurnClock oldClock = loop.turnClock(loop.generation(), 1);
         check(oldClock != null && oldClock.elapsedMs == 100L, "Fixture has no completed owner clock");
         int rebuiltActivity = loop.nextUiToken(0);
@@ -879,7 +879,7 @@ public final class AgentLoopRegressionTest {
         loop.restoreTurnClock(15000L, 5000L);
         check(!loop.needsResume() && loop.turnClock() == null,
                 "Completed ordinary chat adopted an old continuation ledger");
-        loop.submit("new ordinary chat", 1L, loop.generation(), 1);
+        loop.submit("new ordinary chat", 1L, loop.generation(), 1, null);
         check(recorder.answer().elapsedMs == 100L && recorder.answer().thinkMs == 100L,
                 "New ordinary chat inherited a previous completed request's timing");
     }
@@ -890,7 +890,7 @@ public final class AgentLoopRegressionTest {
         Recorder recorder = new Recorder();
         AgentLoop loop = loop(client, recorder);
         loop.setContextBudget(1, .5f);
-        loop.submit(DISCLOSE, 1, loop.generation(), 1);
+        loop.submit(DISCLOSE, 1, loop.generation(), 1, null);
         check(client.calls == 0, "Compaction sent a forbidden request to the model");
         check(PromptGuard.REFUSAL.equals(recorder.answer().content), "Compaction guard did not refuse");
         loop.loadHistory("system", Arrays.asList(Message.user(DISCLOSE)));
@@ -926,7 +926,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("keep reading the same missing file");
-        loop.submit("read it", 1, loop.generation(), 1);
+        loop.submit("read it", 1, loop.generation(), 1, null);
         check(served[0] <= 6, "Repeated identical tool results kept the goal spinning");
         // 系统只停手，不替模型把目标判死：目标留着，用户可以接着推进。
         check(!loop.busy(), "Stalled goal kept running");
@@ -949,7 +949,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("keep answering without any tool call");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] <= 4, "Text-only replies kept the goal spinning");
         // 同上：连轮表态只让循环停手，目标本身不判死。
         check(!loop.busy(), "Text-only stalled goal kept running");
@@ -1007,7 +1007,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("keep making real progress forever");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] >= 120, "A goal without a budget was capped at " + served[0] + " rounds");
         check(Goal.COMPLETE.equals(loop.goalStatus()), "Model-declared completion was not honored");
         check(!loop.goalActive() && !loop.busy(), "Completed goal kept running");
@@ -1049,7 +1049,7 @@ public final class AgentLoopRegressionTest {
         loop.reset("system");
         loop.setGoal("keep going until the budget runs out");
         loop.setGoalBudget(3000L);
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(Goal.BUDGET_LIMITED.equals(loop.goalStatus()),
                 "Spent goal did not enter budget_limited");
         check(loop.goalTokensUsed() >= 3000L, "Token accounting lost the spent budget");
@@ -1104,7 +1104,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("keep interleaving probes with summaries");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] >= 20, "Interleaved work was stopped early: " + served[0] + " rounds");
         check(Goal.COMPLETE.equals(loop.goalStatus()),
                 "Interleaved work was not left to the model to finish");
@@ -1133,7 +1133,7 @@ public final class AgentLoopRegressionTest {
         loop.reset("system");
         loop.setGoal("old objective");
         loop.renameGoal("new objective");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         int retargets = 0, continuations = 0;
         for (Message message : loop.historySnapshot()) {
             if (message == null || message.content == null || !Goal.isSteer(message.content)) {
@@ -1231,7 +1231,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("verify new evidence");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] == 20, "New read-only evidence stopped after " + served[0] + " rounds");
         check(Goal.COMPLETE.equals(loop.goalStatus()), "Read-only goal did not honor completion");
         check(!loop.busy(), "Completed read-only goal kept running");
@@ -1361,7 +1361,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("finish and stop");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] == 2, "Completed goal missed its final answer or kept spinning: " + served[0]);
         check(Goal.COMPLETE.equals(loop.goalStatus()), "update_goal did not complete the goal");
         check(!loop.busy() && !loop.goalActive(), "Completed goal stayed active");
@@ -1383,7 +1383,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("还没动手");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] <= 4, "Bare audit claim spun forever: " + served[0]);
         check(Goal.ACTIVE.equals(loop.goalStatus()), "Bare audit claim completed the goal");
         check(!loop.busy(), "Bare audit claim kept running");
@@ -1404,7 +1404,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("system");
         loop.setGoal("空转");
-        loop.submit("go", 1, loop.generation(), 1);
+        loop.submit("go", 1, loop.generation(), 1, null);
         check(served[0] == 3, "Empty continuations did not stop at three: " + served[0]);
         check(Goal.BLOCKED.equals(loop.goalStatus()), "Empty continuations were not blocked");
         check(!loop.busy() && !loop.goalActive(), "Blocked goal kept running");

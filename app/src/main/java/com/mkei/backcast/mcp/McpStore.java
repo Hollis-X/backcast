@@ -86,8 +86,33 @@ public final class McpStore {
         }
     }
 
-    public boolean cacheTools(McpServer expected, List<McpToolInfo> tools) {
+    /** One locked read keeps chooser connection identity and cached schemas together. */
+    List<McpCatalog.Server> catalog() {
         synchronized (LOCK) {
+            List<McpCatalog.Server> result = new ArrayList<McpCatalog.Server>();
+            for (McpServer server : servers()) if (server.enabled)
+                result.add(new McpCatalog.Server(server, cachedTools(server.id)));
+            return Collections.unmodifiableList(result);
+        }
+    }
+
+    public void validateSelection(McpSelection selection) {
+        if (selection == null) return;
+        synchronized (LOCK) {
+            for (McpServer server : servers()) if (server.enabled && server.id.equals(selection.serverId)) {
+                for (McpToolInfo tool : cachedTools(server.id)) if (selection.matches(server, tool)) return;
+            }
+        }
+        throw new IllegalStateException("所选 MCP 连接或工具定义已变化，请重新选择");
+    }
+
+    public boolean cacheTools(McpServer expected, List<McpToolInfo> tools) {
+        return cacheTools(expected, tools, null);
+    }
+
+    boolean cacheTools(McpServer expected, List<McpToolInfo> tools, String expectedCacheId) {
+        synchronized (LOCK) {
+            if (expectedCacheId != null && !expectedCacheId.equals(McpSelection.cacheId(cachedTools(expected.id)))) return false;
             JSONObject state = read();
             try {
                 boolean matches = false;

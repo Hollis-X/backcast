@@ -372,7 +372,7 @@ public final class TemporaryCleanupRegressionTest {
         final AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet());
         loop.reset("fixture");
         Thread worker = new Thread(new Runnable() {
-            @Override public void run() { loop.submit("temporary shell", 13, loop.generation(), 1); }
+            @Override public void run() { loop.submit("temporary shell", 13, loop.generation(), 1, null); }
         });
         worker.start();
         check(requested.await(2, TimeUnit.SECONDS), "Shell fixture was not requested");
@@ -444,7 +444,7 @@ public final class TemporaryCleanupRegressionTest {
         AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet());
         loopBox[0] = loop;
         loop.reset("fixture");
-        loop.submit("create temporary material", sid, loop.generation(), 1);
+        loop.submit("create temporary material", sid, loop.generation(), 1, null);
         check(allocated[0] != null && !allocated[0].exists(), "Turn " + mode + " did not clean temporary material");
         pass("loopCleansAfter_" + mode);
     }

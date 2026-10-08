@@ -304,7 +304,7 @@ public final class ContextCompactionRegressionTest {
     private static void normalOverflowStopsUntilExplicitManualResume() {
         ScriptedClient client = new ScriptedClient().then(false, overflow()).then(false, text("finished manually"));
         AgentLoop loop = loop(client);
-        loop.submit("complete this request", 1L, loop.generation(), 1);
+        loop.submit("complete this request", 1L, loop.generation(), 1, null);
         check(client.requests.size() == 1 && !loop.busy() && loop.needsResume()
                         && summaries(loop.historySnapshot()) == 0 && contains(loop.historySnapshot(), "complete this request"),
                 "Model overflow automatically compressed/retried or lost the unfinished user task");
@@ -352,7 +352,7 @@ public final class ContextCompactionRegressionTest {
         loop.setContextBudget(20000, 0.9f);
         loop.setGoal("bounded goal fixture");
         loop.setGoalBudget(100L);
-        loop.submit("complete the fixture", 1L, loop.generation(), 1);
+        loop.submit("complete the fixture", 1L, loop.generation(), 1, null);
         check(contains(client.requests.get(1).messages, "budget_limited"),
                 "Budget wrap-up was not present before automatic compaction");
         List<Message> resumed = client.requests.get(2).messages;
@@ -387,7 +387,7 @@ public final class ContextCompactionRegressionTest {
         loop.setGoal("fixed-objective-after-compaction");
         loop.loadHistory("system fixture", Arrays.asList(Message.user("earlier request"),
                 Message.assistant(repeat('z', 90000), null)));
-        loop.submit("continue the task", 1L, loop.generation(), 1);
+        loop.submit("continue the task", 1L, loop.generation(), 1, null);
         List<Message> firstWork = client.requests.get(1).messages;
         check(contains(firstWork, "fixed-objective-after-compaction"),
                 "Compaction removed the active goal objective");
@@ -401,7 +401,7 @@ public final class ContextCompactionRegressionTest {
         ScriptedClient client = new ScriptedClient().then(false, usage("first answer", 101L, 9L))
                 .then(false, usage("second answer", 140L, 11L));
         AgentLoop loop = loop(client);
-        loop.submit("first request", 1L, loop.generation(), 1);
+        loop.submit("first request", 1L, loop.generation(), 1, null);
         check(loop.contextUsed() == 110, "Context ignored actual input/output usage");
         Message added = Message.user("a new local request");
         mutableHistory(loop).add(added);
@@ -416,7 +416,7 @@ public final class ContextCompactionRegressionTest {
         ScriptedClient client = new ScriptedClient().then(false, usage("first answer", 10000L, 100L))
                 .then(true, usage("tiny checkpoint", 11000L, 20L));
         AgentLoop loop = loop(client);
-        loop.submit("first request", 1L, loop.generation(), 1);
+        loop.submit("first request", 1L, loop.generation(), 1, null);
         loop.compactNow(1L, loop.generation(), 2);
         check(loop.contextUsed() == TokenMeter.of(loop.historySnapshot()),
                 "Compaction retained the oversized pre-compaction usage anchor");
@@ -427,7 +427,7 @@ public final class ContextCompactionRegressionTest {
     private static void historyReloadResetsActualUsageAnchor() {
         ScriptedClient client = new ScriptedClient().then(false, usage("first answer", 9000L, 40L));
         AgentLoop loop = loop(client);
-        loop.submit("first request", 1L, loop.generation(), 1);
+        loop.submit("first request", 1L, loop.generation(), 1, null);
         loop.loadHistory("new system", Arrays.asList(Message.user("restored request")));
         check(loop.contextUsed() == TokenMeter.of(loop.historySnapshot()), "History reload retained stale actual usage");
         loop.reset("reset system");
@@ -446,7 +446,7 @@ public final class ContextCompactionRegressionTest {
         original.setContextBudget(20000, 0.9f);
         original.loadHistory("system fixture", Arrays.asList(Message.user("older instruction"),
                 Message.assistant(repeat('x', 90000), null)));
-        original.submit("latest unfinished request", 1L, original.generation(), 1);
+        original.submit("latest unfinished request", 1L, original.generation(), 1, null);
         check(recorder.windows.size() == 1, "Automatic checkpoint was not persisted before interruption");
         List<Message> checkpoint = restoreCheckpoint(recorder.windows.get(0));
         Message handoff = checkpoint.get(checkpoint.size() - 1);
@@ -517,7 +517,7 @@ public final class ContextCompactionRegressionTest {
             @Override public void run() { original.cancel(); }
         };
         original.setRecorder(recorder);
-        original.submit("complete the goal", 1L, original.generation(), 1);
+        original.submit("complete the goal", 1L, original.generation(), 1, null);
         check(Goal.COMPLETE.equals(original.goalStatus()), "Source goal was not completed before compaction");
         List<Message> checkpoint = restoreCheckpoint(recorder.windows.get(0));
         Message handoff = checkpoint.get(checkpoint.size() - 1);

@@ -44,7 +44,7 @@ public final class UiSnapshotRegressionTest {
                 @Override public void replace(long sid, List<Message> messages) { }
             });
         }
-        void run() { loop.submit("fixture request", 1, loop.generation(), 9); }
+        void run() { loop.submit("fixture request", 1, loop.generation(), 9, null); }
         AgentLoop.UiSnapshot<List<Message>> snapshot(AgentLoop.Listener target) throws Exception {
             return loop.snapshotUi(new AgentLoop.UiSnapshotReader<List<Message>>() {
                 @Override public List<Message> read() { return new ArrayList<Message>(stored); }

@@ -93,7 +93,7 @@ public final class NetworkSdkRegressionTest {
             AgentLoop loop = new AgentLoop(server.client(), new ToolRegistry(), new AgentLoop.Quiet() {
                 @Override public void onError(int gen, String text) { check(text.contains("无法处理"), "Raw HTTP error reached notification"); errors.incrementAndGet(); }
 
-            }); loop.bindSession(7); loop.reset("fixture"); loop.setGoal("inspect"); loop.submit("inspect", 7, loop.generation(), 1);
+            }); loop.bindSession(7); loop.reset("fixture"); loop.setGoal("inspect"); loop.submit("inspect", 7, loop.generation(), 1, null);
             check(server.posts.get() == 1 && route.probe.get() == 0 && errors.get() == 1
                     && !loop.busy() && Goal.ACTIVE.equals(loop.goalStatus()), "503 retried/probed needlessly or falsely completed the goal");
         } finally { NetworkRouting.install(null); }

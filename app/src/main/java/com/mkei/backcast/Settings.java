@@ -609,14 +609,12 @@ public class Settings {
         return 0.9f;
     }
 
-    public void saveUserPreferences(String verbosity, String summary, String language, String effort,
+    public void saveUserPreferences(String verbosity, String summary, String language,
                                     int concurrency, String prompt) {
         prefs.edit()
                 .putString(KEY_OUTPUT_VERBOSITY, ResponsePreferences.normalizeVerbosity(verbosity))
                 .putString(KEY_REASONING_SUMMARY, ResponsePreferences.normalizeSummary(summary))
                 .putString(KEY_OUTPUT_LANGUAGE, ResponsePreferences.normalizeLanguage(language))
-                .putString(KEY_REASONING_EFFORT, normalizeReasoningEffort(effort))
-                .putBoolean(KEY_EFFORT_POLICY_MIGRATED, true)
                 .putString(KEY_AGENT_CONCURRENCY, Integer.toString(concurrency >= 1 && concurrency <= 4
                         ? concurrency : DEFAULT_AGENT_CONCURRENCY))
                 .putString(KEY_SYSTEM_PROMPT, prompt == null ? "" : prompt)

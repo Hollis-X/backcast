@@ -123,7 +123,7 @@ public final class AiModelPickerUiRegressionTest {
         List<String> labels = new ArrayList<>();
         for (Object child : children(card)) labels.add((String) get(child, "text"));
         check(labels.equals(Arrays.asList("DeepSeek", "same-model", "other-model",
-                        "OpenAI", "same-model", "gpt-model", "Grok", "grok-model", "配置供应商与模型")),
+                        "OpenAI", "same-model", "gpt-model", "Grok", "grok-model")),
                 "Provider/model grouping or current selection is ambiguous: " + labels);
         check(!labels.toString().contains("secret") && !labels.toString().contains("https://")
                         && !labels.contains("hidden-model"), "Picker exposed credentials or an unconfigured provider");
@@ -142,10 +142,10 @@ public final class AiModelPickerUiRegressionTest {
         Object popup = get(view, "modelPopup"), card = popupCard(view);
         List<String> labels = new ArrayList<>();
         for (Object child : children(card)) if (get(child, "text") != null) labels.add((String) get(child, "text"));
-        check(labels.equals(Arrays.asList("智能", "低", "中", "高", "极高", "Max", "Ultra")),
-                "First page contains models, off, speed or permission choices: " + labels);
+        check(labels.equals(Arrays.asList("智能", "关闭思考", "低", "中", "高", "极高", "Max", "Ultra")),
+                "First page lost its effort choices or contains speed/permission choices: " + labels);
         check((Integer) get(row(card, "智能"), "color") == 2, "Intelligence title is not secondary text");
-        for (String label : Arrays.asList("低", "中", "高", "极高", "Max", "Ultra")) {
+        for (String label : Arrays.asList("关闭思考", "低", "中", "高", "极高", "Max", "Ultra")) {
             Object effort = row(card, label);
             check(((Integer) get(effort, "rightIcon") != 0) == label.equals("高"), "Selected check is missing/on wrong effort");
             check((Integer) get(effort, "leftIcon") == 0, "Selected effort check is on the left");
@@ -170,7 +170,7 @@ public final class AiModelPickerUiRegressionTest {
                 "Custom model selection did not close or leaked custom prefix into composer");
         pass("twoPagePopupRetainsChecksBackNavigationAndCustomModels");
     }
-    private static void effortChangeRetargetsWithoutCancellingAndOffHasNoCheck() throws Exception {
+    private static void effortChangeRetargetsWithoutCancellingAndOffIsSelectable() throws Exception {
         Object view = configuredView(); Client client = new Client(); AgentLoop loop = liveLoop(client);
         set(view, "loop", loop); invoke(view, "showModelPopup");
         invoke(row(popupCard(view), "极高"), "click");
@@ -183,8 +183,13 @@ public final class AiModelPickerUiRegressionTest {
         check((Integer) get(row(popupCard(view), "极高"), "rightIcon") != 0, "Reopened popup lost xhigh selection");
         invoke(view, "showModelPopup");
         set(get(view, "settings"), "effort", "off"); invoke(view, "showModelPopup");
-        for (Object child : children(popupCard(view))) check((Integer) get(child, "rightIcon") == 0,
-                "Off preference falsely selected one of the six menu efforts");
+        for (Object child : children(popupCard(view))) check(((Integer) get(child, "rightIcon") != 0)
+                        == "关闭思考".equals(get(child, "text")), "Off selection check is missing or duplicated");
+        invoke(row(popupCard(view), "低"), "click");
+        invoke(view, "showModelPopup");
+        invoke(row(popupCard(view), "关闭思考"), "click");
+        check(get(get(view, "settings"), "effort").equals("off") && !(Boolean) get(loop, "cancelled"),
+                "Composer off option failed or cancelled the active request");
         pass("effortSelectionTargetsNextRequestWithoutInterruptingCurrentWork");
     }
     private static void popupPagesFitSmallScreensAndScroll() throws Exception {
@@ -203,16 +208,16 @@ public final class AiModelPickerUiRegressionTest {
                 "Long provider list was clipped without scrolling or navigation retained stale scroll position");
         pass("bothPopupPagesUseScreenBoundsAndLongModelListScrolls");
     }
-    private static void emptyConfigurationRoutesToAiConfiguration() throws Exception {
+    private static void emptyConfigurationShowsOnlyAnInformationalRow() throws Exception {
         Object view = view(), card = create("LinearLayout");
         addProfile(view, "deepseek", "DeepSeek", "https://deepseek.test/v1", "", "same-model", "same-model");
         invoke(view, "appendModelPicker", card);
         check(children(card).size() == 1, "Unconfigured provider received selectable model rows");
-        invoke(row(card, "尚未保存模型，前往 AI 配置"), "click");
-        check(((Class<?>) get(get(view, "launched"), "target")).getSimpleName().equals("AiConfigActivity")
-                        && (Boolean) get(get(view, "modelPopup"), "dismissed"),
-                "Empty picker did not open the actual AI configuration entry");
-        pass("emptyProviderPickerOpensAiConfigurationWithoutCreatingModels");
+        Object empty = row(card, "尚未保存模型");
+        check(get(empty, "listener") == null && get(view, "launched") == null
+                        && !methods.get("appendModelPicker").contains("startActivity"),
+                "Empty picker still provides a configuration link");
+        pass("emptyProviderPickerShowsOnlyAnInformationalRow");
     }
     private static void idleSelectionIsAtomicAndRejectsStalePopupRows() throws Exception {
         Object view = configuredView(), card = create("LinearLayout");
@@ -312,7 +317,7 @@ public final class AiModelPickerUiRegressionTest {
                 long sessionId=7;AgentLoop loop;int liveToken;boolean activityDestroyed,sessionOpening,compactLive;int retargets,statusUpdates,settles;
                 boolean isFinishing(){return false;}int dp(int n){return n;}Object wrapParams(){return null;}String displayModelName(String raw){return raw;}
                 TextView popupText(String t,int n,int c){TextView v=new TextView();v.text=t;v.color=c;return v;}
-                String getString(int n,Object...args){if(n==4)return "供应商与模型";if(n==5)return "配置供应商与模型";if(n==6)return "尚未保存模型，前往 AI 配置";
+                String getString(int n,Object...args){if(n==6)return "尚未保存模型";
                     if(n==8)return "停止当前轮并切换到 "+args[0]+" · "+args[1];if(n==13)return "智能";if(n==14)return "模型";if(n==15)return "返回智能菜单";return Integer.toString(n);}
                 static class Settings{static final String EFFORT_OFF="off",EFFORT_LOW="low",EFFORT_MEDIUM="medium",EFFORT_HIGH="high",EFFORT_XHIGH="xhigh",EFFORT_MAX="max",EFFORT_ULTRA="ultra";
                     static class AiProfile{final String id,name,baseUrl,apiKey,model;final List<String> modelList;AiProfile(String i,String n,String u,String k,String m,List<String> list){id=i;name=n;baseUrl=u;apiKey=k;model=m;modelList=list;}}
@@ -350,9 +355,9 @@ public final class AiModelPickerUiRegressionTest {
                 fixture = loader.loadClass("ModelPickerFixture");
                 groupedSavedChoicesDoNotLeakCredentials();
                 twoPagePopupKeepsHierarchyAndSelection();
-                effortChangeRetargetsWithoutCancellingAndOffHasNoCheck();
+                effortChangeRetargetsWithoutCancellingAndOffIsSelectable();
                 popupPagesFitSmallScreensAndScroll();
-                emptyConfigurationRoutesToAiConfiguration();
+                emptyConfigurationShowsOnlyAnInformationalRow();
                 idleSelectionIsAtomicAndRejectsStalePopupRows();
                 runningSwitchRequiresConfirmationAndPreservesCompletedTools();
             }

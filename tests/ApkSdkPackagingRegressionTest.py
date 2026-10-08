@@ -53,7 +53,6 @@ def main():
         required = {
             "Lcom/mkei/backcast/GlobalApplication;",
             "Lcom/mkei/backcast/agent/LlmClient;",
-            "Lcom/mkei/backcast/agent/LlmClient$RequestActivity;",
             "Lcom/mkei/backcast/agent/NetworkRouting;",
             "Lcom/mkei/backcast/agent/ConnectionRace;",
             "Lcom/mkei/backcast/agent/InternetReachability;",
@@ -68,6 +67,10 @@ def main():
             "Lcom/mkei/backcast/mcp/McpStore;",
             "Lcom/mkei/backcast/mcp/McpToolInfo;",
             "Lcom/mkei/backcast/mcp/McpTools;",
+            "Lcom/mkei/backcast/mcp/McpCatalog;",
+            "Lcom/mkei/backcast/mcp/McpSelection;",
+            "Lcom/mkei/backcast/ui/SlashMenuPopup;",
+            "Lcom/mkei/backcast/ui/McpToolPicker;",
             "Lcom/openai/client/okhttp/OpenAIOkHttpClient;",
             "Lcom/openai/models/chat/completions/ChatCompletionChunk;",
             "Lcom/openai/services/blocking/chat/ChatCompletionServiceImpl;",
@@ -77,6 +80,7 @@ def main():
             "Lkotlin/jvm/internal/Intrinsics;",
         }
         assert required.issubset(classes), "SDK/runtime classes missing: " + str(required - classes)
+        assert "Lcom/mkei/backcast/agent/LlmClient$RequestActivity;" not in classes, "Removed header timing bridge still packaged"
         print("PASS official SDK, transport, JSON/Kotlin runtime and application classes packaged")
         manifest = json.loads(archive.read("assets/toolchain/manifest.json"))
         for artifact in manifest["artifacts"]:

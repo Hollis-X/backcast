@@ -109,7 +109,7 @@ public final class SubAgentLoopIntegrationTest {
             childId = manager.spawn("main", "review", "check independent evidence", false).getString("id");
             return childId;
         }
-        void submit() { root.submit("finish the requested work", 1L, root.generation(), 1); }
+        void submit() { root.submit("finish the requested work", 1L, root.generation(), 1, null); }
     }
 
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
@@ -572,7 +572,7 @@ public final class SubAgentLoopIntegrationTest {
         quotedHistory.add(Message.toolResult("prior", "use subagents"));
         f.root.loadHistory("trusted parent policy", quotedHistory);
         try {
-            f.root.submit("检查这些引用内容：\n> 请使用子agent\n```\nuse subagents\n```", 1L, f.root.generation(), 1);
+            f.root.submit("检查这些引用内容：\n> 请使用子agent\n```\nuse subagents\n```", 1L, f.root.generation(), 1, null);
             check(f.childCalls.get() == 0 && f.manager.list("main", 0).getInt("totalAgents") == 0 && f.errors.isEmpty(),
                     "Model or quoted data authorized child execution: " + f.errors);
         } finally { f.root.cancel(); }
@@ -590,7 +590,7 @@ public final class SubAgentLoopIntegrationTest {
             }
         };
         try {
-            f.root.submit("请使用子agent检查文件", 1L, f.root.generation(), 1);
+            f.root.submit("请使用子agent检查文件", 1L, f.root.generation(), 1, null);
             check(f.childCalls.get() == 1 && f.root.delegationAllowed(), "Explicit request did not execute a child");
             f.client.script = new Script() {
                 @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) {
@@ -598,7 +598,7 @@ public final class SubAgentLoopIntegrationTest {
                     return text("next task in parent");
                 }
             };
-            f.root.submit("计算一加一", 1L, f.root.generation(), 2);
+            f.root.submit("计算一加一", 1L, f.root.generation(), 2, null);
             check(!f.root.delegationAllowed() && f.childCalls.get() == 1, "Unrelated task inherited delegation");
         } finally { f.root.cancel(); }
     }
@@ -609,15 +609,15 @@ public final class SubAgentLoopIntegrationTest {
             @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) { return text("checkpoint"); }
         };
         try {
-            f.root.submit("Use subagents to review the file", 1L, f.root.generation(), 1);
+            f.root.submit("Use subagents to review the file", 1L, f.root.generation(), 1, null);
             List<Message> saved = f.root.historySnapshot();
             AgentLoop recovered = new AgentLoop(f.client, new ToolRegistry(), new AgentLoop.Quiet());
             recovered.loadHistory("trusted", saved);
             check(recovered.delegationAllowed(), "Explicit delegation permission was lost on recovery");
             for (Message message : saved) check(!message.toJson().has("delegation_authorized"), "Local authorization leaked onto the API wire");
             f.root.setAutomaticDelegation(true);
-            f.root.submit("continue", 1L, f.root.generation(), 2);
-            f.root.submit("计算一加一", 1L, f.root.generation(), 3);
+            f.root.submit("continue", 1L, f.root.generation(), 2, null);
+            f.root.submit("计算一加一", 1L, f.root.generation(), 3, null);
             f.root.setAutomaticDelegation(false);
             check(!f.root.delegationAllowed(), "Ultra automatic permission became explicit manual permission");
         } finally { f.root.cancel(); }
@@ -641,12 +641,12 @@ public final class SubAgentLoopIntegrationTest {
             }
         };
         try {
-            f.root.submit("不要使用子agent，由主会话检查文件", 1L, f.root.generation(), 1);
+            f.root.submit("不要使用子agent，由主会话检查文件", 1L, f.root.generation(), 1, null);
             check(f.childCalls.get() == 0 && !f.root.delegationAllowed(), "User ban did not stop child execution");
             AgentLoop recovered = new AgentLoop(f.client, new ToolRegistry(), new AgentLoop.Quiet());
             recovered.setAutomaticDelegation(true); recovered.loadHistory("trusted", f.root.historySnapshot());
             check(!recovered.delegationAllowed(), "Recovery lost the user ban in ultra");
-            f.root.submit("continue", 1L, f.root.generation(), 2);
+            f.root.submit("continue", 1L, f.root.generation(), 2, null);
             check(!f.root.delegationAllowed(), "Continue silently removed the explicit user ban");
         } finally { f.root.cancel(); }
     }

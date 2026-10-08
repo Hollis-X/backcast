@@ -197,7 +197,7 @@ public final class LlmStreamLifecycleRegressionTest {
         try (FiniteServer server = new FiniteServer(body, json, truncated)) {
             LlmClient client = server.client();
             LlmClient.Reply reply = client.send(Arrays.asList(Message.user("fixture")), null, null);
-            check(server.requests.get() == 1 && client.requestActivity() == null, "Finite SDK request leaked or silently repeated");
+            check(server.requests.get() == 1, "Finite SDK request leaked or silently repeated");
             return reply;
         }
     }
@@ -238,7 +238,7 @@ public final class LlmStreamLifecycleRegressionTest {
             LlmClient client = server.client();
             LlmClient.Reply reply = client.sendIfCurrent(Arrays.asList(Message.user("fixture")), null, null,
                     new LlmClient.RequestValidity() { @Override public boolean isCurrent() { return false; } });
-            check(reply.content.length() == 0 && server.requests.get() == 0 && client.requestActivity() == null,
+            check(reply.content.length() == 0 && server.requests.get() == 0,
                     "Invalid attempt started an SDK HTTP request");
         }
     }
@@ -427,55 +427,6 @@ public final class LlmStreamLifecycleRegressionTest {
             }
         }
     }
-    private static void requestActivityTracksOnlyLiveSafeMonotonicTiming() throws Exception {
-        try (final StreamingServer server = new StreamingServer(CONTENT_DELTA, null, true, false, false, 800L)) {
-            final LlmClient client = headerClient(server, 5000, 7000);
-            final CountDownLatch content = new CountDownLatch(1);
-            final CountDownLatch resumed = new CountDownLatch(1);
-            final AtomicInteger contents = new AtomicInteger();
-            Thread worker = new Thread(new Runnable() {
-                @Override public void run() {
-                    send(server, client, new LlmClient.Sink() {
-                        @Override public void onReasoning(String value) { }
-                        @Override public void onContent(String value) {
-                            if (contents.incrementAndGet() == 1) content.countDown();
-                            else resumed.countDown();
-                        }
-                        @Override public void onToolCall(int index, String id, String name, String args) { }
-                    });
-                }
-            });
-            worker.setDaemon(true); worker.start();
-            try {
-                check(server.started.await(2, TimeUnit.SECONDS), "Activity fixture never received headers request");
-                Thread.sleep(50L);
-                LlmClient.RequestActivity headers = client.requestActivity();
-                check(headers != null && headers.quietMs >= 30L,
-                        "Pending header activity exposed progress or lost the original monotonic origin");
-                check(content.await(2, TimeUnit.SECONDS), "Activity fixture never delivered content");
-                Thread.sleep(200L);
-                LlmClient.RequestActivity quiet = client.requestActivity();
-                check(quiet != null && quiet.quietMs >= 150L && quiet.quietMs < 500L,
-                        "Empty heartbeat reset live silence");
-                server.extraContent = true;
-                check(resumed.await(2, TimeUnit.SECONDS), "Activity fixture never resumed meaningful content");
-                server.extraContent = false;
-                Thread.sleep(20L);
-                LlmClient.RequestActivity progress = client.requestActivity();
-                check(progress != null && progress.quietMs < 150L,
-                        "New meaningful SDK content did not reset live quiet time");
-                client.abort();
-                check(client.requestActivity() == null, "Cancelled request still exposed active metadata");
-                worker.join(1500L); check(!worker.isAlive(), "Cancelled activity worker leaked");
-            } finally { client.abort(); server.stop.countDown(); worker.join(2000L); }
-        }
-        try (FiniteServer server = new FiniteServer(SSE, false, false)) {
-            LlmClient client = server.client();
-            check(client.requestActivity() == null, "Unused client exposed request metadata");
-            check(client.send(Arrays.asList(Message.user("fixture")), null, null).error == null
-                            && client.requestActivity() == null, "Completed SDK request still exposed live metadata");
-        }
-    }
     private static void responseSizeLimitAppliesToSdkJsonAndSseBodies() throws Exception {
         StringBuilder text = new StringBuilder(); for (int i = 0; i < 300; i++) text.append('x');
         for (boolean json : new boolean[]{true, false}) {
@@ -602,7 +553,7 @@ public final class LlmStreamLifecycleRegressionTest {
                 "failedErrorBodyReadPreservesTheReceivedHttpStatus", "silentResponseBodyUsesTheConfiguredIdleBudget",
                 "totalBudgetStopsEvenAStreamWithContinuousModelOutput", "cancellationInterruptsSilentHeadersAndBodyImmediately",
                 "serverRetryAndRedirectInstructionsNeverRepeatRequestsInsideTransport",
-                "requestActivityTracksOnlyLiveSafeMonotonicTiming", "responseSizeLimitAppliesToSdkJsonAndSseBodies",
+                "responseSizeLimitAppliesToSdkJsonAndSseBodies",
                 "httpFailureRetainsPrivateProviderStatusAndCauseWithoutChangingUiError",
                 "diagnosticsDistinguishHeaderWaitFromSilentStreamBody", "providerEchoesOfCredentialsPromptsAndToolArgumentsAreRedacted",
                 "modelListFailuresCarryTheSamePrivateDiagnostic", "clippedLongPromptEchoIsOmittedWithoutLosingHttpDiagnosis",

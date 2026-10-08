@@ -7,11 +7,10 @@ import android.os.Looper;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
-import android.widget.RadioGroup;
 import android.widget.TextView;
-import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.tool.EmbeddedToolchain;
 import com.mkei.backcast.tool.ToolCatalog;
@@ -41,8 +40,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private Settings settings;
     private String toolId;
     private CheckBox useRoot;
-    private RadioGroup permission;
-    private TextView permissionNote, packageStatus, detailName, detailInfo, detailOutput, operationStatus, installProgressText;
+    private TextView packageStatus, detailName, detailInfo, detailOutput, operationStatus, installProgressText;
     private View installProgressContainer;
     private ProgressBar installProgress;
     private boolean progressTerminal;
@@ -82,8 +80,6 @@ public final class ToolConfigActivity extends AppCompatActivity {
         toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, 0xFF0D0D0D, dp(22)));
         toolbar.setNavigationOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { finish(); } });
         useRoot = (CheckBox) findViewById(R.id.tool_use_root);
-        permission = (RadioGroup) findViewById(R.id.tool_permission);
-        permissionNote = (TextView) findViewById(R.id.tool_permission_note);
         packageStatus = (TextView) findViewById(R.id.tool_package_status);
         detailName = (TextView) findViewById(R.id.tool_detail_name);
         detailInfo = (TextView) findViewById(R.id.tool_detail_info);
@@ -101,34 +97,14 @@ public final class ToolConfigActivity extends AppCompatActivity {
         batchProgressContainer = findViewById(R.id.tool_batch_progress_container);
         batchProgress = (ProgressBar) findViewById(R.id.tool_batch_progress);
         batchProgressText = (TextView) findViewById(R.id.tool_batch_progress_text);
-        Button save = (Button) findViewById(R.id.tool_save_permissions);
-        Icons.left(save, Icons.SHIELD, 0xFF0D0D0D, dp(18));
         Icons.left(install, Icons.FOLDER, 0xFF0D0D0D, dp(18));
         Icons.left(remove, Icons.STOP, 0xFF0D0D0D, dp(18));
         Icons.left(probe, Icons.PLAY, 0xFF0D0D0D, dp(18));
         Icons.left(cancel, Icons.STOP, 0xFF0D0D0D, dp(18));
         Icons.left(batchProbe, Icons.PLAY, 0xFF0D0D0D, dp(18));
-        useRoot.setChecked(savedInstanceState == null ? settings.useRoot()
-                : savedInstanceState.getBoolean("draft_root", settings.useRoot()));
-        permission.check(permissionId(savedInstanceState == null ? settings.accessLevel()
-                : savedInstanceState.getString("draft_permission", settings.accessLevel())));
-        refreshPermissionNote();
-        permission.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
-            @Override public void onCheckedChanged(RadioGroup group, int id) { refreshPermissionNote(); }
-        });
-        save.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                boolean changed = settings.useRoot() != useRoot.isChecked() || !settings.accessLevel().equals(permissionValue());
-                if (changed) {
-                    if (active != null) cancelActiveToolkit();
-                    probeResults.clear(); probeContext = "";
-                }
-                settings.setUseRoot(useRoot.isChecked());
-                settings.setAccessLevel(permissionValue());
-                RunHub.get(ToolConfigActivity.this).retargetTools();
-                if (changed) loadTools(false);
-                Toast.makeText(ToolConfigActivity.this, R.string.toolkit_permission_saved, Toast.LENGTH_SHORT).show();
-            }
+        useRoot.setChecked(settings.useRoot());
+        useRoot.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton button, boolean checked) { updateRoot(checked); }
         });
         install.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { manage("package_install", R.string.toolkit_installing_offline); }
@@ -163,8 +139,6 @@ public final class ToolConfigActivity extends AppCompatActivity {
     @Override protected void onResume() { super.onResume(); if (active == null) loadTools(progressTerminal || batchTerminal); }
 
     @Override protected void onSaveInstanceState(Bundle state) {
-        state.putBoolean("draft_root", useRoot.isChecked());
-        state.putString("draft_permission", permissionValue());
         JSONArray results = new JSONArray();
         for (JSONObject result : probeResults.values()) results.put(result);
         state.putString("probe_results", results.toString());
@@ -515,18 +489,14 @@ public final class ToolConfigActivity extends AppCompatActivity {
         return "";
     }
 
-    private void refreshPermissionNote() {
-        int resource = permission.getCheckedRadioButtonId() == R.id.tool_access_guarded ? R.string.access_guarded_note
-                : permission.getCheckedRadioButtonId() == R.id.tool_access_strict ? R.string.access_strict_note : R.string.access_full_note;
-        permissionNote.setText(resource);
-    }
-    private static int permissionId(String value) {
-        return Settings.ACCESS_GUARDED.equals(value) ? R.id.tool_access_guarded
-                : Settings.ACCESS_STRICT.equals(value) ? R.id.tool_access_strict : R.id.tool_access_full;
-    }
-    private String permissionValue() {
-        return permission.getCheckedRadioButtonId() == R.id.tool_access_guarded ? Settings.ACCESS_GUARDED
-                : permission.getCheckedRadioButtonId() == R.id.tool_access_strict ? Settings.ACCESS_STRICT : Settings.ACCESS_FULL;
+    private void updateRoot(boolean enabled) {
+        if (settings.useRoot() == enabled) return;
+        if (active != null) cancelActiveToolkit();
+        probeResults.clear();
+        probeContext = "";
+        settings.setUseRoot(enabled);
+        RunHub.get(this).retargetTools();
+        loadTools(false);
     }
     private static JSONObject toolkitArguments(String action, String id) {
         JSONObject args = new JSONObject();

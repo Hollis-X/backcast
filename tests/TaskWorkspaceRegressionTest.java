@@ -42,7 +42,7 @@ public final class TaskWorkspaceRegressionTest {
             loop.reset("Only do the user's task."); loop.setEnvironment("Only do the user's task.", storage.getPath());
         }
         void submit(String text, Check check) {
-            client.next = check; loop.submit(text, 1, loop.generation(), 1);
+            client.next = check; loop.submit(text, 1, loop.generation(), 1, null);
             require(client.next == null, "Turn failed before checking scope");
         }
     }

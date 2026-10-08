@@ -145,18 +145,19 @@ public final class SettingsChoiceRegressionTest {
                 + "static class Toast{static final int LENGTH_SHORT=0;static Toast makeText(UserPreferencesActivity a,int r,int d){return new Toast();}void show(){}}"
                 + "static class Settings{static final String AGENT_ULTRA=\"ultra\",AGENT_MANUAL=\"manual\",EFFORT_ULTRA=\"ultra\";"
                 + "Map<String,Object> preferences=new HashMap<String,Object>();int writes;Settings(){}Settings(UserPreferencesActivity a){preferences=a.settings.preferences;}"
-                + "void saveUserPreferences(String v,String s,String l,String e,int c,String p){preferences.put(\"verbosity\",v);"
-                + "preferences.put(\"summary\",s);preferences.put(\"language\",l);preferences.put(\"effort\",e);"
+                + "void saveUserPreferences(String v,String s,String l,int c,String p){preferences.put(\"verbosity\",v);"
+                + "preferences.put(\"summary\",s);preferences.put(\"language\",l);"
                 + "preferences.put(\"concurrency\",c);preferences.put(\"prompt\",p);writes++;}boolean useRoot(){return false;}"
+                + "String effectiveReasoningEffort(){Object e=preferences.get(\"effort\");return e==null?\"low\":e.toString();}"
                 + "String environmentContext(boolean r,String m,int c){return r+\"/\"+m+\"/\"+c;}}"
                 + "Resources resources=new Resources(); TextView description=new TextView(),envContext=new TextView(),agentStatus=new TextView();"
                 + "Settings settings=new Settings();int finishes,lastStatus;Object[] lastStatusArgs;void finish(){finishes++;}"
                 + "String getString(int r,Object...args){lastStatus=r;lastStatusArgs=args;return r+Arrays.toString(args);}"
                 + "EditText baseUrl=new EditText(),apiKey=new EditText(),model=new EditText(),systemPrompt=new EditText();CheckBox useRoot=new CheckBox();"
-                + "Spinner outputVerbosity=new Spinner(),reasoningSummary=new Spinner(),outputLanguage=new Spinner(),agentConcurrency=new Spinner(),reasoningEffort=new Spinner();"
+                + "Spinner outputVerbosity=new Spinner(),reasoningSummary=new Spinner(),outputLanguage=new Spinner(),agentConcurrency=new Spinner();"
                 + "Resources getResources(){return resources;} View findViewById(int id){return description;} Inflater getLayoutInflater(){return new Inflater();}"
                 + members.get("OUTPUT_VERBOSITY_VALUES")+members.get("REASONING_SUMMARY_VALUES")+members.get("OUTPUT_LANGUAGE_VALUES")
-                + members.get("AGENT_CONCURRENCY_VALUES")+members.get("REASONING_EFFORT_VALUES")
+                + members.get("AGENT_CONCURRENCY_VALUES")
                 + members.get("saveSettings")+members.get("refreshAgentPreview")+members.get("onChoiceChanged")
                 + "View.OnClickListener saveAction="+members.get("saveAction")+";View.OnClickListener backAction="+members.get("backAction")+";"
                 + members.get("bindChoices") + members.get("ChoiceAdapter") + members.get("ChoiceRow")
@@ -172,14 +173,18 @@ public final class SettingsChoiceRegressionTest {
     private static void run(Path root, URLClassLoader loader) throws Exception {
         Element strings=xml(root.resolve("app/src/main/res/values/strings.xml"));
         Element layout=xml(root.resolve("app/src/main/res/layout/activity_user_preferences.xml"));
+        String layoutSource=Files.readString(root.resolve("app/src/main/res/layout/activity_user_preferences.xml"));
+        String activitySource=Files.readString(root.resolve("app/src/main/java/com/mkei/backcast/UserPreferencesActivity.java"));
+        check(!layoutSource.contains("reasoning_effort") && !activitySource.contains("reasoningEffort"),"Response preferences still contain an independently owned effort draft");
+        pass("response preferences do not duplicate the main effort selector");
         Element row=xml(root.resolve("app/src/main/res/layout/settings_choice_item.xml"));
         Class<?> activityType=loader.loadClass("UserPreferencesActivity"), spinnerType=loader.loadClass("UserPreferencesActivity$Spinner"),
                 viewType=loader.loadClass("UserPreferencesActivity$View"),groupType=loader.loadClass("UserPreferencesActivity$ViewGroup");
         java.lang.reflect.Constructor<?> spinnerConstructor=spinnerType.getDeclaredConstructor();spinnerConstructor.setAccessible(true);
-        String[] keys={"output_verbosity","reasoning_summary","output_language","agent_concurrency","reasoning_effort"};
+        String[] keys={"output_verbosity","reasoning_summary","output_language","agent_concurrency"};
         String[][] values={{"default","low","medium","high"},{"auto","concise","detailed","none"},
                 {"zh-CN","zh-TW","en","ja","ko","es","fr","de"},
-                {"1","2","3","4"},{"off","low","medium","high","xhigh","max","ultra"}};
+                {"1","2","3","4"}};
         for(int k=0;k<keys.length;k++) {
             String[] labels=array(strings,keys[k]+"_labels"),descriptions=array(strings,keys[k]+"_descriptions");
             check(labels.length==values[k].length && descriptions.length==labels.length,"aligned arrays "+keys[k]);
@@ -233,40 +238,37 @@ public final class SettingsChoiceRegressionTest {
     private static void saveAndPreviewBehaviors(Class<?> type) throws Exception {
         Object activity=type.getConstructor().newInstance(), settings=field(activity,"settings");
         field(field(activity,"systemPrompt"),"text","systemPrompt");
-        String[] spinners={"outputVerbosity","reasoningSummary","outputLanguage","agentConcurrency","reasoningEffort"};
-        int[] selected={2,3,2,3,6};
+        String[] spinners={"outputVerbosity","reasoningSummary","outputLanguage","agentConcurrency"};
+        int[] selected={2,3,2,3};
         for(int i=0;i<spinners.length;i++) field(field(activity,spinners[i]),"position",selected[i]);
-        call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
         @SuppressWarnings("unchecked") Map<String,Object> values=(Map<String,Object>)field(settings,"preferences");
-        check(values.isEmpty() && (Integer)field(settings,"writes")==0,"unsaved preview wrote settings");
-        check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
-                && "ultra".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"ultra was mapped to another effort or locked the selector");
-        check((Integer)field(field(activity,"reasoningEffort"),"position")==6,"ultra was not an independent effort choice");
+        values.put("effort","ultra");
+        call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
+        check(values.size()==1 && (Integer)field(settings,"writes")==0,"unsaved preview wrote settings");
+        check("ultra".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"preview did not read the current ultra effort");
         check("false/ultra/4".equals(field(field(activity,"envContext"),"text")),"unsaved mode/count preview was stale");
-        pass("ultra preview keeps the selected ultra value without persisting the draft");
+        pass("preview uses current effort and draft concurrency without persisting");
         Object back=field(activity,"backAction");
         call(back,"onClick",new Class[]{Class.forName("UserPreferencesActivity$View",true,type.getClassLoader())},(Object)null);
-        check(values.isEmpty() && (Integer)field(activity,"finishes")==1,"returning from settings persisted drafts");
+        check(values.size()==1 && "ultra".equals(values.get("effort")) && (Integer)field(activity,"finishes")==1,"returning from settings persisted drafts");
         pass("returning from settings discards the unsaved agent draft");
+        values.put("effort","max");
         Object save=field(activity,"saveAction");
         call(save,"onClick",new Class[]{Class.forName("UserPreferencesActivity$View",true,type.getClassLoader())},(Object)null);
         check(!values.containsKey("mode") && Integer.valueOf(4).equals(values.get("concurrency"))
-                && "ultra".equals(values.get("effort")) && "en".equals(values.get("language"))
+                && "max".equals(values.get("effort")) && "en".equals(values.get("language"))
                 && "none".equals(values.get("summary")) && "medium".equals(values.get("verbosity")),"save ignored one of the choices");
         check((Integer)field(activity,"finishes")==2,"save did not retain the existing return behavior");
-        pass("explicit save writes all agent and response choices before returning");
-        field(field(activity,"reasoningEffort"),"position",5);
-        call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
-        check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
-                && (Boolean)field(field(activity,"agentConcurrency"),"enabled")
-                && "max".equals(((Object[])field(activity,"lastStatusArgs"))[1])
-                && "false/manual/4".equals(field(field(activity,"envContext"),"text")),"max preview still used ultra delegation");
-        field(field(activity,"reasoningEffort"),"position",0);
-        call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
-        check((Boolean)field(field(activity,"reasoningEffort"),"enabled")
-                && (Boolean)field(field(activity,"agentConcurrency"),"enabled")
-                && "off".equals(((Object[])field(activity,"lastStatusArgs"))[1]),"manual did not restore the user's configured effort");
-        pass("max and off remain independently selectable and require explicit delegation");
+        pass("explicit save preserves the latest effort while saving response and concurrency choices");
+        for(String effort:new String[]{"off","xhigh","max","ultra"}) {
+            values.put("effort",effort);
+            call(activity,"refreshAgentPreview",new Class[]{settings.getClass()},settings);
+            check((Boolean)field(field(activity,"agentConcurrency"),"enabled")
+                    && effort.equals(((Object[])field(activity,"lastStatusArgs"))[1])
+                    && ("false/"+("ultra".equals(effort)?"ultra":"manual")+"/4").equals(field(field(activity,"envContext"),"text")),"preview ignored current effort "+effort);
+            check((Integer)field(settings,"writes")==1,"preview persisted an effort selection");
+        }
+        pass("all current effort values preview without a duplicate selector or writes");
     }
     public static void main(String[] args) throws Exception {
         Path root=Paths.get(args[0]),build=Files.createTempDirectory("backcast-settings-choice-");

@@ -21,7 +21,6 @@ public class UserPreferencesActivity extends AppCompatActivity {
     private static final String[] REASONING_SUMMARY_VALUES = { "auto", "concise", "detailed", "none" };
     private static final String[] OUTPUT_LANGUAGE_VALUES = { "zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de" };
     private static final String[] AGENT_CONCURRENCY_VALUES = { "1", "2", "3", "4" };
-    private static final String[] REASONING_EFFORT_VALUES = { "off", "low", "medium", "high", "xhigh", "max", "ultra" };
 
     private EditText systemPrompt;
     private TextView envContext;
@@ -30,7 +29,6 @@ public class UserPreferencesActivity extends AppCompatActivity {
     private Spinner reasoningSummary;
     private Spinner outputLanguage;
     private Spinner agentConcurrency;
-    private Spinner reasoningEffort;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -49,7 +47,6 @@ public class UserPreferencesActivity extends AppCompatActivity {
         reasoningSummary = (Spinner) findViewById(R.id.reasoning_summary);
         outputLanguage = (Spinner) findViewById(R.id.output_language);
         agentConcurrency = (Spinner) findViewById(R.id.agent_concurrency);
-        reasoningEffort = (Spinner) findViewById(R.id.reasoning_effort);
         final Settings settings = new Settings(this);
         bindChoices(outputVerbosity, R.array.output_verbosity_labels, R.array.output_verbosity_descriptions,
                 R.id.output_verbosity_description, OUTPUT_VERBOSITY_VALUES, draft(state, "verbosity", settings.outputVerbosity()));
@@ -60,8 +57,6 @@ public class UserPreferencesActivity extends AppCompatActivity {
         bindChoices(agentConcurrency, R.array.agent_concurrency_labels, R.array.agent_concurrency_descriptions,
                 R.id.agent_concurrency_description, AGENT_CONCURRENCY_VALUES,
                 draft(state, "concurrency", Integer.toString(settings.agentConcurrency())));
-        bindChoices(reasoningEffort, R.array.reasoning_effort_labels, R.array.reasoning_effort_descriptions,
-                R.id.reasoning_effort_description, REASONING_EFFORT_VALUES, draft(state, "effort", settings.reasoningEffort()));
         systemPrompt.setText(draft(state, "prompt", settings.systemPrompt()));
         refreshAgentPreview(settings);
         Button save = (Button) findViewById(R.id.save);
@@ -84,7 +79,6 @@ public class UserPreferencesActivity extends AppCompatActivity {
         state.putString("summary", selectedValue(reasoningSummary, REASONING_SUMMARY_VALUES));
         state.putString("language", selectedValue(outputLanguage, OUTPUT_LANGUAGE_VALUES));
         state.putString("concurrency", selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES));
-        state.putString("effort", selectedValue(reasoningEffort, REASONING_EFFORT_VALUES));
         state.putString("prompt", systemPrompt.getText().toString());
         super.onSaveInstanceState(state);
     }
@@ -93,17 +87,16 @@ public class UserPreferencesActivity extends AppCompatActivity {
         settings.saveUserPreferences(selectedValue(outputVerbosity, OUTPUT_VERBOSITY_VALUES),
                 selectedValue(reasoningSummary, REASONING_SUMMARY_VALUES),
                 selectedValue(outputLanguage, OUTPUT_LANGUAGE_VALUES),
-                selectedValue(reasoningEffort, REASONING_EFFORT_VALUES),
                 Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES)),
                 systemPrompt.getText().toString());
     }
 
     private void onChoiceChanged(Spinner spinner) {
-        if (spinner == agentConcurrency || spinner == reasoningEffort) refreshAgentPreview(new Settings(this));
+        if (spinner == agentConcurrency) refreshAgentPreview(new Settings(this));
     }
 
     private void refreshAgentPreview(Settings settings) {
-        String effort = selectedValue(reasoningEffort, REASONING_EFFORT_VALUES);
+        String effort = settings.effectiveReasoningEffort();
         String mode = Settings.EFFORT_ULTRA.equals(effort) ? Settings.AGENT_ULTRA : Settings.AGENT_MANUAL;
         int concurrency = Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES));
         if (agentStatus != null) agentStatus.setText(getString(Settings.AGENT_ULTRA.equals(mode)

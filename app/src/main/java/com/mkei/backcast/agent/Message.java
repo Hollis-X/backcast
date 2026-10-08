@@ -1,5 +1,6 @@
 package com.mkei.backcast.agent;
 
+import com.mkei.backcast.mcp.McpSelection;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -40,6 +41,8 @@ public class Message {
     public boolean delegationForbidden;
     /** Locally captured human path scope, never included in API messages. */
     public JSONArray taskPaths;
+    /** Explicit local MCP chooser selection; never interpreted from model-visible text. */
+    public McpSelection mcpSelection;
 
     public Message(String role, String content) {
         this.role = role;
@@ -132,6 +135,7 @@ public class Message {
             if (delegationAuthorized != null) item.put("delegation_authorized", delegationAuthorized);
             if (delegationForbidden) item.put("delegation_forbidden", true);
             if (taskPaths != null) item.put("task_paths", taskPaths);
+            if (USER.equals(role) && mcpSelection != null) item.put("mcp_selection", mcpSelection.toJson());
             if (workDir != null && !workDir.isEmpty()) item.put("work_dir", workDir);
             return item;
         } catch (Exception invalid) {
@@ -151,6 +155,11 @@ public class Message {
         if (item.has("delegation_authorized")) message.delegationAuthorized = Boolean.valueOf(item.optBoolean("delegation_authorized"));
         message.delegationForbidden = item.optBoolean("delegation_forbidden", false);
         message.taskPaths = item.optJSONArray("task_paths");
+        if (item.has("mcp_selection")) {
+            if (!USER.equals(message.role)) throw new IllegalStateException("MCP 工具选择只能属于用户消息");
+            try { message.mcpSelection = McpSelection.fromJson(item.getJSONObject("mcp_selection")); }
+            catch (Exception invalid) { throw new IllegalStateException("MCP 工具选择记录损坏", invalid); }
+        }
         message.workDir = item.optString("work_dir", "");
         return message;
     }

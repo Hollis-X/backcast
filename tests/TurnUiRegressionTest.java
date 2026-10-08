@@ -617,8 +617,11 @@ public final class TurnUiRegressionTest {
             String expected = phase.equals("tool_ready") ? "等待执行" : phase.equals("tool_review") ? "权限检查中" : "等待授权";
             check(toolState(view, step).equals(expected) && !(Boolean) get(step, "started"),
                     "Pre-execution stage claims a running command: " + phase);
-            check(!((String) invoke(trace, "progressCaption", true, -1L)).contains("private_argument"),
-                    "Header displayed full tool arguments");
+            Object header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
+            invoke(view, "bindSummary", header, trace);
+            check(!((String) get(header, "text")).contains("private_argument")
+                            && !((String) get(header, "text")).contains(expected),
+                    "Header displayed tool arguments or stage text");
         }
         invoke(trace, "startStep", "shell", args);
         check(toolState(view, step).equals("执行中") && (Boolean) get(step, "started"), "Actual start remained a preview");
@@ -645,11 +648,11 @@ public final class TurnUiRegressionTest {
         invoke(view, "applyTurnProgress", "failed", "", "");
         Object header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
         invoke(view, "bindSummary", header, trace);
-        check(get(header, "text").equals("总耗时 400s · 等待模型"),
+        check(get(header, "text").equals("总耗时 400s"),
                 "Live header leaked request retries or private failure detail: " + get(header, "text"));
         invoke(view, "applyTurnProgress", "model", "", "");
         invoke(view, "bindSummary", header, trace);
-        check(get(header, "text").equals("总耗时 400s · 等待模型"),
+        check(get(header, "text").equals("总耗时 400s"),
                 "Next model request leaked private retry metadata");
         field(trace, "elapsedMs", 400000L);
         invoke(view, "bindSummary", header, trace);
@@ -690,55 +693,21 @@ public final class TurnUiRegressionTest {
         pass("waitingAndFailedRequestRowsNeverOpenDiagnosticOrEmptySheets");
     }
 
-    private static LlmClient.RequestActivity requestTiming(long quiet) throws Exception {
-        java.lang.reflect.Constructor<LlmClient.RequestActivity> constructor = LlmClient.RequestActivity.class
-                .getDeclaredConstructor(long.class);
-        constructor.setAccessible(true);
-        return constructor.newInstance(quiet);
-    }
-
-    private static final class ActivityClient extends LlmClient {
-        volatile RequestActivity timing;
-        ActivityClient() { super(new Config("http://localhost", "fixture", "fixture")); }
-        @Override public RequestActivity requestActivity() { return timing; }
-    }
-
-    private static AgentLoop activityLoop(ActivityClient client) throws Exception {
-        AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
-        field(loop, "busy", true); field(loop, "requestClient", client); field(loop, "requestLease", new Object());
-        field(loop, "requestToken", get(loop, "runToken")); field(loop, "requestGeneration", get(loop, "generation"));
-        return loop;
-    }
-
-    private static void liveHeadersDistinguishSilenceAndResumeWithoutResettingTotal() throws Exception {
+    private static void liveHeadersShowOnlyElapsedAcrossEveryStage() throws Exception {
         Object view = progressFixture(), trace = get(view, "currentTrace"),
                 header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
         SystemClock.set(500000L); field(view, "turnStartedAt", 100000L);
-        ActivityClient client = new ActivityClient(); AgentLoop loop = activityLoop(client); field(view, "loop", loop);
-        invoke(trace, "setProgress", "thinking", "", "");
-        client.timing = requestTiming(9999L);
-        invoke(view, "bindSummary", header, trace);
-        check(((String) get(header, "text")).contains("正在思考") && !((String) get(header, "text")).contains("静默"),
-                "Short gaps were incorrectly labelled as stalled responses");
-        invoke(trace, "setProgress", "thinking", "", "");
-        client.timing = requestTiming(10500L);
-        invoke(view, "bindSummary", header, trace);
-        String silent = (String) get(header, "text");
-        check(silent.contains("总耗时 400s") && silent.contains("等待模型响应 · 已静默 10s")
-                        && !silent.contains("重试") && !silent.contains("HTTP 503"),
-                "Quiet request kept a thinking label, reset total time, or leaked retry diagnostics");
-        client.timing = requestTiming(100L);
-        invoke(view, "bindSummary", header, trace);
-        check(((String) get(header, "text")).contains("正在思考") && !((String) get(header, "text")).contains("已静默"),
-                "Real output did not restore the normal live phase");
-        client.timing = null; invoke(trace, "setProgress", "running", "shell", "");
-        invoke(view, "bindSummary", header, trace);
-        check(((String) get(header, "text")).contains("工具执行中") && !((String) get(header, "text")).contains("已静默"),
-                "Completed request timing leaked into tool execution");
-        client.timing = requestTiming(80000L); field(trace, "elapsedMs", 400000L);
+        for (String phase : Arrays.asList("model", "thinking", "responding", "preview", "tool_ready",
+                "tool_review", "tool_approval", "running", "children")) {
+            invoke(trace, "setProgress", phase, "shell", "private_argument");
+            invoke(view, "bindSummary", header, trace);
+            check(((String) get(header, "text")).equals("总耗时 400s"),
+                    "Work header exposes stage, quiet time or arguments: " + phase);
+        }
+        field(trace, "elapsedMs", 400000L);
         invoke(view, "bindSummary", header, trace);
         check(((String) get(header, "text")).equals("工作了 400s"), "Historical rows acquired active timing or private retries");
-        pass("liveHeadersUseActualRequestSilenceAndRecoverOnRealOutput");
+        pass("liveHeadersShowOnlyElapsedAcrossEveryStage");
     }
 
     private static void realThinkingAndToolsOpenOnlyTheirTimelineAndCleanUpRefresh() throws Exception {
@@ -774,62 +743,6 @@ public final class TurnUiRegressionTest {
         invoke(view, "showActivitySheet", fullActivityRange(hidden));
         check((Integer) get(view, "sheetOpens") == 2, "Hidden reasoning opened an empty replacement popup");
         pass("realThinkingAndToolsOpenOnlyTheirTimelineAndCleanUpRefresh");
-    }
-
-    private static void liveTimingBridgeRejectsCancelledTurnsAndOldRequestFinally() throws Exception {
-        final java.util.concurrent.CountDownLatch oldEntered = new java.util.concurrent.CountDownLatch(1),
-                newEntered = new java.util.concurrent.CountDownLatch(1), releaseOld = new java.util.concurrent.CountDownLatch(1),
-                releaseNew = new java.util.concurrent.CountDownLatch(1);
-        final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
-        final java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
-        final LlmClient.RequestActivity timing = requestTiming(11000L);
-        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
-            @Override public RequestActivity requestActivity() { return timing; }
-            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
-                int index = calls.incrementAndGet();
-                (index == 1 ? oldEntered : newEntered).countDown();
-                try {
-                    check((index == 1 ? releaseOld : releaseNew).await(5, java.util.concurrent.TimeUnit.SECONDS),
-                            "Bridge fixture request was not released");
-                } catch (InterruptedException error) { throw new AssertionError(error); }
-                Reply reply = new Reply(); reply.content = "done"; return reply;
-            }
-        };
-        final AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet());
-        field(loop, "busy", true); field(loop, "runToken", 1); field(loop, "generation", 0);
-        final Method send = AgentLoop.class.getDeclaredMethod("sendRequest", List.class, JSONArray.class,
-                LlmClient.Sink.class, int.class, int.class, String.class); send.setAccessible(true);
-        Thread old = new Thread(() -> {
-            try { send.invoke(loop, Arrays.asList(Message.user("old")), null, null, 1, 0, "model"); }
-            catch (Throwable error) { failure.set(error); }
-        }, "bridge-old-request");
-        Thread next = new Thread(() -> {
-            try { send.invoke(loop, Arrays.asList(Message.user("new")), null, null, 2, 0, "model"); }
-            catch (Throwable error) { failure.set(error); }
-        }, "bridge-new-request");
-        try {
-            check(loop.requestActivity() == null, "Idle request bridge exposed a client's unrelated activity");
-            old.start(); check(oldEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "Old request never entered");
-            check(loop.requestActivity() == timing, "Current active request lost its metadata");
-            field(loop, "runToken", 2);
-            check(loop.requestActivity() == null, "Replaced turn exposed old request metadata");
-            next.start(); check(newEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "New request never entered");
-            releaseOld.countDown(); old.join(5000L);
-            check(!old.isAlive() && loop.requestActivity() == timing,
-                    "Old same-client finally cleared the new request ownership");
-            field(loop, "busy", false); check(loop.requestActivity() == null, "Finished turn retained active timing");
-            field(loop, "busy", true); field(loop, "generation", 1);
-            check(loop.requestActivity() == null, "Other session generation retained active timing");
-            field(loop, "generation", 0); loop.cancel();
-            check(loop.requestActivity() == null, "Cancel did not immediately clear visible request timing");
-            releaseNew.countDown(); next.join(5000L);
-            check(!next.isAlive() && get(loop, "requestLease") == null && get(loop, "requestClient") == null,
-                    "Completed request retained its client lease");
-            check(failure.get() == null, "Bridge worker failed: " + failure.get());
-        } finally {
-            releaseOld.countDown(); releaseNew.countDown(); old.join(5000L); next.join(5000L);
-        }
-        pass("liveRequestBridgeRejectsStaleCancelledAndSameClientFinallyRaces");
     }
 
     private static void restoredPendingCallUsesOneRowAndReceivesResult() throws Exception {
@@ -870,7 +783,7 @@ public final class TurnUiRegressionTest {
         check(((String) call(captionRange, "caption")).endsWith("等待授权"), "Approval phase was hidden by another pending preview");
         invoke(trace, "startStep", "wait_agent", "{}");
         Object childStep = ((List<?>) get(trace, "steps")).get(2);
-        check(toolState(view, childStep).equals("等待子任务") && ((String) invoke(trace, "progressCaption", true, -1L)).equals("等待子任务"),
+        check(toolState(view, childStep).equals("等待子任务"),
                 "Wait-agent work was presented as model generation or shell execution");
         pass("currentExecutionWinsQueuedPreviewsAndChildWaitIsExplicit");
     }
@@ -1775,9 +1688,8 @@ public final class TurnUiRegressionTest {
                 toolStagesDistinguishPreviewApprovalAndActualExecution();
                 failedRequestTailCleanupPreservesTotalClock();
                 waitingAndFailedRequestRowsCannotOpenDiagnosticOrEmptySheets();
-                liveHeadersDistinguishSilenceAndResumeWithoutResettingTotal();
+                liveHeadersShowOnlyElapsedAcrossEveryStage();
                 realThinkingAndToolsOpenOnlyTheirTimelineAndCleanUpRefresh();
-                liveTimingBridgeRejectsCancelledTurnsAndOldRequestFinally();
                 restoredPendingCallUsesOneRowAndReceivesResult();
                 currentExecutionWinsQueuedPreviewsAndChildrenHaveOwnStage();
                 slicedReplayMatchesFullReplay();

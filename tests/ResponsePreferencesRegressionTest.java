@@ -94,15 +94,15 @@ public final class ResponsePreferencesRegressionTest {
             preferences(settings, "setOutputVerbosity".equals(method) ? value : get(settings, "outputVerbosity"),
                     "setReasoningSummary".equals(method) ? value : get(settings, "reasoningSummary"),
                     "setOutputLanguage".equals(method) ? value : get(settings, "outputLanguage"),
-                    get(settings, "reasoningEffort"), concurrency(settings), get(settings, "systemPrompt"));
+                    concurrency(settings), get(settings, "systemPrompt"));
             return;
         }
         settingsType.getMethod(method, String.class).invoke(settings, value);
     }
     private static void preferences(Object settings, String verbosity, String summary, String language,
-                                    String effort, int concurrency, String prompt) throws Exception {
-        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
-                .invoke(settings, verbosity, summary, language, effort, concurrency, prompt);
+                                    int concurrency, String prompt) throws Exception {
+        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, int.class, String.class)
+                .invoke(settings, verbosity, summary, language, concurrency, prompt);
     }
     private static String policy(String method, String value) throws Exception {
         return (String) policyType.getMethod(method, String.class).invoke(null, value);
@@ -113,7 +113,7 @@ public final class ResponsePreferencesRegressionTest {
     }
     private static void customPrompt(Object settings, String prompt) throws Exception {
         preferences(settings, get(settings, "outputVerbosity"), get(settings, "reasoningSummary"),
-                get(settings, "outputLanguage"), get(settings, "reasoningEffort"), concurrency(settings), prompt);
+                get(settings, "outputLanguage"), concurrency(settings), prompt);
     }
 
     private static void defaultPreferencesChooseChinese() throws Exception {
@@ -241,7 +241,7 @@ public final class ResponsePreferencesRegressionTest {
     }
     private static void concurrency(Object settings, int value) throws Exception {
         preferences(settings, get(settings, "outputVerbosity"), get(settings, "reasoningSummary"),
-                get(settings, "outputLanguage"), get(settings, "reasoningEffort"), value, get(settings, "systemPrompt"));
+                get(settings, "outputLanguage"), value, get(settings, "systemPrompt"));
     }
     private static void childDefaultsAndEveryChoicePersist() throws Exception {
         Object context=context(), settings=settings(context);
@@ -335,8 +335,8 @@ public final class ResponsePreferencesRegressionTest {
     @SuppressWarnings("unchecked")
     private static void groupedAiSavePreservesPreferencesPermissionsAndWorkspace() throws Exception {
         Object context = context(), settings = settings(context);
-        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
-                .invoke(settings, "high", "none", "ja", "ultra", 4, "User-owned prompt");
+        set(settings, "setReasoningEffort", "ultra");
+        preferences(settings, "high", "none", "ja", 4, "User-owned prompt");
         settingsType.getMethod("setUseRoot", boolean.class).invoke(settings, false);
         set(settings, "setAccessLevel", "strict"); set(settings, "setPrimaryWorkDir", "/storage/emulated/0/project");
         java.util.Map<String,Object> stored = (java.util.Map<String,Object>) contextType.getField("values").get(context);
@@ -355,10 +355,10 @@ public final class ResponsePreferencesRegressionTest {
         saveProfile(settings, get(settings, "activeProviderId"), "https://new.example/v1", "new-key", "new-model", Arrays.asList("new-model", "available"));
         settingsType.getMethod("setUseRoot", boolean.class).invoke(settings, false);
         set(settings, "setAccessLevel", "guarded"); set(settings, "setPrimaryWorkDir", "/storage/emulated/0/current");
+        set(settings, "setReasoningEffort", "max");
         java.util.Map<String,Object> stored = (java.util.Map<String,Object>) contextType.getField("values").get(context);
         java.util.Map<String,Object> before = new java.util.HashMap<String,Object>(stored);
-        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
-                .invoke(settings, "medium", "detailed", "en", "max", 2, "My preference draft");
+        preferences(settings, "medium", "detailed", "en", 2, "My preference draft");
         for (String key : before.keySet()) check(before.get(key).equals(stored.get(key)), "Preference save changed another group: " + key);
         check("medium".equals(get(settings, "outputVerbosity")) && "detailed".equals(get(settings, "reasoningSummary"))
                 && "en".equals(get(settings, "outputLanguage")) && "max".equals(get(settings, "effectiveReasoningEffort"))
@@ -369,14 +369,20 @@ public final class ResponsePreferencesRegressionTest {
         Object context = context(), settings = settings(context);
         @SuppressWarnings("unchecked") java.util.Map<String,Object> values =
                 (java.util.Map<String,Object>) contextType.getField("values").get(context);
-        values.put("agent_mode", "ultra");
-        settingsType.getMethod("saveUserPreferences", String.class, String.class, String.class, String.class, int.class, String.class)
-                .invoke(settings, "invalid", null, "unknown", "max", 100, null);
+        values.put("agent_mode", "ultra"); values.put("reasoning_effort", "off");
+        preferences(settings, "invalid", null, "unknown", 100, null);
         check("default".equals(get(settings, "outputVerbosity")) && "auto".equals(get(settings, "reasoningSummary"))
                 && "zh-CN".equals(get(settings, "outputLanguage")) && concurrency(settings) == 3,
                 "Grouped save bypassed validation");
-        check("max".equals(get(settings(context), "effectiveReasoningEffort"))
-                && "manual".equals(get(settings(context), "agentMode")), "Legacy ultra changed explicit preference save");
+        check("off".equals(values.get("reasoning_effort")) && !values.containsKey("effort_policy_migrated"),
+                "Response preference save wrote the independently owned effort or migration marker");
+        check("ultra".equals(get(settings(context), "effectiveReasoningEffort")), "Response preference save suppressed legacy ultra migration");
+        for (String effort : new String[]{"off", "low", "xhigh", "max", "ultra"}) {
+            set(settings, "setReasoningEffort", effort);
+            preferences(settings, "high", "none", "en", 2, "Saved independently");
+            check(effort.equals(get(settings(context), "effectiveReasoningEffort")),
+                    "Response preference save changed the current effort: " + effort);
+        }
     }
 
     @SuppressWarnings("unchecked")

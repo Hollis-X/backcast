@@ -98,7 +98,7 @@ public final class GoalContractRegressionTest {
         }
 
         void submit(String text) {
-            loop.submit(text, 1L, loop.generation(), client.calls + 1);
+            loop.submit(text, 1L, loop.generation(), client.calls + 1, null);
             check(errors.isEmpty(), "Loop reported errors: " + errors);
         }
     }

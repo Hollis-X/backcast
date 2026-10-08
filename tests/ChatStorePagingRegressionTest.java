@@ -1,4 +1,7 @@
 import com.mkei.backcast.agent.Message;
+import com.mkei.backcast.mcp.McpSelection;
+import com.mkei.backcast.mcp.McpServer;
+import com.mkei.backcast.mcp.McpToolInfo;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -60,12 +63,15 @@ public final class ChatStorePagingRegressionTest {
                 + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5;"
                 + "private static final List<Map<String,Object>> rows=new ArrayList<Map<String,Object>>(); private static long next=1;"
                 + "public static final List<String> statements=new ArrayList<String>();public static boolean requestDiagnosticColumn;"
-                + "public static final Set<String> runColumns=new HashSet<String>();"
-                + "public static void legacyRuns(int version){runColumns.clear();if(version<4)return;"
+                + "public static final Set<String> runColumns=new HashSet<String>(),messageColumns=new HashSet<String>();"
+                + "public static void legacyRuns(int version){runColumns.clear();messageColumns.clear();messageColumns.addAll(Arrays.asList(\"id\",\"session_id\",\"role\",\"content\",\"reasoning\",\"tool_calls\",\"tool_call_id\"));"
+                + "if(version>=2)messageColumns.add(\"elapsed_ms\");if(version>=3)messageColumns.add(\"think_ms\");if(version>=7)messageColumns.add(\"display_parts\");if(version>=8)messageColumns.add(\"work_dir\");if(version>=14)messageColumns.add(\"mcp_selection\");if(version<4)return;"
                 + "runColumns.addAll(Arrays.asList(\"session_id\",\"running\",\"goal\",\"status\",\"elapsed_ms\"));"
                 + "if(version>=5)runColumns.addAll(Arrays.asList(\"turn_at\",\"turn_wall\",\"seen_at\"));"
-                + "if(version>=9)runColumns.addAll(Arrays.asList(\"tokens_used\",\"token_budget\"));if(version>=10)runColumns.add(\"budget_wrap_finished\");}"
-                + "public static void reset(){rows.clear();next=1;statements.clear();requestDiagnosticColumn=false;runColumns.clear();} public void execSQL(String s){statements.add(s);"
+                + "if(version>=9)runColumns.addAll(Arrays.asList(\"tokens_used\",\"token_budget\"));if(version>=10)runColumns.add(\"budget_wrap_finished\");if(version>=13)runColumns.addAll(Arrays.asList(\"turn_elapsed_ms\",\"turn_think_ms\"));}"
+                + "public static void reset(){rows.clear();next=1;statements.clear();requestDiagnosticColumn=false;runColumns.clear();messageColumns.clear();} public void execSQL(String s){statements.add(s);"
+                + "if(s.startsWith(\"CREATE TABLE messages (\")&&messageColumns.isEmpty())for(String field:s.substring(s.indexOf('(')+1,s.length()-1).split(\",\"))messageColumns.add(field.trim().split(\" \" )[0]);"
+                + "if(s.startsWith(\"ALTER TABLE messages ADD COLUMN \")){String column=s.substring(32).split(\" \" )[0];if(!messageColumns.add(column))throw new AssertionError(\"Duplicate messages column: \"+column);if(column.equals(\"mcp_selection\"))for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\"))row.put(\"mcp_selection\",\"\");}"
                 + "if(s.startsWith(\"CREATE TABLE IF NOT EXISTS runs (\")&&runColumns.isEmpty())"
                 + "for(String field:s.substring(s.indexOf('(')+1,s.length()-1).split(\",\"))runColumns.add(field.trim().split(\" \")[0]);"
                 + "if(s.startsWith(\"ALTER TABLE runs ADD COLUMN \")){String column=s.substring(28).split(\" \")[0];"
@@ -84,8 +90,8 @@ public final class ChatStorePagingRegressionTest {
                 + "while(selected.size()>200)rows.remove(selected.remove(0));}"
                 + "public void beginTransaction(){} public void setTransactionSuccessful(){} public void endTransaction(){}"
                 + "public long insert(String table,String nullColumn,ContentValues values){Map<String,Object> row=new HashMap<String,Object>(values);"
-                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\")||table.equals(\"runs\"))rows.add(row);return id;}"
-                + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){if(t.equals(\"runs\"))"
+                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\")||table.equals(\"runs\")||table.equals(\"context_windows\"))rows.add(row);return id;}"
+                + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){if(t.equals(\"runs\")||t.equals(\"context_windows\"))"
                 + "delete(t,\"session_id=?\",new String[]{v.get(\"session_id\").toString()});return insert(t,n,v);}"
                 + "public int update(String t,ContentValues v,String s,String[] a){if(t.equals(\"sessions\"))return 0;"
                 + "boolean clock=s.equals(\"session_id=? AND running=1\");if(!s.equals(\"id=?\")&&!clock)throw new AssertionError(s);"
@@ -115,7 +121,7 @@ public final class ChatStorePagingRegressionTest {
                 + "int maximum=limit==null?selected.size():Integer.parseInt(limit);List<Object[]> projected=new ArrayList<Object[]>();"
                 + "for(int i=0;i<Math.min(maximum,selected.size());i++){Object[] data=new Object[columns.length];"
                 + "for(int j=0;j<columns.length;j++)data[j]=selected.get(i).get(columns[j]);projected.add(data);}return new Cursor(projected);}"
-                + "public Cursor rawQuery(String sql,String[] args){if(!sql.startsWith(\"SELECT COUNT(*) FROM messages\"))throw new AssertionError(sql);"
+                + "public Cursor rawQuery(String sql,String[] args){if(sql.equals(\"SELECT MAX(id) FROM messages WHERE session_id=?\")){long maximum=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\")&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0]))maximum=Math.max(maximum,((Number)row.get(\"id\")).longValue());List<Object[]> out=new ArrayList<Object[]>();out.add(new Object[]{maximum});return new Cursor(out);}if(!sql.startsWith(\"SELECT COUNT(*) FROM messages\"))throw new AssertionError(sql);"
                 + "long count=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\")&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0])"
                 + "&&((Number)row.get(\"id\")).longValue()<Long.parseLong(args[1]))count++;"
                 + "List<Object[]> result=new ArrayList<Object[]>();result.add(new Object[]{Long.valueOf(count)});return new Cursor(result);} }");
@@ -229,6 +235,81 @@ public final class ChatStorePagingRegressionTest {
                 "Full model history could not use shared decoding");
     }
 
+    private static McpSelection selection() throws Exception {
+        McpServer server = new McpServer("local_tools", "Local tools", "https://private.example/mcp", "private-token", true, 30);
+        McpToolInfo tool = new McpToolInfo(new JSONObject().put("name", "inspect_file").put("description", "Inspect a file")
+                .put("inputSchema", new JSONObject().put("type", "object").put("properties",
+                        new JSONObject().put("path", new JSONObject().put("type", "string")))));
+        java.lang.reflect.Constructor<McpSelection> constructor = McpSelection.class.getDeclaredConstructor(McpServer.class, McpToolInfo.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(server, tool);
+    }
+
+    private static void selectedMcpToolSurvivesTranscriptAndContextCheckpoint() throws Exception {
+        Object store = fresh();
+        Message selected = Message.user("Inspect this file"); selected.workDir = "/project"; selected.mcpSelection = selection();
+        append(store, 7L, selected);
+        Message assistant = Message.assistant("Acknowledged", null); assistant.mcpSelection = selected.mcpSelection;
+        append(store, 7L, assistant);
+        Message tool = Message.toolResult("call", "result"); tool.mcpSelection = selected.mcpSelection; append(store, 7L, tool);
+        append(store, 7L, Message.user("Ordinary request"));
+        List<Message> page = messages(page(store, 7L, -1, 48));
+        check(page.get(0).mcpSelection != null && selected.mcpSelection.toJson().similar(page.get(0).mcpSelection.toJson())
+                        && "/project".equals(page.get(0).workDir) && "Inspect this file".equals(page.get(0).content),
+                "Selected MCP identity/schema or visible user request was lost during transcript decoding");
+        check(page.get(1).mcpSelection == null && page.get(2).mcpSelection == null && page.get(3).mcpSelection == null,
+                "Selection metadata leaked to assistant/tool or ordinary user messages");
+        check(!assistant.toCheckpointJson().has("mcp_selection") && !tool.toCheckpointJson().has("mcp_selection"),
+                "Model checkpoints retained selection metadata on non-user messages");
+        String saved = (String) records("messages", 7L).get(0).get("mcp_selection");
+        check(!saved.contains("private-token") && !saved.contains("private.example")
+                        && new JSONObject(saved).getString("connection_id").length() == 64,
+                "Selection storage exposed connection credentials rather than opaque identity");
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(selected, Message.assistant("Checkpoint", null)));
+        append(store, 7L, Message.user("After checkpoint"));
+        @SuppressWarnings("unchecked") List<Message> restored = (List<Message>) storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
+        check(restored.size() == 3 && restored.get(0).mcpSelection != null
+                        && selected.mcpSelection.toJson().similar(restored.get(0).mcpSelection.toJson())
+                        && "Checkpoint".equals(restored.get(1).content) && "After checkpoint".equals(restored.get(2).content),
+                "Compacted context and later messages did not restore the selected tool exactly once");
+    }
+
+    private static void updateRecord(Object store, String table, long id, String key, String value) throws Exception {
+        Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
+        @SuppressWarnings("unchecked") Map<String, Object> values = (Map<String, Object>) valuesType.getConstructor().newInstance();
+        values.put(key, value);
+        Object db = storeType.getMethod("getWritableDatabase").invoke(store);
+        databaseType.getMethod("update", String.class, valuesType, String.class, String[].class)
+                .invoke(db, table, values, "id=?", new String[]{String.valueOf(id)});
+    }
+
+    private static void corruptedMcpSelectionCannotSilentlyRestoreAnotherRequest() throws Exception {
+        for (String bad : Arrays.asList("not-json", "{}", selection().toJson().put("mapped_name", "different_tool").toString())) {
+            Object store = fresh(); Message selected = Message.user("Explicit tool request"); selected.mcpSelection = selection(); append(store, 7L, selected);
+            updateRecord(store, "messages", number(records("messages", 7L).get(0), "id"), "mcp_selection", bad);
+            for (String method : Arrays.asList("messagePage", "contextMessages")) {
+                try {
+                    if (method.equals("messagePage")) page(store, 7L, -1, 48);
+                    else storeType.getMethod(method, long.class).invoke(store, 7L);
+                    throw new AssertionError("Corrupted selection restored without an error through " + method);
+                } catch (java.lang.reflect.InvocationTargetException failure) {
+                    check(failure.getCause() instanceof IllegalStateException && failure.getCause().getMessage().contains("MCP"),
+                            "Corrupted selection failed with an unrelated error");
+                }
+            }
+        }
+        Object store = fresh(); Message selected = Message.user("Checkpoint request"); selected.mcpSelection = selection(); append(store, 7L, selected);
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(selected));
+        JSONObject broken = selected.toCheckpointJson().put("mcp_selection", new JSONObject());
+        updateRecord(store, "context_windows", number(records("context_windows", 7L).get(0), "id"), "window", new JSONArray().put(broken).toString());
+        try {
+            storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
+            throw new AssertionError("Corrupted compacted selection silently restored");
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            check(failure.getCause() instanceof IllegalStateException, "Corrupted checkpoint selection failed with an unrelated error");
+        }
+    }
+
     private static void emptyPageHasNoContext() throws Exception {
         Object page = page(fresh(), 7, -1, 48);
         check(messages(page).isEmpty() && number(page, "firstId") == 0
@@ -282,13 +363,13 @@ public final class ChatStorePagingRegressionTest {
     private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
         Object store = fresh();
         Object db = databaseType.getConstructor().newInstance();
-        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 13,
-                "Fresh databases do not request the duration checkpoint schema version");
+        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 14,
+                "Fresh databases do not request the MCP selection schema version");
         databaseType.getMethod("legacyRuns", int.class).invoke(null, 10);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 13);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 14);
         @SuppressWarnings("unchecked")
         List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 6 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
+        check(sql.size() == 7 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
                         && sql.get(0).contains("diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).contains("request_events(session_id,id)")
                         && sql.get(2).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
@@ -315,9 +396,9 @@ public final class ChatStorePagingRegressionTest {
         long oldId = (Long) databaseType.getMethod("insert", String.class, String.class, valuesType)
                 .invoke(db, "request_events", null, old);
         databaseType.getMethod("legacyRuns", int.class).invoke(null, 11);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 13);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 14);
         @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 5 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
+        check(sql.size() == 6 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
                         && sql.get(2).contains("diagnostic_errors(session_id,id)"),
                 "Version 11 migration recreated request history or did not apply the additive column default");
@@ -406,7 +487,7 @@ public final class ChatStorePagingRegressionTest {
     }
 
     private static void everyLegacyVersionUpgradesWithNullableDurationColumns() throws Exception {
-        for (int version = 1; version <= 12; version++) {
+        for (int version = 1; version <= 13; version++) {
             Object store = fresh(), db = databaseType.getConstructor().newInstance();
             databaseType.getMethod("legacyRuns", int.class).invoke(null, version);
             if (version >= 4) {
@@ -417,28 +498,38 @@ public final class ChatStorePagingRegressionTest {
                 if (version >= 5) {
                     legacy.put("turn_at", 10L); legacy.put("turn_wall", 20L); legacy.put("seen_at", 30L);
                 }
+                if (version >= 13) {
+                    legacy.put("turn_elapsed_ms", 900L); legacy.put("turn_think_ms", 0L);
+                }
                 databaseType.getMethod("insert", String.class, String.class, valuesType).invoke(db, "runs", null, legacy);
             }
             if (version >= 12) databaseType.getField("requestDiagnosticColumn").setBoolean(null, true);
-            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 13);
+            append(store, 7L, Message.user("preserved legacy request"));
+            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 14);
             @SuppressWarnings("unchecked") Set<String> columns = (Set<String>) databaseType.getField("runColumns").get(null);
             check(columns.containsAll(Arrays.asList("turn_at", "turn_wall", "seen_at", "turn_elapsed_ms",
                             "turn_think_ms", "tokens_used", "token_budget", "budget_wrap_finished")),
                     "Version " + version + " omitted old compatibility or new duration columns");
             @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-            int elapsedAlters = 0, thinkAlters = 0;
+            int elapsedAlters = 0, thinkAlters = 0, selectionAlters = 0;
             for (String statement : sql) {
                 if (statement.equals("ALTER TABLE runs ADD COLUMN turn_elapsed_ms INTEGER")) elapsedAlters++;
                 if (statement.equals("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER")) thinkAlters++;
+                if (statement.equals("ALTER TABLE messages ADD COLUMN mcp_selection TEXT NOT NULL DEFAULT ''")) selectionAlters++;
             }
-            check(elapsedAlters == (version < 4 ? 0 : 1) && thinkAlters == (version < 4 ? 0 : 1),
+            check(elapsedAlters == (version >= 4 && version < 13 ? 1 : 0) && thinkAlters == (version >= 4 && version < 13 ? 1 : 0),
                     "Version " + version + " altered duration columns after creating their latest schema");
+            check(selectionAlters == 1 && messages(page(store, 7L, -1, 48)).get(0).mcpSelection == null
+                            && "preserved legacy request".equals(messages(page(store, 7L, -1, 48)).get(0).content),
+                    "Version " + version + " failed to add exactly one empty selection default while preserving legacy requests");
             if (version >= 4) {
                 Object restored = run(store, 7L);
-                check(field(restored, "turnElapsedMs") == null && field(restored, "turnThinkMs") == null
+                check((version >= 13 ? Long.valueOf(900L).equals(field(restored, "turnElapsedMs"))
+                                && Long.valueOf(0L).equals(field(restored, "turnThinkMs"))
+                                : field(restored, "turnElapsedMs") == null && field(restored, "turnThinkMs") == null)
                                 && number(restored, "elapsedMs") == 123L && (Boolean) field(restored, "running")
                                 && "old goal".equals(field(restored, "goal")),
-                        "Version " + version + " invented a checkpoint from old clock anchors or lost its run");
+                        "Version " + version + " invented a legacy checkpoint or lost its existing run/checkpoint");
             }
             saveRun(store, 7L, true, 500L, 250L, null);
             check(number(run(store, 7L), "turnElapsedMs") == 250L && field(run(store, 7L), "turnThinkMs") == null,
@@ -452,6 +543,9 @@ public final class ChatStorePagingRegressionTest {
             nullable = statement.contains("turn_elapsed_ms INTEGER,turn_think_ms INTEGER,");
         }
         check(nullable, "Fresh schema did not create both nullable duration checkpoints");
+        @SuppressWarnings("unchecked") Set<String> messageColumns = (Set<String>) databaseType.getField("messageColumns").get(null);
+        check(messageColumns.contains("mcp_selection") && sql.toString().contains("mcp_selection TEXT NOT NULL DEFAULT ''"),
+                "Fresh schema omitted empty-default MCP selection metadata");
     }
 
     private static String repeated(char value, int count) {
@@ -609,7 +703,8 @@ public final class ChatStorePagingRegressionTest {
                 contextType = loader.loadClass("android.content.Context");
                 for (String name : Arrays.asList("newestPageIsBoundedAndAscending", "cursorSurvivesNewMessages",
                         "toolPageRetainsOnlyLeadingLabels", "hugeTurnStillHasHardPageLimit",
-                        "messageMetadataSurvivesPaging", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
+                        "messageMetadataSurvivesPaging", "selectedMcpToolSurvivesTranscriptAndContextCheckpoint",
+                        "corruptedMcpSelectionCannotSilentlyRestoreAnotherRequest", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
                         "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
                         "legacyDatabaseUpgradeAddsLocalRequestDiagnostics", "versionElevenMigrationPreservesRequestRows",
                         "runDurationsRoundTripWithoutLosingNullOrZero", "durationHeartbeatOnlyUpdatesExistingRunningSession",

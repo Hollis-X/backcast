@@ -93,14 +93,14 @@ public final class DiagnosticsRegressionTest {
     private static void detailedRequestIsRecordedOnceOutsideHistory() throws Exception {
         Store store = new Store(); LlmClient.Reply error = reply("", "HTTP 400: bad input");
         error.diagnostic = new JSONObject().put("http_status", 400).put("stage", "http_error");
-        AgentLoop loop = loop(store, new ToolRegistry(), error); loop.submit("inspect", 7, loop.generation(), 1);
+        AgentLoop loop = loop(store, new ToolRegistry(), error); loop.submit("inspect", 7, loop.generation(), 1, null);
         check(store.requests.size() == 1 && new JSONObject(store.requests.get(0)).getInt("http_status") == 400
                 && store.errors.size() == 1 && store.messages.size() == 1, "Request diagnostic duplicated/lost/polluted history");
         pass("detailedRequestIsRecordedOnceOutsideHistory");
     }
     private static void diagnosticFailuresKeepValidReplies() {
         Store store = new Store(); store.fail = true; AgentLoop loop = loop(store, new ToolRegistry(), reply("done", null));
-        loop.submit("inspect", 7, loop.generation(), 1);
+        loop.submit("inspect", 7, loop.generation(), 1, null);
         check(store.messages.size() == 2 && store.messages.get(1).content.equals("done"), "Unavailable diagnostic database discarded response");
         pass("diagnosticFailuresKeepValidReplies");
     }
@@ -108,7 +108,7 @@ public final class DiagnosticsRegressionTest {
         Store checkpoint = new Store(), diagnostics = new Store();
         AgentLoop loop = loop(checkpoint, new ToolRegistry(), reply("done", null));
         loop.setDiagnosticRecorder(diagnostics, diagnostics);
-        loop.submit("inspect", 7, loop.generation(), 1);
+        loop.submit("inspect", 7, loop.generation(), 1, null);
         check(checkpoint.messages.size() == 2 && checkpoint.requests.isEmpty() && diagnostics.requests.size() == 1
                 && diagnostics.messages.isEmpty(), "Child checkpoint displaced request diagnostics");
         pass("childCheckpointAndDiagnosticsAreIndependent");
@@ -125,7 +125,7 @@ public final class DiagnosticsRegressionTest {
         LlmClient.Reply call = reply("", null);
         call.toolCalls = new JSONArray().put(new JSONObject().put("id", "c1").put("type", "function")
                 .put("function", new JSONObject().put("name", "shell").put("arguments", "{}")));
-        AgentLoop loop = loop(store, tools, call, reply("failed", null)); loop.submit("inspect", 7, loop.generation(), 1);
+        AgentLoop loop = loop(store, tools, call, reply("failed", null)); loop.submit("inspect", 7, loop.generation(), 1, null);
         check(store.errors.size() == 1 && store.errors.get(0).contains("tool:shell:")
                 && store.errors.get(0).contains("missing executable") && store.errors.get(0).contains("c1"), "Tool failure has no queryable local evidence");
         check(store.messages.size() == 4 && Message.TOOL.equals(store.messages.get(2).role), "Diagnostics changed model tool protocol");
@@ -150,7 +150,7 @@ public final class DiagnosticsRegressionTest {
             LlmClient.Reply call = reply("", null);
             call.toolCalls = new JSONArray().put(new JSONObject().put("id", "structured")
                     .put("type", "function").put("function", new JSONObject().put("name", name).put("arguments", "{}")));
-            AgentLoop loop = loop(store, tools, call, reply("failed", null)); loop.submit("inspect", 7, loop.generation(), 1);
+            AgentLoop loop = loop(store, tools, call, reply("failed", null)); loop.submit("inspect", 7, loop.generation(), 1, null);
             check(store.errors.size() == 1 && store.errors.get(0).contains("tool:" + name)
                     && store.errors.get(0).contains("structured"), "Structured failure missing queryable database diagnostic");
             check(store.messages.get(2).content.equals(output), "Model lost exact structured tool feedback");

@@ -48,7 +48,6 @@ import com.mkei.backcast.agent.ApprovalGate;
 import com.mkei.backcast.agent.Compactor;
 import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.agent.Goal;
-import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.TokenMeter;
@@ -57,6 +56,9 @@ import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
 import com.mkei.backcast.ui.MarkdownRenderQueue;
 import com.mkei.backcast.ui.SlashInput;
+import com.mkei.backcast.ui.SlashMenuPopup;
+import com.mkei.backcast.ui.McpToolPicker;
+import com.mkei.backcast.mcp.McpSelection;
 import com.mkei.backcast.ui.SweepText;
 import com.mkei.backcast.ui.TranscriptScrollView;
 import com.mkei.backcast.ui.TurnTrace;
@@ -191,7 +193,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private View drawerOverlay;
     private View drawerPanel;
     private PopupWindow modelPopup;
-    private PopupWindow slashPopup;
+    private SlashMenuPopup slashPopup;
+    private McpToolPicker mcpToolPicker;
+    private long slashContext;
 
     private Settings settings;
     private ChatStore chatStore;
@@ -554,19 +558,43 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     tintSend(s != null && s.toString().trim().length() > 0);
                 }
                 String raw = s == null ? "" : s.toString();
+                if (mcpToolPicker != null) mcpToolPicker.textChanged(raw);
                 syncSlashPopup(raw);
                 syncSlashChip(raw);
             }
+        });
+        mcpToolPicker = new McpToolPicker(this, new McpToolPicker.Host() {
+            @Override public long context() { return slashContext; }
+            @Override public long session() { return sessionId; }
+            @Override public boolean current(long owner) { return owner == slashContext && !activityDestroyed && !isFinishing() && !sessionOpening; }
+            @Override public String text() { return prompt.getText().toString(); }
+            @Override public void draft(String text) { prompt.setText(text); prompt.setSelection(prompt.length()); }
+            @Override public void hideMenu() { hideSlashPopup(); }
+            @Override public void refreshMenu() { syncSlashPopup(prompt.getText().toString()); }
         });
         tintSend(false);
         if (chatStore.runningIds().size() > 0) {
             AgentService.start(this);
         }
-        long latest = chatStore.latestId();
+        long latest = savedInstanceState != null && savedInstanceState.containsKey("mcp_draft")
+                ? savedInstanceState.getLong("mcp_draft_session", -1) : chatStore.latestId();
         if (latest >= 0) {
             showSession(latest, false);
         } else {
             refreshIdentity();
+        }
+        if (savedInstanceState != null && savedInstanceState.containsKey("mcp_draft")) {
+            if (latest < 0) newChat();
+            mcpToolPicker.restoreDraft(savedInstanceState.getString("mcp_draft"));
+        }
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        String draft = mcpToolPicker == null ? null : mcpToolPicker.saveDraft();
+        if (draft != null) {
+            state.putString("mcp_draft", draft);
+            state.putLong("mcp_draft_session", sessionId);
         }
     }
 
@@ -574,6 +602,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     protected void onResume() {
         super.onResume();
         hideKeyboard();
+        if (mcpToolPicker != null) mcpToolPicker.reloadCatalog();
         updateStatus();
         if (!sessionOpening && settings != null && settings.isConfigured()) RunHub.get(this).retargetIfNeeded();
         refreshReasoningPreference();
@@ -622,6 +651,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     @Override
     protected void onPause() {
+        hideSlashPopup();
+        if (mcpToolPicker != null) mcpToolPicker.cancelUi();
         hideKeyboard();
         super.onPause();
     }
@@ -629,6 +660,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        resetSlashContext();
         resetSheetDetails();
         cancelApprovals();
         resetHistoryLoading();
@@ -1533,6 +1565,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         TextView title = popupText(getString(R.string.popup_intelligence), 14, R.color.text_secondary);
         title.setPadding(dp(12), dp(6), dp(12), dp(8));
         card.addView(title, wrapParams());
+        addEffortOption(card, "关闭思考", Settings.EFFORT_OFF);
         addEffortOption(card, "低", Settings.EFFORT_LOW);
         addEffortOption(card, "中", Settings.EFFORT_MEDIUM);
         addEffortOption(card, "高", Settings.EFFORT_HIGH);
@@ -1619,18 +1652,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             card.addView(provider, wrapParams());
             for (String model : models) addModelOption(card, profile.id, model);
         }
-        TextView configure = popupText(getString(available ? R.string.popup_configure_ai
-                : R.string.popup_models_empty), 14, R.color.text_secondary);
-        configure.setMinHeight(dp(44));
-        configure.setGravity(Gravity.CENTER_VERTICAL);
-        configure.setPadding(dp(8), dp(4), dp(8), dp(4));
-        configure.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View view) {
-                if (modelPopup != null) modelPopup.dismiss();
-                startActivity(new Intent(MainActivity.this, AiConfigActivity.class));
-            }
-        });
-        card.addView(configure, wrapParams());
+        if (!available) {
+            TextView empty = popupText(getString(R.string.popup_models_empty), 14, R.color.text_secondary);
+            empty.setPadding(dp(8), dp(8), dp(8), dp(8));
+            card.addView(empty, wrapParams());
+        }
     }
 
     private static List<String> savedModels(Settings.AiProfile profile) {
@@ -1734,31 +1760,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         Intent intent = new Intent(this, SubAgentsActivity.class);
         intent.putExtra(SubAgentsActivity.EXTRA_SESSION_ID, sessionId);
         startActivity(intent);
-    }
-
-    /** 芯片在底栏，菜单往上弹，避免掉到屏幕外。 */
-    private void showAbove(PopupWindow popup, View anchor, int width) {
-        if (popup == null || anchor == null) {
-            return;
-        }
-        View content = popup.getContentView();
-        int w = width > 0 ? width : dp(280);
-        content.measure(
-                View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int[] loc = new int[2];
-        anchor.getLocationOnScreen(loc);
-        int height = popup.getHeight() > 0 ? popup.getHeight() : content.getMeasuredHeight();
-        int y = loc[1] - height - dp(8);
-        if (y < dp(8)) {
-            y = dp(8);
-        }
-        if (popup.isShowing()) {
-            popup.update(loc[0], y, w, height);
-        } else {
-            popup.setWidth(w);
-            popup.showAtLocation(anchor, Gravity.NO_GRAVITY, loc[0], y);
-        }
     }
 
     private void addEffortOption(LinearLayout card, String label, final String effort) {
@@ -1880,6 +1881,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 新开会话：旧的留在库里，侧边栏还能点回去。 */
     private void newChat() {
+        resetSlashContext();
         hideKeyboard();
         resetHistoryLoading();
         hideWorkSheet();
@@ -1906,6 +1908,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void showSession(final long id, boolean closeDrawer) {
+        resetSlashContext();
         hideKeyboard();
         resetHistoryLoading();
         // 换会话时把上一轮的面板收掉，否则屏幕上留着旧一轮的内容。
@@ -2235,32 +2238,19 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void syncSlashPopup(String raw) {
-        if (stop.getVisibility() == View.VISIBLE || raw == null || !raw.startsWith("/")) {
+        if (raw == null || !raw.startsWith("/") || raw.indexOf('\n') >= 0
+                || sessionOpening || activityDestroyed || mcpToolPicker != null && mcpToolPicker.editing()) {
             hideSlashPopup();
             return;
         }
-        if (raw.indexOf('\n') >= 0 || raw.indexOf(' ') >= 0) {
+        if (raw.indexOf(' ') >= 0 && !raw.regionMatches(true, 0, "/mcp ", 0, 5) || isWholeCmd(raw)) {
             hideSlashPopup();
             return;
         }
-        String prefix = raw.substring(1).toLowerCase();
-        // 已经打出完整指令名就不再挡着正文，让它变成输入框里的一整块。
-        if (isWholeCmd(raw)) {
-            hideSlashPopup();
-            return;
-        }
-        SlashCmd[] cmds = slashCmds();
+        String prefix = raw.substring(1).toLowerCase(java.util.Locale.ROOT);
         List<SlashCmd> hits = new ArrayList<SlashCmd>();
-        for (int i = 0; i < cmds.length; i++) {
-            if (cmds[i].name.toLowerCase().startsWith(prefix)) {
-                hits.add(cmds[i]);
-            }
-        }
-        if (hits.isEmpty()) {
-            hideSlashPopup();
-            return;
-        }
-        showSlashPopup(hits);
+        for (SlashCmd cmd : slashCmds()) if (cmd.name.startsWith(prefix)) hits.add(cmd);
+        showSlashPopup(hits, prefix);
     }
 
     /** 输入框里正好打出完整指令名时，收掉弹层并标成一块。目标后面的需求留着。 */
@@ -2301,68 +2291,35 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return false;
     }
 
-    private void showSlashPopup(List<SlashCmd> hits) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundResource(R.drawable.bg_slash_card);
-        card.setPadding(dp(8), dp(8), dp(8), dp(8));
-
-        TextView title = popupText(getString(R.string.slash_title), 13, R.color.text_secondary);
-        title.setPadding(dp(10), dp(4), dp(10), dp(6));
-        card.addView(title, wrapParams());
-
-        for (int i = 0; i < hits.size(); i++) {
-            final SlashCmd cmd = hits.get(i);
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.VERTICAL);
-            row.setBackgroundResource(R.drawable.bg_slash_item);
-            row.setPadding(dp(10), dp(8), dp(10), dp(8));
-            row.setClickable(true);
-            TextView name = popupText("/" + cmd.name, 15, R.color.text_primary);
-            row.addView(name);
-            TextView detail = popupText(cmd.detail, 12, R.color.text_secondary);
-            detail.setPadding(0, dp(2), 0, 0);
-            row.addView(detail);
-            LinearLayout.LayoutParams rowLp = wrapParams();
-            rowLp.bottomMargin = i == hits.size() - 1 ? 0 : dp(6);
-            // 点一下只填进输入框，发不发由用户按发送键决定。
-            row.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
+    private void showSlashPopup(List<SlashCmd> hits, String prefix) {
+        List<SlashMenuPopup.Item> items = new ArrayList<SlashMenuPopup.Item>();
+        final long owner = slashContext;
+        if (!hits.isEmpty()) items.add(new SlashMenuPopup.Item(getString(R.string.slash_title), "", null));
+        for (final SlashCmd cmd : hits) {
+            items.add(new SlashMenuPopup.Item("/" + cmd.name, cmd.detail, new Runnable() {
+                @Override public void run() {
+                    if (owner != slashContext || activityDestroyed || sessionOpening) return;
                     hideSlashPopup();
                     prompt.setText("/" + cmd.name);
                     prompt.setSelection(prompt.getText().length());
                     prompt.setChipped(true, "goal".equals(cmd.name));
                 }
-            });
-            card.addView(row, rowLp);
+            }));
         }
-
-        View anchor = inputBar != null ? inputBar : prompt;
-        int width = anchor.getWidth() > 0 ? anchor.getWidth() : dp(280);
-        if (slashPopup == null) {
-            slashPopup = new PopupWindow(card, width,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, false);
-            slashPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            // 点屏幕别处不收起：误触一下就把面板弄没，还得重新打一个 /。
-            // 输入框里的内容不再匹配指令时，syncSlashPopup 会自己收掉。
-            slashPopup.setOutsideTouchable(false);
-            slashPopup.setFocusable(false);
-            // 不吃外面的触摸，点输入框仍然能正常聚焦打字。
-            slashPopup.setTouchModal(false);
-            slashPopup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
-            slashPopup.setAnimationStyle(R.style.SlashPopupAnimation);
-        } else {
-            slashPopup.setContentView(card);
-            slashPopup.setWidth(width);
-        }
-        showAbove(slashPopup, anchor, width);
+        if (mcpToolPicker != null) mcpToolPicker.append(items, prefix);
+        if (items.isEmpty()) items.add(new SlashMenuPopup.Item("没有匹配的指令或 MCP 工具", "试试服务名或工具名", null));
+        if (slashPopup == null) slashPopup = new SlashMenuPopup(this, inputBar != null ? inputBar : prompt);
+        slashPopup.show(items);
     }
 
     private void hideSlashPopup() {
-        if (slashPopup != null && slashPopup.isShowing()) {
-            slashPopup.dismiss();
-        }
+        if (slashPopup != null) slashPopup.dismiss();
+    }
+
+    private void resetSlashContext() {
+        slashContext++;
+        hideSlashPopup();
+        if (mcpToolPicker != null) mcpToolPicker.reset();
     }
 
     private void runSlash(SlashCmd cmd) {
@@ -2416,6 +2373,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     
 
     private void onSend() {
+        // Browsing and drafting remain available while a tool is running; sending never replaces it.
+        if (sessionOpening || stop.getVisibility() == View.VISIBLE || loop != null && loop.busy()) return;
         final String text = prompt.getText().toString().trim();
         if (TextUtils.isEmpty(text)) {
             return;
@@ -2448,8 +2407,18 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void startText(final String text, boolean asGoal) {
+        final McpSelection selected = mcpToolPicker == null ? null : mcpToolPicker.selection(text);
+        if (selected != null) {
+            try { RunHub.get(this).validateMcpSelection(selected); }
+            catch (Exception invalid) { mcpToolPicker.selectionUnavailable(invalid); return; }
+        }
         if (!prepareEngine()) return;
         final AgentLoop target = loop;
+        if (selected != null) {
+            try { target.validateMcpSelection(selected); }
+            catch (Exception invalid) { mcpToolPicker.selectionUnavailable(invalid); return; }
+        }
+        final String selectionDraft = mcpToolPicker == null ? null : mcpToolPicker.saveDraft();
         final long sid = ensureSession(text);
         final int gen = target.generation();
         final int token = liveToken = target.nextUiToken(liveToken);
@@ -2457,6 +2426,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sealLiveAnswer();
         sealCurrentTurn();
         settleCompact();
+        final int firstRow = stream.getChildCount();
         addUserBubble(text);
         if (asGoal) target.setGoal(text);
         turnUiToken = token;
@@ -2469,7 +2439,26 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         refreshGoal();
         new Thread(new Runnable() {
             @Override public void run() {
-                if (token == liveToken) target.submit(text, sid, gen, token);
+                if (token != liveToken) return;
+                try { target.submit(text, sid, gen, token, selected); }
+                catch (RuntimeException rejected) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (activityDestroyed || sessionId != sid || loop != target
+                                    || gen != target.generation() || token != liveToken) return;
+                            releaseLiveViews();
+                            currentTrace = null; workHeader = null; turnChevron = null;
+                            int added = stream.getChildCount() - firstRow;
+                            if (added > 0) stream.removeViews(firstRow, added);
+                            if (prompt.length() == 0) {
+                                if (selectionDraft != null) mcpToolPicker.restoreDraft(selectionDraft);
+                                else { prompt.setText(text); prompt.setSelection(prompt.length()); }
+                            }
+                            setBusy(false);
+                            toast("发送前工具配置发生变化，本次未发送，请检查草稿后重试。");
+                        }
+                    });
+                }
             }
         }).start();
     }
@@ -2480,6 +2469,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (!busy) {
             tintSend(prompt.getText().toString().trim().length() > 0);
         }
+        syncSlashPopup(prompt.getText().toString());
     }
 
     private void uiLive(final int gen, final Runnable r) {
@@ -3549,15 +3539,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         long ms = trace.elapsedMs > 0 ? trace.elapsedMs
                 : (trace == currentTrace ? displayElapsed(trace) : 0L);
         if (ms <= 0) {
-            header.setText(getString(R.string.thinking));
+            header.setText("");
             return;
         }
         boolean live = trace == currentTrace && trace.elapsedMs <= 0;
         String time = live ? "总耗时 " + seconds(ms) + "s"
                 : getString(R.string.worked, Integer.valueOf(seconds(ms)));
-        LlmClient.RequestActivity request = live && loop != null ? loop.requestActivity() : null;
-        String progress = trace.progressCaption(live, request == null ? -1L : request.quietMs);
-        header.setText(time + (progress.length() == 0 ? "" : " · " + progress));
+        header.setText(time);
     }
 
     /** 这段思考结束。秒数钉在这段上，不跟后面的命令混。 */

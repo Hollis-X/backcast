@@ -79,7 +79,7 @@ public final class RequestPolicyRegressionTest {
                 @Override public void abort() { }
             });
         }
-        void run() { loop.submit("inspect fixture", 7L, loop.generation(), 1); }
+        void run() { loop.submit("inspect fixture", 7L, loop.generation(), 1, null); }
     }
     private static void permanentErrorsStopGoalsImmediately() {
         for (String error : new String[]{"HTTP 401: bad-secret context_length_exceeded", "HTTP 403: context window denied", "HTTP 401 context window denied",

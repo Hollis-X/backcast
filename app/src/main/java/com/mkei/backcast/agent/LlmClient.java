@@ -202,14 +202,6 @@ public class LlmClient {
         boolean isCurrent();
     }
 
-    /** Safe live timing only; never exposes endpoint, credentials, request body, or provider text. */
-    public static final class RequestActivity {
-        public final long quietMs;
-        private RequestActivity(long quietMs) {
-            this.quietMs = quietMs;
-        }
-    }
-
     private final Config config;
     private volatile boolean usageOptionUnsupported;
     private volatile boolean verbosityUnsupported;
@@ -219,7 +211,7 @@ public class LlmClient {
     private static class Attempt {
         volatile Call call;
         volatile boolean dead;
-        volatile boolean finished, responseStarted;
+        volatile boolean responseStarted;
         long startedNanos;
         volatile long lastProgressNanos;
         volatile BufferedSource source;
@@ -318,15 +310,6 @@ public class LlmClient {
         this.config = config;
     }
 
-    public RequestActivity requestActivity() {
-        Attempt current = attempt;
-        if (current == null || current.dead || current.finished) return null;
-        long now = System.nanoTime(), progress = current.lastProgressNanos;
-        RequestActivity snapshot = new RequestActivity(
-                Math.max(0L, TimeUnit.NANOSECONDS.toMillis(now - (progress == 0L ? current.startedNanos : progress))));
-        return current.dead || current.finished ? null : snapshot;
-    }
-
     /** 断开正在进行的请求。用户点停止时调用。 */
     public void abort() {
         Attempt current = attempt;
@@ -365,19 +348,17 @@ public class LlmClient {
         boolean includeUsage = !usageOptionUnsupported;
         String detail = ResponsePreferences.normalizeVerbosity(config.verbosity);
         boolean includeVerbosity = !verbosityUnsupported && !"default".equals(detail);
-        try {
-            Reply reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
-            if (mine.dead) {
-                discardCancelledReply(reply);
-                return reply;
-            }
-            // Learn optional capability failures for the next explicit user request only.
-            // A rejected request is still a failed request, never permission to send another POST.
-            if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) usageOptionUnsupported = true;
-            if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) verbosityUnsupported = true;
-            if (reply.error != null) sealDiagnostic(reply, mine, messages);
+        Reply reply = sendAttempt(messages, tools, sink, mine, includeUsage, includeVerbosity ? detail : null);
+        if (mine.dead) {
+            discardCancelledReply(reply);
             return reply;
-        } finally { mine.finished = true; }
+        }
+        // Learn optional capability failures for the next explicit user request only.
+        // A rejected request is still a failed request, never permission to send another POST.
+        if (includeUsage && rejectsOption(reply.error, "stream_options", "include_usage")) usageOptionUnsupported = true;
+        if (includeVerbosity && rejectsOption(reply.error, "verbosity", "verbosity")) verbosityUnsupported = true;
+        if (reply.error != null) sealDiagnostic(reply, mine, messages);
+        return reply;
     }
 
     private static boolean rejectsOption(String error, String option, String alias) {

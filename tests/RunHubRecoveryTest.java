@@ -153,7 +153,9 @@ public final class RunHubRecoveryTest {
             add(files, "com.mkei.backcast.tool." + name, "public class " + name + " {public Object[] args;public int aborts; public " + name + "(Object... args) {this.args=args;}public void abort(){aborts++;} }");
         }
         add(files, "com.mkei.backcast.tool.SubAgentTools", "public class SubAgentTools {public static void register(com.mkei.backcast.agent.ToolRegistry r,com.mkei.backcast.agent.SubAgentManager m,String owner){r.register(new Coordination(m,owner));}public static class Coordination{public Object manager;public String owner;Coordination(Object m,String o){manager=m;owner=o;}} }");
-        add(files, "com.mkei.backcast.mcp.McpStore", "public class McpStore{public java.io.File directory;public McpStore(java.io.File directory){this.directory=directory;}}");
+        add(files, "com.mkei.backcast.mcp.McpSelection", "public final class McpSelection{}");
+        add(files, "com.mkei.backcast.mcp.McpCatalog", "public class McpCatalog{public static class Server{}public static class Refresh{public Refresh(McpStore store,String id){}}public static java.util.List<Server> cached(McpStore store){return java.util.Collections.emptyList();}}");
+        add(files, "com.mkei.backcast.mcp.McpStore", "public class McpStore{public java.io.File directory;public McpStore(java.io.File directory){this.directory=directory;}public void validateSelection(McpSelection selection){}}");
         add(files, "com.mkei.backcast.mcp.McpTools", "public class McpTools{public static void register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store){registry.register(new McpTools());}}");
         add(files, "com.mkei.backcast.tool.EmbeddedToolchain", "public class EmbeddedToolchain {public interface Assets {java.io.InputStream open(String name) throws Exception;}}");
         add(files, "com.mkei.backcast.tool.ToolchainStore", "public class ToolchainStore {public java.io.File directory;public EmbeddedToolchain.Assets assets;public String abi;public int sdk;public ToolchainStore(java.io.File d,EmbeddedToolchain.Assets a,String b,int s){directory=d;assets=a;abi=b;sdk=s;}}");

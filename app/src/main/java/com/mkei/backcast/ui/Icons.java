@@ -29,7 +29,6 @@ public final class Icons {
     public static final int CHAT = R.drawable.ic_ds_chat_bubble_regular_24;
     public static final int MORE = R.drawable.ic_ds_ellipsis_horizontal_regular_24;
     public static final int FOLDER = R.drawable.ic_ds_folder_regular_24;
-    public static final int SHIELD = R.drawable.ic_ds_shield_checkmark_regular_24;
     public static final int TERMINAL = R.drawable.ic_ds_terminal_regular_24;
     public static final int PENCIL = R.drawable.ic_ds_pencil_regular_24;
     public static final int UNDO = R.drawable.ic_ds_arrow_uturn_left_regular_24;
