@@ -33,6 +33,7 @@ public final class LlmStreamLifecycleRegressionTest {
         final String first, tail;
         final boolean payloadHeartbeat, silentTail, fragmented, meaningfulHeartbeat;
         volatile boolean extraContent;
+        volatile long initialSendStartedNanos;
         final long headerDelayMs;
         StreamingServer(String first, String tail, boolean payloadHeartbeat) throws IOException {
             this(first, tail, payloadHeartbeat, false);
@@ -84,7 +85,10 @@ public final class LlmStreamLifecycleRegressionTest {
                     output.write(initial, split + 1, 1); output.flush();
                     if (stop.await(300, TimeUnit.MILLISECONDS)) return;
                     output.write(initial, split + 2, initial.length - split - 2); output.flush();
-                } else { output.write(initial); output.flush(); started.countDown(); }
+                } else {
+                    initialSendStartedNanos = System.nanoTime();
+                    output.write(initial); output.flush(); started.countDown();
+                }
                 if (tail != null) {
                     if (stop.await(150, TimeUnit.MILLISECONDS)) return;
                     output.write(tail.getBytes("UTF-8")); output.flush();
@@ -204,16 +208,35 @@ public final class LlmStreamLifecycleRegressionTest {
     private static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }
     private static void sseDoneClosesWithoutDrainingOpenStream() throws Exception {
         try (StreamingServer server = new StreamingServer(SSE, null, false, true)) {
-            long start = System.nanoTime(); LlmClient.Reply reply = send(server, server.client(), null);
+            long start = System.nanoTime(); LlmClient client = server.client(); long initialized = System.nanoTime();
+            LlmClient.Reply reply = send(server, client, null); long returned = System.nanoTime();
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(returned - start);
+            long completion = server.initialSendStartedNanos == 0 ? -1 : TimeUnit.NANOSECONDS.toMillis(returned - server.initialSendStartedNanos);
+            String evidence = "total=" + elapsed + "ms, client=" + TimeUnit.NANOSECONDS.toMillis(initialized - start)
+                    + "ms, afterDoneSend=" + completion + "ms, requests=" + server.requests.get() + ", error=" + reply.error
+                    + ", diagnostic=" + reply.diagnostic;
+            if (Boolean.getBoolean("backcast.lifecycle.timing")) System.out.println("TIMING " + evidence);
+            // This checks completion after DONE is sent, independently of cold SDK initialization.
+            // Include the server's write/flush cost so an early client return cannot race the timestamp.
             check(reply.error == null && "answer".equals(reply.content)
-                    && TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 2000L, "SDK DONE waited for an open transport EOF");
+                    && server.initialSendStartedNanos > 0 && completion >= 0 && completion < 2000L
+                    && server.requests.get() == 1 && server.started.await(1L, TimeUnit.SECONDS)
+                    && server.stop.getCount() == 1, "SDK DONE waited for an open transport EOF: " + evidence);
         }
     }
     private static void firstDoneDoesNotWaitForAnotherNetworkRead() throws Exception {
         try (StreamingServer server = new StreamingServer("data: [DONE]\n\n", null, false, true)) {
-            long start = System.nanoTime(); LlmClient.Reply reply = send(server, server.client(), null);
+            LlmClient client = server.client(); long start = System.nanoTime();
+            LlmClient.Reply reply = send(server, client, null); long returned = System.nanoTime();
+            long completion = server.initialSendStartedNanos == 0 ? -1
+                    : TimeUnit.NANOSECONDS.toMillis(returned - server.initialSendStartedNanos);
+            String evidence = "total=" + TimeUnit.NANOSECONDS.toMillis(returned - start)
+                    + "ms, afterDoneSend=" + completion + "ms, requests=" + server.requests.get()
+                    + ", error=" + reply.error + ", diagnostic=" + reply.diagnostic;
             check(reply.error == null && reply.content.length() == 0
-                    && TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 1500L, "First SDK DONE kept reading the connection");
+                    && server.initialSendStartedNanos > 0 && completion >= 0 && completion < 1500L
+                    && server.requests.get() == 1 && server.started.await(1L, TimeUnit.SECONDS)
+                    && server.stop.getCount() == 1, "First SDK DONE kept reading the connection: " + evidence);
         }
     }
     private static void malformedSseStillClosesStream() throws Exception {

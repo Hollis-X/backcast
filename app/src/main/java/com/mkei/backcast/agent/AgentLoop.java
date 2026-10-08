@@ -1728,9 +1728,13 @@ public class AgentLoop {
                 budgetWrappedUp = false;
             }
         }
-        // Persist the checkpoint; the original conversation remains append-only.
-        replace(sessionId, fresh);
-        listener.onCompacted(gen, followup);
+        // The completed divider and its callback share the transcript snapshot boundary.
+        synchronized (uiLock) {
+            replace(sessionId, fresh);
+            uiEvents.clear();
+            listener.onCompacted(gen, followup);
+            uiEvents.removeCompaction();
+        }
         listener.onContextUsage(gen, contextUsed(), contextLimit);
         return true;
     }

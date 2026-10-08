@@ -56,6 +56,14 @@ final class UiEventBuffer {
 
     void clear() { events.clear(); }
 
+    /** Successful compaction is already represented by the persisted divider. */
+    void removeCompaction() {
+        for (int i = events.size() - 1; i >= 0; i--) {
+            int kind = events.get(i).kind;
+            if (kind == COMPACT_START || kind == COMPACTED) events.remove(i);
+        }
+    }
+
     void add(Event event) {
         if (event.kind == END) return;
         if (!events.isEmpty()) {

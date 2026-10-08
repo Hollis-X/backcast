@@ -235,11 +235,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
     }
 
-    /** 压缩单独占一行：进行中显示「压缩中」，结束停在「压缩了 Ns」。 */
+    /** 单线中央显示压缩状态，重复压缩同一位置时复用已有的成功标记。 */
     private TextView compactHeader;
+    private LinearLayout compactRow;
     private boolean compactLive;
-    private long compactStartedAt;
-    private int compactToken;
+    private boolean compactRowRetained;
     /** 正在跑马灯的字。运行中的工作时间、思考、命令才在里面。 */
     private final List<TextView> marquees = new ArrayList<TextView>();
     private boolean marqueeLoop;
@@ -462,7 +462,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 }
                 settleWork();
                 if (compactLive) {
-                    // 压到一半被停：不要留一行「压缩了 Ns」，它并没有压完。
+                    // 被停下的压缩不留下成功分隔线。
                     dropCompactRow();
                 } else {
                     settleCompact();
@@ -2823,6 +2823,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 flow.tail = (LinearLayout) child;
                 flow.activeRange = (TurnTrace.Range) child.getTag();
                 flow.body = null;
+            } else if ("compaction".equals(child.getContentDescription())) {
+                flow.bodySeen = true;
+                flow.body = null;
+                flow.tail = null;
+                flow.activeRange = null;
             }
         }
         refreshAllFolds(flow);
@@ -2904,86 +2909,44 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         startTick();
     }
 
-    /**
-     * 压缩那一行。
-     *
-     * 压缩不是「工作」：它只产生摘要、不产生命令和思考，所以要单独一行，
-     * 不能借「工作了」。收尾时停在「压缩了 Ns」。
-     */
+    /** 压缩只占一条分隔线，成功后把中间的文字改为「已压缩」。 */
     private void beginCompactRow() {
         if (compactHeader != null) {
             return;
         }
-        if (compactStartedAt == 0) {
-            compactStartedAt = SystemClock.elapsedRealtime();
-        }
+        sealLiveAnswer();
+        sealOpenThink();
         compactLive = true;
-        SweepText header = new SweepText(this);
-        header.setTextSize(15);
-        header.setIncludeFontPadding(false);
-        header.setTextColor(0xFF6E6E76);
-        header.setPadding(0, dp(4), 0, dp(2));
-        header.setText(getString(R.string.compacting));
-        compactHeader = header;
-        host().addView(header, fullWidth());
-        startCompactTick();
-        syncMarquee();
+        compactRow = addCompactionDivider(turnRows, true);
+        compactHeader = (TextView) compactRow.getChildAt(1);
+        compactRowRetained = getString(R.string.compacted).contentEquals(compactHeader.getText());
+        compactHeader.setText(getString(R.string.compacting));
         autoScroll();
     }
 
-    /** 压缩那一行的秒数还在走，按秒刷新。用单独的记号，不打断「工作了」的计时。 */
-    private void startCompactTick() {
-        final int token = ++compactToken;
-        final Runnable tick = new Runnable() {
-            @Override
-            public void run() {
-                if (token != compactToken || !compactLive || compactHeader == null) {
-                    return;
-                }
-                bindCompact(compactHeader);
-                compactHeader.postDelayed(this, 500);
-            }
-        };
-        if (compactHeader != null) {
-            compactHeader.post(tick);
-        }
-    }
-
-    /** 压缩结束：把秒数钉死，行留在对话里。 */
+    /** 只有成功回调才保留「已压缩」，普通结束和取消撤掉未完成的行。 */
     private void settleCompact() {
+        if (compactLive) dropCompactRow();
+    }
+
+    private void completeCompactRow() {
+        if (compactHeader != null) compactHeader.setText(getString(R.string.compacted));
         compactLive = false;
-        compactToken++;
-        if (compactHeader != null) {
-            clearMarquee(compactHeader);
-            bindCompact(compactHeader);
-        }
         compactHeader = null;
-        compactStartedAt = 0;
-        syncMarquee();
+        compactRow = null;
+        compactRowRetained = false;
     }
 
-    private void bindCompact(TextView header) {
-        if (header == null) {
-            return;
-        }
-        long ms = compactStartedAt > 0
-                ? SystemClock.elapsedRealtime() - compactStartedAt : 0;
-        header.setText(getString(R.string.compacted_ns, Integer.valueOf(seconds(ms))));
-    }
-
-    /** 压缩没成：把那一行整条撤掉，不留一条假的「压缩了 1s」。 */
+    /** 压缩没成：撤掉新行；复用的旧成功标记则恢复原样。 */
     private void dropCompactRow() {
         compactLive = false;
-        compactToken++;
-        if (compactHeader != null) {
-            clearMarquee(compactHeader);
-            if (compactHeader.getParent() instanceof ViewGroup) {
-                ((ViewGroup) compactHeader.getParent()).removeView(compactHeader);
-            }
-        }
+        if (compactRowRetained && compactHeader != null)
+            compactHeader.setText(getString(R.string.compacted));
+        else if (compactRow != null && compactRow.getParent() instanceof ViewGroup)
+            ((ViewGroup) compactRow.getParent()).removeView(compactRow);
         compactHeader = null;
-        compactStartedAt = 0;
-        syncMarquee();
+        compactRow = null;
+        compactRowRetained = false;
     }
 
     private void startTick() {
@@ -3082,7 +3045,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (body != null) body.removeCallbacks(sheetRefresh);
         sheetTrace = null; sheetTimeline = null; sheetRange = null;
         turnRows = null; turnFlow = null; turnRendered = 0;
-        thinkOpenAt = 0; compactHeader = null; compactLive = false; compactStartedAt = 0;
+        thinkOpenAt = 0; compactHeader = null; compactRow = null; compactLive = false; compactRowRetained = false;
         stopMarquee();
     }
 
@@ -3316,24 +3279,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
      * 先封口再新开一行，会多出一段工作时间。
      */
     private void finishCompaction(boolean followup) {
-        long ms = compactStartedAt > 0
-                ? SystemClock.elapsedRealtime() - compactStartedAt : 0;
         sealLiveAnswer();
+        completeCompactRow();
         boolean continuing = followup || (loop != null && loop.goalActive());
         if (!continuing) {
             settleWork();
-            settleCompact();
             refreshContextMeter();
-            addContextNote(getString(R.string.context_compacted));
-            addCompactNote(ms);
             setBusy(false);
             return;
         }
-        settleCompact();
-        addContextNote(getString(R.string.context_compacted));
         if (!followup) {
             refreshContextMeter();
-            addCompactNote(ms);
         }
         if (workHeader == null) {
             beginWorkRow();
@@ -3354,27 +3310,57 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
 
-    /** 压缩提示：单独一行小字，和正文区分开。 */
-    private void addContextNote(String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(13);
-        tv.setTextColor(0xFF8E8E93);
-        tv.setPadding(0, dp(8), 0, dp(4));
-        host().addView(tv, fullWidth());
-        autoScroll();
+    /** 分隔线按发生顺序放进当前工作段，后面的正文和工具不会插回它前面。 */
+    private LinearLayout addCompactionDivider(LinearLayout rows, boolean live) {
+        Flow flow = flowOf(rows);
+        LinearLayout target = flow == null ? host() : flow.box;
+        if (flow != null) {
+            TurnTrace trace = traceOf(rows);
+            if (trace != null && trace.bodyAt < 0) trace.bodyAt = trace.order.size();
+            flow.bodySeen = true;
+            flow.body = null;
+            flow.tail = null;
+            flow.activeRange = null;
+        }
+        LinearLayout existing = lastCompactionDivider(target);
+        if (existing != null) return existing;
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(12), 0, dp(12));
+        row.setContentDescription("compaction");
+        View left = new View(this);
+        left.setBackgroundColor(0xFFE2E2E7);
+        row.addView(left, new LinearLayout.LayoutParams(0, Math.max(1, dp(1)), 1f));
+        TextView caption = new TextView(this);
+        caption.setText(getString(live ? R.string.compacting : R.string.compacted));
+        caption.setTextSize(14);
+        caption.setIncludeFontPadding(false);
+        caption.setTextColor(0xFF8E8E93);
+        caption.setPadding(dp(12), 0, dp(12), 0);
+        row.addView(caption);
+        View right = new View(this);
+        right.setBackgroundColor(0xFFE2E2E7);
+        row.addView(right, new LinearLayout.LayoutParams(0, Math.max(1, dp(1)), 1f));
+        target.addView(row, fullWidth());
+        return row;
     }
 
-    /** 手动压缩结束后那一行「压缩了 Ns」。它是结果，不参与跑马灯。 */
-    private void addCompactNote(long ms) {
-        TextView tv = new TextView(this);
-        tv.setText(getString(R.string.compacted_ns, Integer.valueOf(seconds(ms))));
-        tv.setTextSize(15);
-        tv.setIncludeFontPadding(false);
-        tv.setTextColor(0xFF6E6E76);
-        tv.setPadding(0, dp(4), 0, dp(2));
-        host().addView(tv, fullWidth());
-        autoScroll();
+    /** 历史页会多包一层布局，只沿末尾容器找标记，正文或新消息会中断查找。 */
+    private LinearLayout lastCompactionDivider(LinearLayout target) {
+        View last = target;
+        while (last instanceof LinearLayout) {
+            LinearLayout box = (LinearLayout) last;
+            if ("compaction".equals(box.getContentDescription())) {
+                return box.getChildCount() == 3 && box.getChildAt(1) instanceof TextView
+                        && getString(R.string.compacted).contentEquals(((TextView) box.getChildAt(1)).getText())
+                        ? box : null;
+            }
+            if ("body".equals(box.getContentDescription()) || "activity".equals(box.getContentDescription())
+                    || box.getChildCount() == 0) return null;
+            last = box.getChildAt(box.getChildCount() - 1);
+        }
+        return null;
     }
 
     /** A live failure settles its turn but never adds a transcript row or opens a detail panel. */
@@ -3528,7 +3514,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private void syncMarquee() {
         ArrayList<TextView> next = new ArrayList<TextView>();
         if (workHeader != null) next.add(workHeader);
-        if (compactLive && compactHeader != null) next.add(compactHeader);
         for (TextView old : marquees) if (!next.contains(old)) clearMarquee(old);
         marquees.clear(); marquees.addAll(next);
         if (next.isEmpty() || stream == null) {
@@ -4026,6 +4011,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         for (int i = start; i < end; i++) {
             Message m = messages.get(i);
             if (m == null) {
+                continue;
+            }
+            if (Message.COMPACTION.equals(m.role) || Compactor.isSummary(m)) {
+                closeReplayTurn(turn, rows);
+                addCompactionDivider(rows, false);
                 continue;
             }
             if (Message.USER.equals(m.role)) {

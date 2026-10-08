@@ -63,11 +63,9 @@
     <string name="plus_hint">附件功能还没做</string>
     <string name="copied">已复制</string>
     <string name="context_used">%1$s / %2$s</string>
-    <string name="context_compacted">上下文已压缩，接续摘要已装入新窗口。</string>
     <string name="slash_title">指令</string>
-    <!-- 压缩单独占一行，不跟「工作了」混：进行中显示「压缩中」，结束停在「压缩了 Ns」。 -->
     <string name="compacting">压缩中</string>
-    <string name="compacted_ns">压缩了 %1$ds</string>
+    <string name="compacted">已压缩</string>
     <string name="slash_unknown">没有这个指令</string>
     <string name="slash_compact_detail">压缩会话，把当前上下文收成交接摘要</string>
     <string name="slash_goal_detail">设下目标。达不到完成标准就不停，太空或做不到会自己停</string>

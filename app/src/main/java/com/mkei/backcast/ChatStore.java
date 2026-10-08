@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
 import com.mkei.backcast.agent.Message;
+import com.mkei.backcast.agent.Compactor;
 import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.mcp.McpSelection;
 
@@ -72,7 +73,7 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public ChatStore(Context context) {
-        super(context.getApplicationContext(), "backcast.db", null, 14);
+        super(context.getApplicationContext(), "backcast.db", null, 15);
     }
 
     @Override
@@ -99,6 +100,7 @@ public class ChatStore extends SQLiteOpenHelper {
         createContext(db);
         createRequestEvents(db);
         createDiagnosticErrors(db);
+        createCompactionEvents(db);
     }
 
     @Override
@@ -141,6 +143,48 @@ public class ChatStore extends SQLiteOpenHelper {
             db.execSQL("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER");
         }
         if (oldVersion < 14) db.execSQL("ALTER TABLE messages ADD COLUMN mcp_selection TEXT NOT NULL DEFAULT ''");
+        if (oldVersion < 15) {
+            createCompactionEvents(db);
+            restoreLatestCompactionEvents(db);
+        }
+    }
+
+    private static void createCompactionEvents(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS compaction_events ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER NOT NULL,"
+                + "through_id INTEGER NOT NULL,UNIQUE(session_id,through_id))");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_compaction_events_session "
+                + "ON compaction_events(session_id,through_id)");
+    }
+
+    /** Older builds retained only the latest checkpoint, so infer only that boundary. */
+    private static void restoreLatestCompactionEvents(SQLiteDatabase db) {
+        Cursor c = db.query("context_windows", new String[]{"session_id", "through_id", "window"},
+                null, null, null, null, null);
+        try {
+            while (c.moveToNext()) {
+                try {
+                    JSONArray window = new JSONArray(c.getString(2));
+                    for (int i = 0; i < window.length(); i++) {
+                        JSONObject item = window.optJSONObject(i);
+                        if (item != null && Compactor.isSummary(new Message(item.optString("role"), item.optString("content")))) {
+                            saveCompactionEvent(db, c.getLong(0), c.getLong(1));
+                            break;
+                        }
+                    }
+                } catch (org.json.JSONException invalidCheckpoint) {
+                    // Keep the original checkpoint intact; context recovery reports corruption.
+                }
+            }
+        } finally { c.close(); }
+    }
+
+    private static void saveCompactionEvent(SQLiteDatabase db, long sessionId, long through) {
+        if (sessionId < 0 || through <= 0) return;
+        ContentValues event = new ContentValues();
+        event.put("session_id", Long.valueOf(sessionId));
+        event.put("through_id", Long.valueOf(through));
+        db.insertWithOnConflict("compaction_events", null, event, SQLiteDatabase.CONFLICT_IGNORE);
     }
 
     private static void createRequestEvents(SQLiteDatabase db) {
@@ -232,7 +276,8 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public synchronized void append(long sessionId, Message message) {
-        if (sessionId < 0 || message == null || Message.SYSTEM.equals(message.role)) {
+        if (sessionId < 0 || message == null || Message.SYSTEM.equals(message.role)
+                || Message.COMPACTION.equals(message.role)) {
             return;
         }
         if (Message.USER.equals(message.role)
@@ -274,10 +319,11 @@ public class ChatStore extends SQLiteOpenHelper {
                 tail.close();
             }
             JSONArray window = new JSONArray();
+            boolean compacted = false;
             if (messages != null) {
                 for (int i = 0; i < messages.size(); i++) {
                     Message m = messages.get(i);
-                    if (m == null || Message.SYSTEM.equals(m.role)) {
+                    if (m == null || Message.SYSTEM.equals(m.role) || Message.COMPACTION.equals(m.role)) {
                         continue;
                     }
                     if (com.mkei.backcast.agent.Goal.isSteer(m.content)
@@ -285,6 +331,7 @@ public class ChatStore extends SQLiteOpenHelper {
                         continue;
                     }
                     window.put(m.toCheckpointJson());
+                    if (Compactor.isSummary(m)) compacted = true;
                 }
             }
             db.update("sessions", touchValues(), "id=?",
@@ -294,6 +341,7 @@ public class ChatStore extends SQLiteOpenHelper {
             checkpoint.put("through_id", Long.valueOf(through));
             checkpoint.put("window", window.toString());
             db.insertWithOnConflict("context_windows", null, checkpoint, SQLiteDatabase.CONFLICT_REPLACE);
+            if (compacted) saveCompactionEvent(db, sessionId, through);
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
@@ -375,6 +423,7 @@ public class ChatStore extends SQLiteOpenHelper {
     public synchronized MessagePage messagePage(long sessionId, long beforeId, int limit) {
         int pageSize = Math.min(128, Math.max(1, limit));
         List<Message> out = new ArrayList<Message>();
+        List<Long> messageIds = new ArrayList<Long>();
         SQLiteDatabase db = getReadableDatabase();
         String selection = "session_id=?";
         String[] args = new String[]{String.valueOf(sessionId)};
@@ -393,11 +442,13 @@ public class ChatStore extends SQLiteOpenHelper {
                 if (lastId == 0) lastId = id;
                 firstId = id;
                 out.add(readMessage(c, 1));
+                messageIds.add(Long.valueOf(id));
             }
         } finally {
             c.close();
         }
         Collections.reverse(out);
+        Collections.reverse(messageIds);
         if (out.isEmpty()) return new MessagePage(out, 0, 0, null, "", null, Collections.<Message>emptyList());
 
         String[] prefixArgs = new String[]{String.valueOf(sessionId), String.valueOf(firstId)};
@@ -465,8 +516,28 @@ public class ChatStore extends SQLiteOpenHelper {
                 previous.close();
             }
         }
-        return new MessagePage(out, firstId, earlierCount, request, disclosure, leading,
-                trailingResults(db, sessionId, lastId, out));
+        List<Message> trailing = trailingResults(db, sessionId, lastId, out);
+        return new MessagePage(withCompactionEvents(db, sessionId, firstId, lastId, out, messageIds),
+                firstId, earlierCount, request, disclosure, leading, trailing);
+    }
+
+    /** Decorations use message boundaries, never change cursors or the model checkpoint. */
+    private List<Message> withCompactionEvents(SQLiteDatabase db, long sessionId, long firstId, long lastId,
+            List<Message> messages, List<Long> ids) {
+        java.util.HashSet<Long> boundaries = new java.util.HashSet<Long>();
+        Cursor c = db.query("compaction_events", new String[]{"through_id"},
+                "session_id=? AND through_id>=? AND through_id<=?",
+                new String[]{String.valueOf(sessionId), String.valueOf(firstId), String.valueOf(lastId)},
+                null, null, "through_id ASC", "128");
+        try { while (c.moveToNext()) boundaries.add(Long.valueOf(c.getLong(0))); }
+        finally { c.close(); }
+        if (boundaries.isEmpty()) return messages;
+        List<Message> decorated = new ArrayList<Message>(messages.size() + boundaries.size());
+        for (int i = 0; i < messages.size(); i++) {
+            decorated.add(messages.get(i));
+            if (boundaries.contains(ids.get(i))) decorated.add(new Message(Message.COMPACTION, ""));
+        }
+        return decorated;
     }
 
     private List<Message> trailingResults(SQLiteDatabase db, long sessionId, long lastId,
@@ -671,6 +742,7 @@ public class ChatStore extends SQLiteOpenHelper {
             db.delete("context_windows", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("request_events", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("diagnostic_errors", "session_id=?", new String[]{String.valueOf(sessionId)});
+            db.delete("compaction_events", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("sessions", "id=?", new String[]{String.valueOf(sessionId)});
             db.setTransactionSuccessful();
         } finally {

@@ -11,6 +11,8 @@ public class Message {
     public static final String USER = "user";
     public static final String ASSISTANT = "assistant";
     public static final String TOOL = "tool";
+    /** Transcript-only separator; synthesized from the local compaction event log. */
+    public static final String COMPACTION = "compaction";
 
     public String role;
     public String content;
@@ -105,6 +107,7 @@ public class Message {
     }
 
     public JSONObject toJson() {
+        if (COMPACTION.equals(role)) throw new IllegalStateException("A compaction divider is not a model message");
         JSONObject o = new JSONObject();
         try {
             o.put("role", role);

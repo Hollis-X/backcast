@@ -430,6 +430,104 @@ public final class UiSnapshotRegressionTest {
         pass("listenerSwitchDoesNotWaitForSnapshotOrGetOverwritten");
     }
 
+    private static void compactionCommitAndDividerSnapshotAreAtomic() throws Exception {
+        final Fixture fixture = new Fixture();
+        fixture.stored.add(Message.user("old request")); fixture.stored.add(Message.assistant("old answer", null));
+        fixture.loop.loadHistory("fixture", new ArrayList<Message>(fixture.stored));
+        final CountDownLatch committed = new CountDownLatch(1), release = new CountDownLatch(1), read = new CountDownLatch(1);
+        final Throwable[] failures = new Throwable[2];
+        final int[] completed = new int[1], replayed = new int[1];
+        fixture.loop.setListener(new AgentLoop.Quiet() {
+            @Override public void onCompacted(int gen, boolean followup) { completed[0]++; }
+        });
+        fixture.loop.setRecorder(new AgentLoop.Recorder() {
+            @Override public void record(long sid, Message message) { fixture.stored.add(message); }
+            @Override public void replace(long sid, List<Message> messages) {
+                fixture.stored.add(new Message(Message.COMPACTION, "")); committed.countDown();
+                try { check(release.await(3, TimeUnit.SECONDS), "Compaction commit never released"); }
+                catch (InterruptedException error) { throw new IllegalStateException(error); }
+            }
+        });
+        fixture.script = (f, sink) -> answer("private handoff");
+        Thread worker = new Thread(() -> {
+            try { fixture.loop.compactNow(1L, fixture.loop.generation(), 9); } catch (Throwable error) { failures[0] = error; }
+        });
+        Thread snapshotter = new Thread(() -> {
+            try {
+                AgentLoop.Quiet next = new AgentLoop.Quiet() {
+                    @Override public void onCompactStart(int gen) { replayed[0]++; }
+                    @Override public void onCompacted(int gen, boolean followup) { replayed[0]++; }
+                };
+                AgentLoop.UiSnapshot<List<Message>> snapshot = fixture.snapshot(next); read.countDown();
+                check(snapshot.data.size() == 3 && Message.COMPACTION.equals(snapshot.data.get(2).role), "Snapshot lost the committed divider");
+                fixture.loop.replayUiSnapshot(snapshot, next);
+                check(replayed[0] == 0, "Committed compaction replayed a duplicate pending separator");
+            } catch (Throwable error) { failures[1] = error; }
+        });
+        worker.start(); check(committed.await(3, TimeUnit.SECONDS), "Compaction did not commit"); snapshotter.start();
+        try { check(!read.await(100, TimeUnit.MILLISECONDS), "Snapshot read between checkpoint commit and completed divider callback"); }
+        finally { release.countDown(); }
+        worker.join(3000); snapshotter.join(3000);
+        check(!worker.isAlive() && !snapshotter.isAlive() && failures[0] == null && failures[1] == null && completed[0] == 1,
+                "Compaction atomic boundary failed: " + failures[0] + "/" + failures[1]);
+        pass("compactionCommitAndDividerSnapshotAreAtomic");
+    }
+
+    private static void completedCompactionKeepsFollowingUnpersistedOutput() throws Exception {
+        final Fixture fixture = new Fixture();
+        fixture.stored.add(Message.user("continue the existing work")); fixture.stored.add(Message.assistant("old answer", null));
+        fixture.loop.loadHistory("fixture", new ArrayList<Message>(fixture.stored)); fixture.loop.setGoal("finish existing work");
+        fixture.loop.setRecorder(new AgentLoop.Recorder() {
+            @Override public void record(long sid, Message message) { fixture.stored.add(message); }
+            @Override public void replace(long sid, List<Message> messages) { fixture.stored.add(new Message(Message.COMPACTION, "")); }
+        });
+        final List<String> replay = new ArrayList<String>();
+        fixture.script = (f, sink) -> {
+            if (f.calls == 1) return answer("private handoff");
+            sink.onContent("new partial");
+            AgentLoop.Quiet next = new AgentLoop.Quiet() {
+                @Override public void onCompactStart(int gen) { throw new AssertionError("Stored compaction start replayed"); }
+                @Override public void onCompacted(int gen, boolean followup) { throw new AssertionError("Stored divider replayed"); }
+                @Override public void onAssistantText(int gen, String text) { replay.add(text); }
+            };
+            AgentLoop.UiSnapshot<List<Message>> snapshot = f.snapshot(next);
+            check(snapshot.data.size() == 3 && Message.COMPACTION.equals(snapshot.data.get(2).role), "Following request lost its stored compaction marker");
+            f.loop.replayUiSnapshot(snapshot, next);
+            check(replay.equals(java.util.Arrays.asList("new partial")), "Compaction cleanup removed subsequent partial output");
+            f.loop.clearGoal(); return answer("new partial");
+        };
+        fixture.loop.compactNow(1L, fixture.loop.generation(), 9);
+        check(fixture.calls == 2, "Compaction followup did not run exactly one new model request");
+        pass("completedCompactionKeepsFollowingUnpersistedOutput");
+    }
+
+    private static void unsuccessfulCompactionNeverPersistsOrReplaysSuccess() throws Exception {
+        for (final boolean cancel : new boolean[]{false, true}) {
+            final Fixture fixture = new Fixture();
+            fixture.stored.add(Message.user("existing request")); fixture.stored.add(Message.assistant("existing answer", null));
+            fixture.loop.loadHistory("fixture", new ArrayList<Message>(fixture.stored));
+            fixture.loop.setRecorder(new AgentLoop.Recorder() {
+                @Override public void record(long sid, Message message) { fixture.stored.add(message); }
+                @Override public void replace(long sid, List<Message> messages) { throw new AssertionError("Failed or cancelled compaction committed a divider"); }
+            });
+            fixture.script = (f, sink) -> {
+                if (cancel) { f.loop.cancel(); return answer("obsolete handoff"); }
+                LlmClient.Reply failure = new LlmClient.Reply(); failure.error = "HTTP 503"; return failure;
+            };
+            fixture.loop.compactNow(1L, fixture.loop.generation(), 9);
+            final int[] starts = new int[1], errors = new int[1];
+            AgentLoop.Quiet next = new AgentLoop.Quiet() {
+                @Override public void onCompactStart(int gen) { starts[0]++; }
+                @Override public void onError(int gen, String message) { errors[0]++; }
+                @Override public void onCompacted(int gen, boolean followup) { throw new AssertionError("Unsuccessful compaction replayed completion"); }
+            };
+            fixture.loop.replayUiSnapshot(fixture.snapshot(next), next);
+            check(fixture.stored.size() == 2, "Unsuccessful compaction changed the transcript");
+            if (!cancel) check(starts[0] == 0 && errors[0] == 1, "Failure replay revived a pending compression row or lost its failure event");
+        }
+        pass("unsuccessfulCompactionNeverPersistsOrReplaysSuccess");
+    }
+
     public static void main(String[] args) throws Exception {
         unpersistedPartialIsReplayedAndFutureHasLargerSequence();
         persistedPayloadIsNotReplayed();
@@ -442,6 +540,9 @@ public final class UiSnapshotRegressionTest {
         listenerIdentityAndReadFailureArePreserved();
         cancelledSnapshotCannotResurrectOldPartial();
         listenerSwitchDoesNotWaitForSnapshotOrGetOverwritten();
+        compactionCommitAndDividerSnapshotAreAtomic();
+        completedCompactionKeepsFollowingUnpersistedOutput();
+        unsuccessfulCompactionNeverPersistsOrReplaysSuccess();
         System.out.println(passed + " UI snapshot tests passed");
     }
 }

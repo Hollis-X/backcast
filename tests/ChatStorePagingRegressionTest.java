@@ -1,4 +1,5 @@
 import com.mkei.backcast.agent.Message;
+import com.mkei.backcast.agent.Compactor;
 import com.mkei.backcast.mcp.McpSelection;
 import com.mkei.backcast.mcp.McpServer;
 import com.mkei.backcast.mcp.McpToolInfo;
@@ -60,7 +61,7 @@ public final class ChatStorePagingRegressionTest {
                 + "public abstract void onCreate(SQLiteDatabase db); public abstract void onUpgrade(SQLiteDatabase db,int o,int n); }");
         add(files, "android.database.sqlite.SQLiteDatabase",
                 "import java.util.*; import android.database.Cursor; import android.content.ContentValues;"
-                + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5;"
+                + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5,CONFLICT_IGNORE=4;"
                 + "private static final List<Map<String,Object>> rows=new ArrayList<Map<String,Object>>(); private static long next=1;"
                 + "public static final List<String> statements=new ArrayList<String>();public static boolean requestDiagnosticColumn;"
                 + "public static final Set<String> runColumns=new HashSet<String>(),messageColumns=new HashSet<String>();"
@@ -90,9 +91,11 @@ public final class ChatStorePagingRegressionTest {
                 + "while(selected.size()>200)rows.remove(selected.remove(0));}"
                 + "public void beginTransaction(){} public void setTransactionSuccessful(){} public void endTransaction(){}"
                 + "public long insert(String table,String nullColumn,ContentValues values){Map<String,Object> row=new HashMap<String,Object>(values);"
-                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\")||table.equals(\"runs\")||table.equals(\"context_windows\"))rows.add(row);return id;}"
+                + "long id=next++;row.put(\"id\",Long.valueOf(id));row.put(\"table\",table);if(table.equals(\"messages\")||table.equals(\"request_events\")||table.equals(\"diagnostic_errors\")||table.equals(\"runs\")||table.equals(\"context_windows\")||table.equals(\"compaction_events\"))rows.add(row);return id;}"
                 + "public long insertWithOnConflict(String t,String n,ContentValues v,int c){if(t.equals(\"runs\")||t.equals(\"context_windows\"))"
-                + "delete(t,\"session_id=?\",new String[]{v.get(\"session_id\").toString()});return insert(t,n,v);}"
+                + "delete(t,\"session_id=?\",new String[]{v.get(\"session_id\").toString()});"
+                + "if(t.equals(\"compaction_events\")&&c==CONFLICT_IGNORE)for(Map<String,Object> row:rows)"
+                + "if(t.equals(row.get(\"table\"))&&v.get(\"session_id\").equals(row.get(\"session_id\"))&&v.get(\"through_id\").equals(row.get(\"through_id\")))return -1;return insert(t,n,v);}"
                 + "public int update(String t,ContentValues v,String s,String[] a){if(t.equals(\"sessions\"))return 0;"
                 + "boolean clock=s.equals(\"session_id=? AND running=1\");if(!s.equals(\"id=?\")&&!clock)throw new AssertionError(s);"
                 + "int changed=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(t)"
@@ -105,11 +108,13 @@ public final class ChatStorePagingRegressionTest {
                 + "public Cursor query(String table,String[] columns,String selection,String[] args,String group,String having,String order,String limit){"
                 + "List<Map<String,Object>> selected=new ArrayList<Map<String,Object>>();"
                 + "for(Map<String,Object> row:rows){if(!row.get(\"table\").equals(table))continue;boolean include=true;int arg=0;"
-                + "for(String condition:selection.split(\" AND \")){"
+                + "for(String condition:selection==null?new String[0]:selection.split(\" AND \")){"
                 + "if(condition.equals(\"session_id=?\")){if(((Number)row.get(\"session_id\")).longValue()!=Long.parseLong(args[arg++]))include=false;}"
                 + "else if(condition.equals(\"running=1\")){if(((Number)row.get(\"running\")).intValue()!=1)include=false;}"
                 + "else if(condition.equals(\"id<?\")){if(((Number)row.get(\"id\")).longValue()>=Long.parseLong(args[arg++]))include=false;}"
                 + "else if(condition.equals(\"id>?\")){if(((Number)row.get(\"id\")).longValue()<=Long.parseLong(args[arg++]))include=false;}"
+                + "else if(condition.equals(\"through_id>=?\")){if(((Number)row.get(\"through_id\")).longValue()<Long.parseLong(args[arg++]))include=false;}"
+                + "else if(condition.equals(\"through_id<=?\")){if(((Number)row.get(\"through_id\")).longValue()>Long.parseLong(args[arg++]))include=false;}"
                 + "else if(condition.equals(\"role=?\")){if(!args[arg++].equals(row.get(\"role\")))include=false;}"
                 + "else if(condition.equals(\"role<>?\")){if(args[arg++].equals(row.get(\"role\")))include=false;}"
                 + "else if(condition.startsWith(\"tool_call_id IN (\")){boolean matches=false;for(int c=0;c<condition.length();c++)"
@@ -403,6 +408,84 @@ public final class ChatStorePagingRegressionTest {
                 && field(page, "leadingAssistant") == null, "Empty page carried stale cursors or context");
     }
 
+    private static void compactionDividersPersistWithoutEnteringTheModelWindow() throws Exception {
+        Object store = fresh();
+        Message request = Message.user("inspect project"); request.workDir = "/project";
+        append(store, 7L, request); append(store, 7L, Message.assistant("before compact", null));
+        long boundary = number(records("messages", 7L).get(1), "id");
+        Message summary = Message.user(Compactor.wrap("only a private handoff"));
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
+        append(store, 7L, new Message(Message.COMPACTION, "must not become a transcript message"));
+        append(store, 7L, Message.assistant("after compact", null));
+        List<Message> decorated = messages(page(store, 7L, -1L, 48));
+        check(decorated.size() == 4 && Message.COMPACTION.equals(decorated.get(2).role)
+                        && decorated.get(2).content.isEmpty() && "after compact".equals(decorated.get(3).content),
+                "Saved divider disappeared, duplicated at the same boundary, leaked its summary or moved to the transcript end");
+        check(records("messages", 7L).size() == 3 && records("compaction_events", 7L).size() == 1
+                        && number(records("compaction_events", 7L).get(0), "throughId") == boundary,
+                "Local event altered append-only model messages or lost its exact boundary");
+        @SuppressWarnings("unchecked") List<Message> context = (List<Message>) storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
+        check(context.size() == 3 && Compactor.isSummary(context.get(1)) && "after compact".equals(context.get(2).content),
+                "Decoration changed the restored model checkpoint");
+        for (Message message : context) check(!Message.COMPACTION.equals(message.role), "Local divider entered the model window");
+        try { new Message(Message.COMPACTION, "").toJson(); throw new AssertionError("Local divider serialized into an API message"); }
+        catch (IllegalStateException expected) { }
+        append(store, 8L, Message.user("other session"));
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 8L, Arrays.asList(summary));
+        storeType.getMethod("delete", long.class).invoke(store, 7L);
+        check(records("compaction_events", 7L).isEmpty() && records("compaction_events", 8L).size() == 1,
+                "Deleting a conversation orphaned dividers or deleted another conversation's marker");
+    }
+
+    private static void compactionDividerPagingPreservesBoundariesAndRequestMetadata() throws Exception {
+        Object store = fresh(); Message request = Message.user("selected task"); request.mcpSelection = selection();
+        append(store, 7L, request); append(store, 7L, Message.assistant("first answer", null));
+        long firstBoundary = number(records("messages", 7L).get(1), "id");
+        Message summary = Message.user(Compactor.wrap("handoff"));
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
+        append(store, 7L, Message.assistant("second answer", null));
+        long secondBoundary = number(records("messages", 7L).get(2), "id");
+        storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
+        append(store, 7L, Message.assistant("third answer", null));
+        Object latest = page(store, 7L, -1L, 1);
+        check(messages(latest).size() == 1 && "third answer".equals(messages(latest).get(0).content)
+                        && number(latest, "earlierCount") == 3 && ((Message)field(latest, "requestBefore")).mcpSelection != null,
+                "Event decorations inflated message counts or changed the original retry request");
+        Object middle = page(store, 7L, number(latest, "firstId"), 1);
+        check(number(middle, "firstId") == secondBoundary && messages(middle).size() == 2
+                        && "second answer".equals(messages(middle).get(0).content)
+                        && Message.COMPACTION.equals(messages(middle).get(1).role), "Second boundary was skipped or added to the wrong page");
+        Object earlier = page(store, 7L, number(middle, "firstId"), 1);
+        check(number(earlier, "firstId") == firstBoundary && messages(earlier).size() == 2
+                        && Message.COMPACTION.equals(messages(earlier).get(1).role), "Earlier boundary was skipped or duplicated across pages");
+        check(messages(page(store, 8L, -1L, 48)).isEmpty(), "Divider crossed conversation boundaries");
+    }
+
+    private static void versionFourteenRestoresOnlyItsKnownCompactionBoundary() throws Exception {
+        Object store = fresh(), db = storeType.getMethod("getWritableDatabase").invoke(store);
+        append(store, 7L, Message.user("old request")); append(store, 7L, Message.assistant("old answer", null));
+        long boundary = number(records("messages", 7L).get(1), "id");
+        append(store, 7L, Message.assistant("newer answer", null));
+        Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
+        for (long sid : new long[]{7L, 8L, 9L}) {
+            @SuppressWarnings("unchecked") Map<String,Object> checkpoint = (Map<String,Object>) valuesType.getConstructor().newInstance();
+            checkpoint.put("session_id", sid); checkpoint.put("through_id", boundary);
+            checkpoint.put("window", sid == 7L ? new JSONArray().put(Message.user(Compactor.wrap("legacy handoff")).toCheckpointJson()).toString()
+                    : sid == 8L ? new JSONArray().put(Message.user("ordinary checkpoint").toCheckpointJson()).toString() : "broken-json");
+            databaseType.getMethod("insert", String.class, String.class, valuesType).invoke(db, "context_windows", null, checkpoint);
+        }
+        databaseType.getMethod("legacyRuns", int.class).invoke(null, 14);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 14, 15);
+        List<Message> decorated = messages(page(store, 7L, -1L, 48));
+        check(decorated.size() == 4 && Message.COMPACTION.equals(decorated.get(2).role)
+                        && "newer answer".equals(decorated.get(3).content) && records("compaction_events", 7L).size() == 1,
+                "Legacy migration lost the known boundary or placed it after later messages");
+        check(records("compaction_events", 8L).isEmpty() && records("compaction_events", 9L).isEmpty()
+                        && "broken-json".equals(records("context_windows", 9L).get(0).get("window")),
+                "Migration invented a successful compaction or rewrote invalid recovery evidence");
+    }
+
     private static void stoppedEmptyTurnDoesNotRewritePreviousTurnTime() throws Exception {
         Object store = fresh();
         append(store, 7, Message.user("previous turn"));
@@ -449,13 +532,13 @@ public final class ChatStorePagingRegressionTest {
     private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
         Object store = fresh();
         Object db = databaseType.getConstructor().newInstance();
-        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 14,
-                "Fresh databases do not request the MCP selection schema version");
+        check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 15,
+                "Fresh databases do not request the compaction event schema version");
         databaseType.getMethod("legacyRuns", int.class).invoke(null, 10);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 14);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 15);
         @SuppressWarnings("unchecked")
         List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 7 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
+        check(sql.size() == 9 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
                         && sql.get(0).contains("diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).contains("request_events(session_id,id)")
                         && sql.get(2).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
@@ -482,9 +565,9 @@ public final class ChatStorePagingRegressionTest {
         long oldId = (Long) databaseType.getMethod("insert", String.class, String.class, valuesType)
                 .invoke(db, "request_events", null, old);
         databaseType.getMethod("legacyRuns", int.class).invoke(null, 11);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 14);
+        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 15);
         @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 6 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
+        check(sql.size() == 8 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
                         && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
                         && sql.get(2).contains("diagnostic_errors(session_id,id)"),
                 "Version 11 migration recreated request history or did not apply the additive column default");
@@ -591,7 +674,7 @@ public final class ChatStorePagingRegressionTest {
             }
             if (version >= 12) databaseType.getField("requestDiagnosticColumn").setBoolean(null, true);
             append(store, 7L, Message.user("preserved legacy request"));
-            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 14);
+            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 15);
             @SuppressWarnings("unchecked") Set<String> columns = (Set<String>) databaseType.getField("runColumns").get(null);
             check(columns.containsAll(Arrays.asList("turn_at", "turn_wall", "seen_at", "turn_elapsed_ms",
                             "turn_think_ms", "tokens_used", "token_budget", "budget_wrap_finished")),
@@ -793,6 +876,8 @@ public final class ChatStorePagingRegressionTest {
                         "continuationRetryAndDisclosureScopesRemainSeparate",
                         "prefixRequestCorruptionAndUserlessPageStayExplicit", "messageMetadataSurvivesPaging", "selectedMcpToolSurvivesTranscriptAndContextCheckpoint",
                         "corruptedMcpSelectionCannotSilentlyRestoreAnotherRequest", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
+                        "compactionDividersPersistWithoutEnteringTheModelWindow", "compactionDividerPagingPreservesBoundariesAndRequestMetadata",
+                        "versionFourteenRestoresOnlyItsKnownCompactionBoundary",
                         "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
                         "legacyDatabaseUpgradeAddsLocalRequestDiagnostics", "versionElevenMigrationPreservesRequestRows",
                         "runDurationsRoundTripWithoutLosingNullOrZero", "durationHeartbeatOnlyUpdatesExistingRunningSession",

@@ -175,21 +175,21 @@ public final class TurnUiRegressionTest {
                 + "class UiActivity {protected void onStop(){}protected void onDestroy(){}}"
                 + "public class TurnUiFixture extends UiActivity implements ApprovalGate {"
                 + "AgentLoop loop; long turnStartedAt,firstEventAt,thinkOpenAt,fallbackElapsedMs,fallbackThinkMs; int turnUiToken=-1;"
-                + "AgentLoop errorToastSource;int errorToastToken=-1,errorToastGeneration=-1;boolean compactLive;int settled,goalRefreshes;List<String>toasts=new ArrayList<String>();"
+                + "AgentLoop errorToastSource;int errorToastToken=-1,errorToastGeneration=-1;boolean compactLive,compactRowRetained;TextView compactHeader,workHeader;LinearLayout compactRow;View turnChevron;int tickToken,settled,goalRefreshes;List<String>toasts=new ArrayList<String>();"
                 + "static class Toast{static final int LENGTH_SHORT=0;TurnUiFixture owner;String text;static Toast makeText(TurnUiFixture o,String t,int d){Toast v=new Toast();v.owner=o;v.text=t;return v;}"
                 + "static Toast makeText(TurnUiFixture o,int id,int d){return makeText(o,String.valueOf(id),d);}void show(){owner.toasts.add(text);}}"
-                + "void settleWork(){settled++;}void dropCompactRow(){}void settleCompact(){}void refreshGoal(){goalRefreshes++;}"
+                + "void settleWork(){settled++;}void refreshGoal(){goalRefreshes++;}void refreshContextMeter(){}"
                 + "void recordUiFailure(long sid,String source,Throwable failure){}"
                 + "interface ViewParent {}"
                 + "static class View implements ViewParent { static final int VISIBLE=0,GONE=8;"
-                + "ViewGroup parent; Object tag; CharSequence description; int visibility,top,height=10; boolean enabled=true,focused; float alpha=1f,translationY; Animator animator;"
+                + "ViewGroup parent; Object tag; CharSequence description; int visibility,top,height=10,background,paddingLeft,paddingTop,paddingRight,paddingBottom; boolean enabled=true,focused; float alpha=1f,translationY; Animator animator;View(){}View(Object c){}"
                 + "List<Runnable> delayed=new ArrayList<Runnable>();Map<Runnable,Long> due=new IdentityHashMap<Runnable,Long>();"
                 + "ViewParent getParent(){return parent;} Object getTag(){return tag;} void setTag(Object t){tag=t;}"
                 + "CharSequence getContentDescription(){return description;} void setContentDescription(CharSequence d){description=d;}"
                 + "void setVisibility(int v){visibility=v;} int getVisibility(){return visibility;}"
                 + "void setEnabled(boolean v){enabled=v;} int getTop(){return top;} int getBottom(){return top+getHeight();} int getHeight(){return height;}"
                 + "ViewGroup.LayoutParams params=new ViewGroup.MarginLayoutParams();Object getWindowToken(){return this;} ViewGroup.LayoutParams getLayoutParams(){return params;}void setLayoutParams(ViewGroup.LayoutParams v){params=v;}"
-                + "void clearFocus(){focused=false;} void requestFocus(){focused=true;} void setPadding(int a,int b,int c,int d){}"
+                + "void clearFocus(){focused=false;} void requestFocus(){focused=true;} void setPadding(int a,int b,int c,int d){paddingLeft=a;paddingTop=b;paddingRight=c;paddingBottom=d;}void setBackgroundColor(int c){background=c;}"
                 + "void setAlpha(float v){alpha=v;} void setTranslationY(float v){translationY=v;} Animator animate(){if(animator==null)animator=new Animator(this);return animator;}"
                 + "void post(Runnable r){posted.add(r);} void postOnAnimation(Runnable r){posted.add(r);}"
                 + "void postDelayed(Runnable r,long delay){delayed.add(r);due.put(r,SystemClock.elapsedRealtime()+delay);}"
@@ -228,7 +228,7 @@ public final class TurnUiRegressionTest {
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
                 + "static class LayoutParams{static final int WRAP_CONTENT=-2;int height=-2;}static class MarginLayoutParams extends LayoutParams { int bottomMargin; }"
                 + "int getChildCount(){return children.size();} View getChildAt(int i){return children.get(i);}"
-                + "void addView(View v,Object p){children.add(v);v.parent=this;}"
+                + "void addView(View v,Object p){children.add(v);v.parent=this;if(p instanceof LayoutParams)v.params=(LayoutParams)p;}"
                 + "void addView(View v){addView(v,null);}"
                 + "void addView(View v,int i,Object p){children.add(i,v);v.parent=this;} int indexOfChild(View v){return children.indexOf(v);}"
                 + "void removeView(View v){children.remove(v);v.parent=null;}"
@@ -237,10 +237,10 @@ public final class TurnUiRegressionTest {
                 + "void layout(){int y=0;for(View child:children){if(child instanceof ViewGroup)((ViewGroup)child).layout();child.top=y;y+=child.getHeight();}}"
                 + "int getHeight(){int y=0;for(View child:children)y+=child.getHeight();return children.isEmpty()?height:y;} }"
                 + "static class LinearLayout extends ViewGroup { static final int HORIZONTAL=0,VERTICAL=1;"
-                + "int orientation=VERTICAL;LinearLayout(Object... c){} void setOrientation(int o){orientation=o;}int getOrientation(){return orientation;} void setGravity(int g){} }"
+                + "int orientation=VERTICAL,gravity;LinearLayout(Object... c){} void setOrientation(int o){orientation=o;}int getOrientation(){return orientation;} void setGravity(int g){gravity=g;}static class LayoutParams extends ViewGroup.LayoutParams{int width;float weight;LayoutParams(int w,int h,float x){width=w;height=h;weight=x;}} }"
                 + "static class TextView extends View { String text=\"\"; TextView(Object... c){} void setText(CharSequence t){text=t.toString();}"
                 + "void setText(int r){text=String.valueOf(r);} CharSequence getText(){return text;}"
-                + "void setTextSize(int v){} void setTextColor(int v){} void setLineSpacing(int v,float s){} void setBackgroundResource(int v){} void setMaxWidth(int v){} }"
+                + "void setTextSize(int v){} void setTextColor(int v){} void setLineSpacing(int v,float s){} void setBackgroundResource(int v){} void setMaxWidth(int v){}void setIncludeFontPadding(boolean v){} }"
                 + "static class ImageView extends View {}"
                 + "static class ViewTreeObserver { interface OnPreDrawListener{boolean onPreDraw();}"
                 + "List<OnPreDrawListener> listeners=new ArrayList<OnPreDrawListener>();"
@@ -260,9 +260,9 @@ public final class TurnUiRegressionTest {
                 + "toolkit_source=29,toolkit_requirements=30,toolkit_path=31,toolkit_runtime=32,toolkit_official_version=33,toolkit_probe_output=34,"
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
-                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51; }"
+                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51,compacting=52,compacted=53; }"
                 + "static class color{static final int text_primary=4,code_bg=5;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50,sheet_panel=51,sheet_scroll=52;} }"
-                + "static class Gravity{static final int RIGHT=1;}"
+                + "static class Gravity{static final int RIGHT=1,CENTER_VERTICAL=2;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400,heightPixels=1000;}"
                 + "Map<TextView,Message> messageActions=new IdentityHashMap<TextView,Message>();Resources getResources(){return new Resources();} void enableMessageActions(TextView t,Message request){messageActions.put(t,request);}"
                 + "static final String INPUT_METHOD_SERVICE=\"input\"; TextView prompt=new TextView();View currentFocus=prompt,mainRoot=new View();"
@@ -287,7 +287,7 @@ public final class TurnUiRegressionTest {
                 + "View composerDock,inputBar; void positionLatestButton(int footer){}"
                 + "boolean immediateUi; boolean isFinishing(){return finishing;} void ui(Runnable r){uiTasks.add(r);}"
                 + "void runOnUiThread(Runnable r){if(immediateUi)r.run();else uiTasks.add(r);} int dp(int v){return v;}"
-                + "String getString(int id,Object...args){return args.length==0?String.valueOf(id):id==R.string.worked?\"工作了 \"+args[0]+\"s\":\"Earlier \"+args[0];} void scheduleFrost(){}"
+                + "String getString(int id,Object...args){return args.length==0?id==R.string.compacting?\"压缩中\":id==R.string.compacted?\"已压缩\":String.valueOf(id):id==R.string.worked?\"工作了 \"+args[0]+\"s\":\"Earlier \"+args[0];} void scheduleFrost(){}"
                 + "LinearLayout newBlock(){return new LinearLayout();}"
                 + "TextView prepareEarlier(long before,int tailHeight){earlierBeforeId=before;earlierRow=new TextView();"
                 + "stream.addView(earlierRow,null);View tail=new View();tail.height=tailHeight;stream.addView(tail,null);stream.layout();return earlierRow;}"
@@ -349,13 +349,18 @@ public final class TurnUiRegressionTest {
                 "approve", "approvalCurrent", "showApproval", "cancelApprovals", "prettyArgs",
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive", "handleTurnError", "failureToast",
                 "renderDisplayParts", "flowOf", "bodySlot", "traceOf", "visibleText",
-                "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
+                "appendFoldRows", "restoreFlow", "adoptRunningTurn", "startTick", "markTurn", "rewindLiveRound", "refreshAllFolds",
                 "refreshFoldResults", "summaryChevron", "syncWorkChevron", "applyTurnProgress",
                 "appendAgentDelta", "scheduleLiveFlush", "flushLiveAnswer", "sealLiveAnswer", "renderMarkdown", "applyMarkdown",
                 "markdownAnchor", "markdownTop",
                 "bindSummary", "displayElapsed", "seconds", "showActivitySheet", "resetSheetDetails")) {
             check(METHODS.containsKey(name), "Missing UI method " + name);
             source.append(METHODS.get(name).replace("MainActivity.this", "TurnUiFixture.this"));
+        }
+        for (String name : Arrays.asList("beginCompactRow", "settleCompact", "completeCompactRow",
+                "dropCompactRow", "addCompactionDivider", "lastCompactionDivider", "finishCompaction")) {
+            check(METHODS.containsKey(name), "Missing compact UI method " + name);
+            source.append(METHODS.get(name));
         }
         for (String name : Arrays.asList("requestToolkit", "cancelToolkitOperation", "closeToolkitSession", "toolkitArguments",
                 "toolkitState", "toolkitDetails", "pendingOperations", "onStop", "onDestroy")) {
@@ -1781,6 +1786,267 @@ public final class TurnUiRegressionTest {
         pass("compactionKeepsTheWorkRow");
     }
 
+    private static void assertCompactionDivider(Object row, String caption) throws Exception {
+        List<?> parts = children(row);
+        check(parts.size() == 3 && "compaction".equals(get(row, "description"))
+                        && (Integer) get(row, "orientation") == 0 && (Integer) get(row, "background") == 0,
+                "Compaction is not a plain line with a center label");
+        check(caption.equals(get(parts.get(1), "text"))
+                        && (Integer) get(parts.get(1), "paddingLeft") == 12
+                        && (Integer) get(parts.get(1), "paddingRight") == 12,
+                "Divider label retained duration/explanation or does not interrupt its line");
+        for (int index : new int[]{0, 2}) {
+            Object line = parts.get(index), params = get(line, "params");
+            check((Integer) get(params, "width") == 0 && (Integer) get(params, "height") == 1
+                            && (Float) get(params, "weight") == 1f && (Integer) get(line, "background") != 0,
+                    "Divider line does not fill the available width symmetrically");
+        }
+    }
+
+    private static void completedCompactionUsesOneLineAndNoTimer() throws Exception {
+        Object view = fixture(), stream = get(view, "stream");
+        call(view, "beginCompactRow"); call(view, "beginCompactRow");
+        check(children(stream).size() == 1, "Repeated compact start inserted duplicate progress lines");
+        Object row = children(stream).get(0);
+        assertCompactionDivider(row, "压缩中");
+        SystemClock.advance(47000L);
+        check(((List<?>) get(get(view, "compactHeader"), "delayed")).isEmpty(),
+                "Compaction kept its obsolete duration ticker");
+        invoke(view, "finishCompaction", false);
+        assertCompactionDivider(row, "已压缩");
+        check(children(stream).size() == 1 && get(view, "compactHeader") == null
+                        && get(view, "compactRow") == null && !(Boolean) get(view, "compactLive")
+                        && (Integer) get(view, "settled") == 1,
+                "Completed compaction added duplicate duration/explanation rows or retained live state");
+        call(view, "settleCompact"); invoke(view, "finishCompaction", false);
+        check(children(stream).size() == 1, "A finish replay duplicated or removed a completed divider");
+        pass("completedCompactionIsOneLineWithNoDurationOrExplanation");
+    }
+
+    private static void failedOrStoppedCompactionLeavesNoCompletedLine() throws Exception {
+        for (String end : Arrays.asList("dropCompactRow", "settleCompact")) {
+            Object view = fixture(); call(view, "beginCompactRow");
+            Object row = get(view, "compactRow"); call(view, end);
+            check(children(get(view, "stream")).isEmpty() && get(row, "parent") == null
+                            && get(view, "compactHeader") == null && get(view, "compactRow") == null
+                            && !(Boolean) get(view, "compactLive"),
+                    "A failed/stopped compaction retained a partial row or falsely announced success");
+        }
+        check(METHODS.get("handleTurnError").contains("dropCompactRow()")
+                        && METHODS.get("onFinish").contains("settleCompact()"),
+                "Failure and normal finish bypass the incomplete-divider cleanup");
+        pass("failedOrStoppedCompactionRemovesItsWholeDivider");
+    }
+
+    private static void liveCompactionKeepsLaterTextInsideTheSameTurnAfterTheLine() throws Exception {
+        Object view = fixture();
+        Message before = Message.assistant("Already shown", null); before.elapsedMs = 1000L;
+        replay(view, Arrays.asList(Message.user("Keep checking"), before), 0);
+        Object box = ((List<?>) get(view, "boxes")).get(0), flow = get(box, "tag");
+        Object rows = get(flow, "rows"), trace = ((List<?>) get(view, "traces")).get(0);
+        field(view, "turnRows", rows); field(view, "turnFlow", flow); field(view, "currentTrace", trace);
+        field(view, "workHeader", nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]));
+        call(view, "beginCompactRow"); Object divider = get(view, "compactRow");
+        invoke(view, "finishCompaction", true);
+        invoke(view, "addBodyInto", rows, "Continue after compaction");
+        check(get(view, "currentTrace") == trace && (Integer) get(view, "settled") == 0
+                        && children(box).size() == 5 && children(box).get(3) == divider
+                        && "body".equals(get(children(box).get(4), "description")),
+                "Live compaction reopened its clock or inserted resumed text before the separator");
+        assertCompactionDivider(divider, "已压缩");
+        pass("liveCompactionKeepsItsOriginalClockAndLaterTextAfterTheLine");
+    }
+
+    private static void repeatedCompactionReusesOneBoundaryAndPreservesEarlierSuccessOnCancel() throws Exception {
+        Object view = fixture(), stream = get(view, "stream");
+        call(view, "beginCompactRow"); invoke(view, "finishCompaction", false);
+        Object first = children(stream).get(0);
+        call(view, "beginCompactRow");
+        check(get(view, "compactRow") == first && (Boolean) get(view, "compactRowRetained")
+                        && children(stream).size() == 1,
+                "A repeat compact at the same boundary added another line");
+        assertCompactionDivider(first, "压缩中");
+        call(view, "dropCompactRow"); assertCompactionDivider(first, "已压缩");
+        check(children(stream).size() == 1 && !(Boolean) get(view, "compactRowRetained"),
+                "Cancelling a repeated compaction removed the prior successful marker");
+        call(view, "beginCompactRow"); invoke(view, "finishCompaction", false);
+        check(children(stream).size() == 1 && children(stream).get(0) == first,
+                "Repeated successful compaction duplicated the same boundary");
+        Object history = fixture();
+        replay(history, Arrays.asList(Message.user("Keep checking"),
+                Message.user(com.mkei.backcast.agent.Compactor.wrap("private handoff")),
+                new Message(Message.COMPACTION, ""), Message.assistant("Visible", null)), 0);
+        Object block = children(get(history, "stream")).get(0);
+        check(children(block).size() == 3, "Legacy summary and its synthetic event duplicated one boundary");
+        assertCompactionDivider(children(block).get(1), "已压缩");
+        pass("repeatedCompactionAndLegacyEventsShareOneBoundaryWithoutLosingEarlierSuccess");
+    }
+
+    private static void restoredCompactionBodyBoundarySurvivesAdoptionAndFailureRollback() throws Exception {
+        Object view = fixture();
+        Message before = Message.assistant("Committed body", null); before.elapsedMs = 12000L;
+        replay(view, Arrays.asList(Message.user("Keep checking"), before,
+                new Message(Message.COMPACTION, "")), 0);
+        Object box = ((List<?>) get(view, "boxes")).get(0), flow = get(box, "tag");
+        Object oldBody = children(box).get(2), divider = children(box).get(3);
+        Object trace = ((List<?>) get(view, "traces")).get(0);
+        invoke(view, "restoreFlow", flow);
+        check((Boolean) get(flow, "bodySeen") && get(flow, "body") == null
+                        && get(flow, "tail") == null && get(flow, "activeRange") == null,
+                "Restoring a divider reopened its preceding body or activity range");
+        SystemClock.set(900000L);
+        check((Boolean) call(view, "adoptRunningTurn") && get(view, "currentTrace") == trace
+                        && get(view, "turnMarkBody") == null && (Long) get(view, "fallbackElapsedMs") == 12000L,
+                "Adoption lost the compacted turn or marked its earlier body as live");
+        invoke(view, "appendAgentDelta", "Discarded body"); call(view, "sealLiveAnswer");
+        check(children(box).size() == 5 && children(box).get(3) == divider && children(oldBody).size() == 1,
+                "Adopted streaming text was inserted into the body before its divider");
+        call(view, "rewindLiveRound");
+        check(children(box).size() == 4 && children(box).get(3) == divider && get(flow, "body") == null
+                        && (Boolean) get(flow, "bodySeen") && get(flow, "activeRange") == null,
+                "Rollback removed the successful marker or reopened the body before it");
+        invoke(view, "appendAgentDelta", "Accepted body"); call(view, "sealLiveAnswer");
+        check(children(box).size() == 5 && "body".equals(get(children(box).get(4), "description"))
+                        && children(oldBody).size() == 1 && ((List<?>) get(view, "traces")).size() == 1,
+                "Streaming after rollback moved before compaction or created another time row");
+        SystemClock.advance(2000L);
+        check((Long) invoke(view, "displayElapsed", trace) == 14000L && get(view, "currentTrace") == trace,
+                "Compaction adoption or rollback restarted the original turn clock");
+        assertCompactionDivider(divider, "已压缩");
+        pass("compactionBodyBoundarySurvivesActualAdoptionRollbackAndNextStreamingReply");
+    }
+
+    private static void restoredToolOnlyCompactionKeepsLaterRangesAfterAdoptionAndRollback() throws Exception {
+        Object view = fixture();
+        Message before = Message.assistant("", new JSONArray().put(calls().getJSONObject(0)));
+        before.elapsedMs = 23000L;
+        replay(view, Arrays.asList(Message.user("Keep checking"), before, Message.toolResult("c0", "done"),
+                new Message(Message.COMPACTION, "")), 0);
+        Object box = ((List<?>) get(view, "boxes")).get(0), flow = get(box, "tag"), rows = get(flow, "rows");
+        Object divider = children(box).get(2), trace = ((List<?>) get(view, "traces")).get(0);
+        invoke(view, "restoreFlow", flow);
+        check((Boolean) get(flow, "bodySeen") && get(flow, "activeRange") == null,
+                "Restoring a tool-only compaction forgot its boundary");
+        check((Boolean) call(view, "adoptRunningTurn"), "Tool-only compacted turn could not be adopted");
+        invoke(trace, "addStep", "preview", "read", "{}");
+        field(view, "turnRendered", invoke(view, "appendFoldRows", rows, trace, get(view, "turnRendered")));
+        check(children(box).size() == 4 && "activity".equals(get(children(box).get(3), "description"))
+                        && (Integer) get(get(rows, "tag"), "end") == 1
+                        && (Integer) get(get(children(box).get(3), "tag"), "start") == 1,
+                "Adopted tools extended the range before the compaction marker");
+        call(view, "rewindLiveRound");
+        check(children(box).size() == 3 && children(box).get(2) == divider
+                        && (Boolean) get(flow, "bodySeen") && get(flow, "activeRange") == null
+                        && ((List<?>) get(trace, "order")).size() == 1,
+                "Tool preview rollback lost the marker or restored an earlier tool range");
+        invoke(trace, "beginRound"); call(view, "markTurn");
+        invoke(trace, "addStep", "new", "read", "{}");
+        field(view, "turnRendered", invoke(view, "appendFoldRows", rows, trace, get(view, "turnRendered")));
+        check(children(box).size() == 4 && (Integer) get(get(rows, "tag"), "end") == 1
+                        && (Integer) get(get(children(box).get(3), "tag"), "start") == 1
+                        && get(view, "currentTrace") == trace && (Long) get(view, "fallbackElapsedMs") == 23000L
+                        && ((List<?>) get(view, "traces")).size() == 1,
+                "The next request's tools moved before compaction or reset the original timer");
+        assertCompactionDivider(divider, "已压缩");
+        pass("toolOnlyCompactionBoundarySurvivesActualAdoptionRollbackAndNextToolRequest");
+    }
+
+    private static void reopenedHistoryReusesItsNestedTrailingDividerUntilANewMessageAppears() throws Exception {
+        Object view = fixture();
+        Message before = Message.assistant("Committed body", null); before.elapsedMs = 12000L;
+        replay(view, Arrays.asList(Message.user("Keep checking"), before,
+                new Message(Message.COMPACTION, "")), 0);
+        Object stream = get(view, "stream"), box = ((List<?>) get(view, "boxes")).get(0);
+        Object divider = children(box).get(3);
+        check(get(view, "turnRows") == null, "History unexpectedly began a live turn");
+        call(view, "beginCompactRow");
+        check(get(view, "compactRow") == divider && (Boolean) get(view, "compactRowRetained")
+                        && children(stream).size() == 1 && children(box).size() == 4,
+                "Manual compaction after reopening duplicated its nested history marker");
+        call(view, "dropCompactRow"); assertCompactionDivider(divider, "已压缩");
+        call(view, "beginCompactRow"); invoke(view, "finishCompaction", false);
+        check(children(stream).size() == 1 && children(box).size() == 4,
+                "A successful repeat compaction appended a second boundary after the history page");
+        invoke(view, "addUserBubble", Message.user("New request"));
+        call(view, "beginCompactRow");
+        check(get(view, "compactRow") != divider && !(Boolean) get(view, "compactRowRetained")
+                        && children(stream).size() == 3,
+                "Trailing-divider lookup crossed a newer user message");
+        call(view, "dropCompactRow");
+        invoke(view, "addBodyInto", get(get(box, "tag"), "rows"), "New body");
+        check(invoke(view, "lastCompactionDivider", box) == null,
+                "Trailing-divider lookup crossed a newer assistant body");
+        pass("reopenedHistoryReusesOnlyItsTrailingNestedDividerAndStopsAtNewMessages");
+    }
+
+    private static void historicalCompactionKeepsItsPositionAndOriginalTurn() throws Exception {
+        Message request = Message.user("Inspect the project");
+        Message before = Message.assistant("Before compaction", null); before.elapsedMs = 1000L;
+        Message after = Message.assistant("After compaction", calls()); after.elapsedMs = 3000L;
+        Object view = fixture();
+        replay(view, Arrays.asList(request, before, new Message(Message.COMPACTION, ""), after,
+                Message.toolResult("c0", "done")), 0);
+        check(((List<?>) get(view, "traces")).size() == 1 && get(view, "bodies").equals(
+                        Arrays.asList(before.content, after.content)),
+                "Compaction opened a second time row or exposed its internal handoff");
+        Object box = ((List<?>) get(view, "boxes")).get(0), flow = get(box, "tag");
+        List<?> sections = children(box);
+        check(sections.size() == 6 && "body".equals(get(sections.get(2), "description"))
+                        && "compaction".equals(get(sections.get(3), "description"))
+                        && "body".equals(get(sections.get(4), "description"))
+                        && "activity".equals(get(sections.get(5), "description"))
+                        && get(flow, "request") == request,
+                "Post-compaction text/tools moved before the divider or lost their retry request");
+        assertCompactionDivider(sections.get(3), "已压缩");
+        check((Long) get(((List<?>) get(view, "traces")).get(0), "elapsedMs") == 3000L,
+                "Historical compaction split or reset the original turn clock");
+        pass("historicalCompactionKeepsDividerBetweenBodiesAndOneOriginalTurn");
+    }
+
+    private static void toolOnlyCompactionSeparatesLaterToolRanges() throws Exception {
+        Message before = Message.assistant("", new JSONArray().put(calls().getJSONObject(0)));
+        Message after = Message.assistant("", new JSONArray().put(calls().getJSONObject(1)));
+        Object view = fixture();
+        replay(view, Arrays.asList(Message.user("Inspect"), before, Message.toolResult("c0", "first"),
+                new Message(Message.COMPACTION, ""), after, Message.toolResult("c1", "second")), 0);
+        Object box = ((List<?>) get(view, "boxes")).get(0);
+        List<?> sections = children(box);
+        check(sections.size() == 4 && "compaction".equals(get(sections.get(2), "description"))
+                        && "activity".equals(get(sections.get(3), "description")),
+                "A compaction with no preceding body kept later tools before its divider");
+        check((Integer) get(get(sections.get(1), "tag"), "end") == 1
+                        && (Integer) get(get(sections.get(3), "tag"), "start") == 1
+                        && (Integer) get(((List<?>) get(view, "traces")).get(0), "bodyAt") == 1,
+                "Compaction did not freeze the earlier activity range");
+        assertCompactionDivider(sections.get(2), "已压缩");
+        check(((List<?>) get(view, "traces")).size() == 1, "Tool-only compaction created another elapsed row");
+        pass("toolOnlyCompactionKeepsNewToolsAfterItsDivider");
+    }
+
+    private static void compactionPageBoundaryAndLegacySummaryKeepTheirPlaceholders() throws Exception {
+        Message request = Message.user("Continue checking");
+        List<Message> messages = Arrays.asList(request, new Message(Message.COMPACTION, ""),
+                Message.assistant("Visible", null));
+        for (int from : new int[]{0, 1}) {
+            Object view = fixture(); replay(view, messages, from);
+            Object block = children(get(view, "stream")).get(0);
+            int index = from == 0 ? 1 : 0;
+            assertCompactionDivider(children(block).get(index), "已压缩");
+            check(get(view, "bodies").equals(Arrays.asList("Visible")), "A paged marker hid later text");
+            @SuppressWarnings("unchecked") Map<Object, Message> actions = (Map<Object, Message>) get(view, "messageActions");
+            check(actions.containsValue(request), "A paged marker replaced the original retry request");
+        }
+        Object view = fixture();
+        replay(view, Arrays.asList(request, Message.user(com.mkei.backcast.agent.Compactor.wrap("private handoff")),
+                Message.assistant("Visible", null), new Message(Message.COMPACTION, "")), 0);
+        Object block = children(get(view, "stream")).get(0);
+        check(children(block).size() == 4 && get(view, "bodies").equals(Arrays.asList("Visible")),
+                "Legacy handoff text was shown as a user message or repeated compaction lost its later marker");
+        assertCompactionDivider(children(block).get(1), "已压缩");
+        assertCompactionDivider(children(block).get(3), "已压缩");
+        pass("compactionPageBoundaryAndLegacySummaryRenderTheirOwnPlaceholders");
+    }
+
     public static void main(String[] args) throws Exception {
         check(COMPILER != null, "Run with a JDK, not a JRE");
         Path root = Paths.get(args[0]);
@@ -1841,6 +2107,16 @@ public final class TurnUiRegressionTest {
                 toolkitCleanupFailureReachesTheUiCallback();
                 continuationReusesOneWorkRow();
                 compactionKeepsTheWorkRow();
+                completedCompactionUsesOneLineAndNoTimer();
+                failedOrStoppedCompactionLeavesNoCompletedLine();
+                liveCompactionKeepsLaterTextInsideTheSameTurnAfterTheLine();
+                repeatedCompactionReusesOneBoundaryAndPreservesEarlierSuccessOnCancel();
+                restoredCompactionBodyBoundarySurvivesAdoptionAndFailureRollback();
+                restoredToolOnlyCompactionKeepsLaterRangesAfterAdoptionAndRollback();
+                reopenedHistoryReusesItsNestedTrailingDividerUntilANewMessageAppears();
+                historicalCompactionKeepsItsPositionAndOriginalTurn();
+                toolOnlyCompactionSeparatesLaterToolRanges();
+                compactionPageBoundaryAndLegacySummaryKeepTheirPlaceholders();
             }
             System.out.println(passed + " UI tests passed");
         } finally {
