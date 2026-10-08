@@ -2,8 +2,6 @@ package com.mkei.backcast;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -55,6 +53,7 @@ import com.mkei.backcast.ui.ContextMeter;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.Markdown;
 import com.mkei.backcast.ui.MarkdownRenderQueue;
+import com.mkei.backcast.ui.MessageActions;
 import com.mkei.backcast.ui.SlashInput;
 import com.mkei.backcast.ui.SlashMenuPopup;
 import com.mkei.backcast.ui.McpToolPicker;
@@ -187,7 +186,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         TurnTrace turn;
         LinearLayout rows;
         int rendered;
-        String request = "";
+        Message request;
+        String disclosureRequest = "";
     }
     private TextView plus;
     private View drawerOverlay;
@@ -196,6 +196,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     private SlashMenuPopup slashPopup;
     private McpToolPicker mcpToolPicker;
     private long slashContext;
+    private boolean slashResumed;
 
     private Settings settings;
     private ChatStore chatStore;
@@ -226,6 +227,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         LinearLayout tail;
         boolean bodySeen;
         TurnTrace.Range activeRange;
+        Message request;
 
         Flow(LinearLayout box, LinearLayout rows) {
             this.box = box;
@@ -268,6 +270,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     /** 重画时最后一轮。还在跑就接着用它，不再另起一行「工作了」。 */
     private TurnTrace replayTailTrace;
     private LinearLayout replayTailRows;
+    private Message replayTailRequest;
     /** UI fallback until the owning worker publishes its accumulated clock. */
     private long turnStartedAt;
     private long firstEventAt;
@@ -566,7 +569,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         mcpToolPicker = new McpToolPicker(this, new McpToolPicker.Host() {
             @Override public long context() { return slashContext; }
             @Override public long session() { return sessionId; }
-            @Override public boolean current(long owner) { return owner == slashContext && !activityDestroyed && !isFinishing() && !sessionOpening; }
+            @Override public boolean current(long owner) { return owner == slashContext && slashResumed && !activityDestroyed && !isFinishing() && !sessionOpening; }
             @Override public String text() { return prompt.getText().toString(); }
             @Override public void draft(String text) { prompt.setText(text); prompt.setSelection(prompt.length()); }
             @Override public void hideMenu() { hideSlashPopup(); }
@@ -601,6 +604,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     @Override
     protected void onResume() {
         super.onResume();
+        slashResumed = true;
         hideKeyboard();
         if (mcpToolPicker != null) mcpToolPicker.reloadCatalog();
         updateStatus();
@@ -651,6 +655,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     @Override
     protected void onPause() {
+        slashResumed = false;
         hideSlashPopup();
         if (mcpToolPicker != null) mcpToolPicker.cancelUi();
         hideKeyboard();
@@ -2239,7 +2244,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private void syncSlashPopup(String raw) {
         if (raw == null || !raw.startsWith("/") || raw.indexOf('\n') >= 0
-                || sessionOpening || activityDestroyed || mcpToolPicker != null && mcpToolPicker.editing()) {
+                || !slashResumed || sessionOpening || activityDestroyed || mcpToolPicker != null && mcpToolPicker.editing()) {
             hideSlashPopup();
             return;
         }
@@ -2292,6 +2297,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void showSlashPopup(List<SlashCmd> hits, String prefix) {
+        if (slashPopup == null) {
+            slashPopup = new SlashMenuPopup(this, inputBar != null ? inputBar : prompt);
+            slashPopup.setOnDismissListener(() -> {
+                if (mcpToolPicker != null) mcpToolPicker.menuClosed();
+            });
+        }
+        if (!slashPopup.isShowing() && mcpToolPicker != null) mcpToolPicker.menuOpened();
         List<SlashMenuPopup.Item> items = new ArrayList<SlashMenuPopup.Item>();
         final long owner = slashContext;
         if (!hits.isEmpty()) items.add(new SlashMenuPopup.Item(getString(R.string.slash_title), "", null));
@@ -2308,12 +2320,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         if (mcpToolPicker != null) mcpToolPicker.append(items, prefix);
         if (items.isEmpty()) items.add(new SlashMenuPopup.Item("没有匹配的指令或 MCP 工具", "试试服务名或工具名", null));
-        if (slashPopup == null) slashPopup = new SlashMenuPopup(this, inputBar != null ? inputBar : prompt);
         slashPopup.show(items);
+        if (!slashPopup.isShowing() && mcpToolPicker != null) mcpToolPicker.menuClosed();
     }
 
     private void hideSlashPopup() {
         if (slashPopup != null) slashPopup.dismiss();
+        if (mcpToolPicker != null) mcpToolPicker.menuClosed();
     }
 
     private void resetSlashContext() {
@@ -2407,7 +2420,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void startText(final String text, boolean asGoal) {
-        final McpSelection selected = mcpToolPicker == null ? null : mcpToolPicker.selection(text);
+        Message request = Message.user(text);
+        request.mcpSelection = mcpToolPicker == null ? null : mcpToolPicker.selection(text);
+        startRequest(request, asGoal);
+    }
+
+    private void startRequest(final Message request, boolean asGoal) {
+        final String text = request.content;
+        final McpSelection selected = request.mcpSelection;
         if (selected != null) {
             try { RunHub.get(this).validateMcpSelection(selected); }
             catch (Exception invalid) { mcpToolPicker.selectionUnavailable(invalid); return; }
@@ -2418,7 +2438,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             try { target.validateMcpSelection(selected); }
             catch (Exception invalid) { mcpToolPicker.selectionUnavailable(invalid); return; }
         }
-        final String selectionDraft = mcpToolPicker == null ? null : mcpToolPicker.saveDraft();
+        String savedSelection = null;
+        if (selected != null) {
+            try { savedSelection = new JSONObject().put("selection", selected.toJson()).put("text", text).toString(); }
+            catch (Exception invalid) { recordUiFailure(sessionId, "ui:message_retry", invalid); return; }
+        }
+        final String selectionDraft = savedSelection;
         final long sid = ensureSession(text);
         final int gen = target.generation();
         final int token = liveToken = target.nextUiToken(liveToken);
@@ -2427,7 +2452,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sealCurrentTurn();
         settleCompact();
         final int firstRow = stream.getChildCount();
-        addUserBubble(text);
+        addUserBubble(request);
         if (asGoal) target.setGoal(text);
         turnUiToken = token;
         turnStartedAt = SystemClock.elapsedRealtime();
@@ -2435,6 +2460,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         fallbackElapsedMs = 0;
         fallbackThinkMs = 0;
         beginWorkRow();
+        if (turnFlow != null) turnFlow.request = request;
         setBusy(true);
         refreshGoal();
         new Thread(new Runnable() {
@@ -2830,8 +2856,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 ((ViewGroup) parent).removeView(liveAnswer);
             }
             liveAnswer = null;
-            liveAnswerRaw = null;
         }
+        liveAnswerRaw = null;
+        liveAnswerRendered = 0;
         if (turnFlow != null) {
             if (turnMarkBody != null) {
                 while (turnMarkBody.getChildCount() > turnMarkBodyChildren)
@@ -2872,6 +2899,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         }
         currentTrace = new TurnTrace();
         addTurnSummary(currentTrace, true);
+        if (turnFlow != null) turnFlow.request = replayTailRequest;
         markTurn();
         startTick();
     }
@@ -3003,6 +3031,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         if (text == null || text.length() == 0 || secretBlocked) {
             return;
         }
+        if (liveAnswerRaw == null) liveAnswerRaw = new StringBuilder();
+        liveAnswerRaw.append(text);
+        // Keep leading whitespace in the draft, without creating a blank transcript block.
+        if (liveAnswer == null && liveAnswerRaw.toString().trim().length() == 0) return;
         if (currentTrace != null) currentTrace.phase = "responding";
         if (liveAnswer == null) {
             sealOpenThink();
@@ -3016,8 +3048,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             liveAnswer.setTextColor(getResources().getColor(R.color.text_primary));
             liveAnswer.setLineSpacing(dp(5), 1f);
             liveAnswer.setPadding(0, dp(4), 0, dp(8));
-            enableCopy(liveAnswer);
-            liveAnswerRaw = new StringBuilder();
+            enableMessageActions(liveAnswer, turnFlow == null ? null : turnFlow.request);
             liveAnswerRendered = 0;
             // 正文落到当前那一段里。上一段正文后面如果已经排了命令，
             // 这里会另起一段，命令就留在它出现的位置，不会被顶到最后。
@@ -3025,7 +3056,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             ViewGroup parent = slot != null ? slot : stream;
             parent.addView(liveAnswer, fullWidth());
         }
-        liveAnswerRaw.append(text);
         if (PromptGuard.REFUSAL.equals(text)) {
             liveAnswerRaw.setLength(0); liveAnswerRaw.append(text); secretBlocked = true;
             liveAnswer.setText(""); liveAnswerRendered = 0;
@@ -3231,15 +3261,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
 
     /** 助手回复：白底正文，Markdown 渲染成加粗 / 代码 / 列表 / 表格。 */
-    private void addAgentText(String text) {
-        TextView tv = new TextView(this);
+    private void addAgentText(String text, Message request) {
         String raw = visibleText(text);
+        if (raw == null || raw.trim().length() == 0) return;
+        TextView tv = new TextView(this);
         tv.setText(raw);
         tv.setTextSize(16);
         tv.setTextColor(getResources().getColor(R.color.text_primary));
         tv.setLineSpacing(dp(5), 1f);
         tv.setPadding(0, dp(4), 0, dp(8));
-        enableCopy(tv);
+        enableMessageActions(tv, request);
 
         host().addView(tv, fullWidth());
         renderMarkdown(tv, raw, false);
@@ -3395,7 +3426,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     /** 用户消息只显示正文；目录仍保存在会话记录中供工具解析。 */
-    private void addUserBubble(String text) {
+    private void addUserBubble(Message request) {
+        String text = request.content == null ? "" : request.content;
         TextView tv = new TextView(this);
         tv.setText(text);
         tv.setTextSize(16);
@@ -3405,7 +3437,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         tv.setPadding(dp(16), dp(10), dp(16), dp(10));
         tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels
                 * BUBBLE_MAX_RATIO));
-        enableCopy(tv);
+        enableMessageActions(tv, request);
 
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
@@ -3540,8 +3572,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 : (trace == currentTrace ? displayElapsed(trace) : 0L);
         if (ms <= 0) {
             header.setText("");
+            ViewParent parent = header.getParent();
+            if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.GONE);
+            else header.setVisibility(View.GONE);
             return;
         }
+        ViewParent parent = header.getParent();
+        if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.VISIBLE);
+        else header.setVisibility(View.VISIBLE);
         boolean live = trace == currentTrace && trace.elapsedMs <= 0;
         String time = live ? "总耗时 " + seconds(ms) + "s"
                 : getString(R.string.worked, Integer.valueOf(seconds(ms)));
@@ -3754,6 +3792,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         earlierRow = null;
         earlierBeforeId = 0;
         renderHost = null;
+        replayTailRequest = null;
         followLatest = true;
         cancelLatestJumpAnimation();
     }
@@ -3809,6 +3848,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         final List<Message> messages = stripCompactionAsks(page.messages);
         final ReplayCursor cursor = new ReplayCursor();
         cursor.request = page.requestBefore;
+        cursor.disclosureRequest = page.disclosureBefore;
         final Runnable frame = new Runnable() {
             int next;
             @Override public void run() {
@@ -3839,6 +3879,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     if (latest) {
                         replayTailTrace = cursor.turn;
                         replayTailRows = cursor.rows;
+                        replayTailRequest = cursor.request;
                     }
                     complete.run();
                 }
@@ -3848,9 +3889,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void seedReplayTools(ReplayCursor cursor, Message leading) {
-        if (leading.toolCalls == null || PromptGuard.requestsDisclosure(cursor.request)) return;
+        if (leading.toolCalls == null || PromptGuard.requestsDisclosure(cursor.disclosureRequest)) return;
         cursor.turn = new TurnTrace();
         cursor.rows = addTurnSummary(cursor.turn, false);
+        Flow flow = flowOf(cursor.rows);
+        if (flow != null) flow.request = cursor.request;
         for (int i = 0; i < leading.toolCalls.length(); i++) {
             JSONObject call = leading.toolCalls.optJSONObject(i);
             if (call == null) continue;
@@ -3863,7 +3906,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void fillReplayResults(ReplayCursor cursor, List<Message> results) {
-        if (cursor.turn == null || results == null || PromptGuard.requestsDisclosure(cursor.request)) return;
+        if (cursor.turn == null || results == null || PromptGuard.requestsDisclosure(cursor.disclosureRequest)) return;
         for (Message result : results) {
             for (TurnTrace.Step step : cursor.turn.steps) {
                 if (result.toolCallId != null && result.toolCallId.equals(step.id) && !step.done) {
@@ -3978,7 +4021,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         TurnTrace turn = cursor.turn;
         LinearLayout rows = cursor.rows;
         int rendered = cursor.rendered;
-        String request = cursor.request;
+        Message original = cursor.request;
+        String request = cursor.disclosureRequest;
         for (int i = start; i < end; i++) {
             Message m = messages.get(i);
             if (m == null) {
@@ -3995,7 +4039,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 rows = null;
                 rendered = 0;
                 request = m.content;
-                addUserBubble(m.content == null ? "" : m.content);
+                original = m;
+                addUserBubble(m);
             } else if (Message.ASSISTANT.equals(m.role)) {
                 String content = PromptGuard.redact(m.content, settings.systemPrompt(),
                         settings.environmentContext(), Compactor.PROMPT, request);
@@ -4004,10 +4049,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 JSONArray calls = PromptGuard.requestsDisclosure(request) ? null : m.toolCalls;
                 boolean detail = reasoning.trim().length() > 0
                         || (calls != null && calls.length() > 0)
-                        || m.elapsedMs > 0 || m.displayParts != null;
+                        || m.elapsedMs > 0 || m.hasDisplayParts(content, reasoning, calls)
+                        && (content.trim().length() > 0 || reasoning.trim().length() > 0
+                        || calls != null && calls.length() > 0);
                 if (detail && turn == null) {
                     turn = new TurnTrace();
                     rows = addTurnSummary(turn, false);
+                    Flow flow = flowOf(rows);
+                    if (flow != null) flow.request = original;
                     rendered = 0;
                 }
                 if (turn != null) {
@@ -4032,11 +4081,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                     rendered = appendFoldRows(rows, turn, rendered);
                 }
                 // 一次回复里正文先落位，命令排在正文后面。顺序错了命令会跑到前面。
-                if (content.length() > 0) {
+                if (content.trim().length() > 0) {
                     if (rows != null) {
                         addBodyInto(rows, content);
                     } else {
-                        addAgentText(content);
+                        addAgentText(content, original);
                     }
                 }
                 if (turn != null) {
@@ -4061,6 +4110,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 if (turn == null) {
                     turn = new TurnTrace();
                     rows = addTurnSummary(turn, false);
+                    Flow flow = flowOf(rows);
+                    if (flow != null) flow.request = original;
                     rendered = 0;
                 }
                 turn.fillResult(m.toolCallId, "", m.content == null ? "" : m.content);
@@ -4071,7 +4122,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         cursor.turn = turn;
         cursor.rows = rows;
         cursor.rendered = rendered;
-        cursor.request = request;
+        cursor.request = original;
+        cursor.disclosureRequest = request;
     }
 
     private int renderDisplayParts(Message message, String content, String reasoning,
@@ -4152,15 +4204,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     /** 正文不进折叠。按发生顺序落到这一段正文里；命令之后新来的正文明起一段。 */
     private void addBodyInto(LinearLayout rows, String text) {
-        TextView tv = new TextView(this);
         String raw = visibleText(text);
+        if (raw == null || raw.trim().length() == 0) return;
+        TextView tv = new TextView(this);
         tv.setText(raw);
         tv.setTextSize(16);
         tv.setTextColor(getResources().getColor(R.color.text_primary));
         tv.setLineSpacing(dp(5), 1f);
         tv.setPadding(0, dp(4), 0, dp(8));
-        enableCopy(tv);
         Flow flow = flowOf(rows);
+        enableMessageActions(tv, flow == null ? null : flow.request);
         LinearLayout slot = flow != null ? bodySlot(flow) : rows;
         if (slot == null) {
             slot = rows;
@@ -4338,17 +4391,33 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
-    private void enableCopy(final TextView tv) {
-        tv.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                ClipboardManager cm = (ClipboardManager)
-                        getSystemService(Context.CLIPBOARD_SERVICE);
-                if (cm != null) {
-                    cm.setPrimaryClip(ClipData.newPlainText("backcast", tv.getText()));
-                    toast(getString(R.string.copied));
+    private void enableMessageActions(final TextView view, final Message request) {
+        final long sid = sessionId;
+        final int owner = historyToken;
+        MessageActions.install(this, view, request == null || request.content == null
+                || request.content.trim().length() == 0 ? null : new Runnable() {
+            @Override public void run() {
+                if (activityDestroyed || isFinishing() || sid != sessionId || owner != historyToken) return;
+                if (sessionOpening || initialHistoryLoading || stop.getVisibility() == View.VISIBLE
+                        || loop != null && loop.busy()) {
+                    toast("当前任务仍在运行，请先停止或等待完成后重试。");
+                    return;
                 }
-                return true;
+                Message again = Message.user(request.content);
+                again.mcpSelection = request.mcpSelection;
+                again.workDir = request.workDir;
+                if (prompt.length() == 0) {
+                    if (again.mcpSelection != null) {
+                        try { mcpToolPicker.restoreDraft(new JSONObject().put("selection", again.mcpSelection.toJson())
+                                .put("text", again.content).toString()); }
+                        catch (Exception invalid) {
+                            prompt.setText(again.content);
+                            recordUiFailure(sid, "ui:message_retry", invalid);
+                        }
+                    } else prompt.setText(again.content);
+                    prompt.setSelection(prompt.length());
+                }
+                startRequest(again, false);
             }
         });
     }

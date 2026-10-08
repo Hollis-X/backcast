@@ -22,6 +22,11 @@ import com.mkei.backcast.mcp.McpStore;
 import java.util.List;
 import java.util.Locale;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
@@ -40,28 +45,26 @@ public final class McpToolPicker {
     private final Context context;
     private final Host host;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private static final ExecutorService REFRESH_WORKERS = Executors.newFixedThreadPool(2, task -> {
+        Thread thread = new Thread(task, "backcast-mcp-menu-refresh");
+        thread.setDaemon(true);
+        return thread;
+    });
     private int generation;
-    private McpCatalog.Refresh refresh;
-    private String refreshing = "", statusServer = "", status = "";
+    private boolean menuOpen;
+    private RefreshBatch refreshBatch;
     private AlertDialog dialog;
     private McpSelection selection;
     private String selectedText;
     private List<McpCatalog.Server> catalog;
-    private boolean catalogLoading, catalogFailed;
 
     public McpToolPicker(Context context, Host host) { this.context = context; this.host = host; }
 
     public void append(List<SlashMenuPopup.Item> items, String prefix) {
         final long owner = host.context();
+        final int mine = generation;
         if (catalog == null) {
-            loadCatalog(owner);
             items.add(new SlashMenuPopup.Item("正在读取 MCP 工具列表…", "", null));
-            return;
-        }
-        if (catalogFailed) {
-            items.add(new SlashMenuPopup.Item("重新读取 MCP 工具列表", "暂无可显示的缓存工具", () -> {
-                if (host.current(owner)) { reloadCatalog(); host.refreshMenu(); }
-            }));
             return;
         }
         List<McpCatalog.Server> servers = catalog;
@@ -76,27 +79,21 @@ public final class McpToolPicker {
                     || matches(tool.description, query)) { matchingTool = true; break; }
             if (!serverMatches && !matchingTool) continue;
             items.add(new SlashMenuPopup.Item("MCP · " + server.name,
-                    server.tools.isEmpty() ? "暂无缓存工具，请刷新列表" : server.tools.size() + " 个已缓存工具", null));
+                    server.tools.isEmpty() ? "暂无工具" : server.tools.size() + " 个工具", null));
             for (final McpSelection tool : server.tools) {
                 if (!serverMatches && !matches(tool.toolName, query) && !matches(tool.description, query)) continue;
                 if (shown >= 80) { omitted++; continue; }
                 shown++;
                 items.add(new SlashMenuPopup.Item(tool.toolName, tool.description, () -> {
-                    if (host.current(owner)) edit(tool);
+                    if (current(mine, owner)) edit(tool);
                 }));
             }
-            String detail = server.id.equals(statusServer) ? status : "仅获取工具列表，不执行工具";
-            boolean loading = server.id.equals(refreshing);
-            items.add(new SlashMenuPopup.Item(loading ? "取消刷新" : "刷新工具列表", detail, () -> {
-                if (!host.current(owner)) return;
-                if (server.id.equals(refreshing)) { cancelUi(); host.refreshMenu(); }
-                else refresh(server.id, owner);
-            }));
+
         }
         if (omitted > 0) items.add(new SlashMenuPopup.Item("还有 " + omitted + " 个匹配工具", "继续输入工具名或服务名筛选", null));
         if (servers.isEmpty() && (query.length() == 0 || matches("mcp", query)))
             items.add(new SlashMenuPopup.Item("配置 MCP 服务", "尚无已启用服务", () -> {
-                if (!host.current(owner)) return;
+                if (!current(mine, owner)) return;
                 host.hideMenu(); context.startActivity(new Intent(context, McpConfigActivity.class));
             }));
     }
@@ -105,11 +102,12 @@ public final class McpToolPicker {
         return value.toLowerCase(Locale.ROOT).contains(query);
     }
 
-    private void loadCatalog(final long owner) {
-        if (catalogLoading) return;
-        catalogLoading = true;
-        final int mine = generation;
-        final long session = host.session();
+    /** Only a hidden-to-visible transition starts a new cache read and refresh round. */
+    public void menuOpened() {
+        if (menuOpen) return;
+        menuOpen = true;
+        final int mine = ++generation;
+        final long owner = host.context(), session = host.session();
         new Thread(() -> {
             List<McpCatalog.Server> found = Collections.emptyList();
             Exception failure = null;
@@ -118,42 +116,122 @@ public final class McpToolPicker {
             final List<McpCatalog.Server> loaded = found;
             final Exception error = failure;
             main.post(() -> {
-                if (mine != generation) return;
-                catalogLoading = false;
-                if (!host.current(owner)) return;
-                catalog = loaded; catalogFailed = error != null;
-                if (error != null) report(error, session, "MCP 工具列表读取失败");
+                if (!current(mine, owner)) return;
+                if (error == null) catalog = loaded;
+                else {
+                    if (catalog == null) catalog = Collections.emptyList();
+                    report(error, session, "MCP 工具列表读取失败");
+                }
                 host.refreshMenu();
+                if (error != null || !current(mine, owner) || loaded.isEmpty()) return;
+                RefreshBatch batch = new RefreshBatch(mine, owner, session, loaded);
+                refreshBatch = batch;
+                batch.start();
             });
         }, "backcast-mcp-menu-cache").start();
     }
 
-    private void refresh(final String serverId, final long owner) {
-        cancelUi();
-        final McpCatalog.Refresh work;
-        try { work = RunHub.get(context).newMcpRefresh(serverId); }
-        catch (Exception invalid) {
-            report(invalid, host.session(), "MCP 连接配置已变化"); host.refreshMenu(); return;
+    private boolean current(int mine, long owner) {
+        return menuOpen && generation == mine && host.current(owner);
+    }
+
+    /** Dismissal cancels only this menu's independent clients and queued refresh work. */
+    public void menuClosed() {
+        if (!menuOpen && refreshBatch == null) return;
+        menuOpen = false;
+        generation++;
+        RefreshBatch batch = refreshBatch;
+        refreshBatch = null;
+        if (batch != null) batch.close();
+    }
+
+    private final class RefreshBatch implements Runnable {
+        private final int mine;
+        private final long owner, session;
+        private final ArrayDeque<McpCatalog.Server> pending;
+        private final List<McpCatalog.Refresh> clients = new ArrayList<McpCatalog.Refresh>();
+        private final List<Future<?>> workers = new ArrayList<Future<?>>();
+        private boolean closed, notified;
+        private int remaining;
+
+        RefreshBatch(int mine, long owner, long session, List<McpCatalog.Server> servers) {
+            this.mine = mine; this.owner = owner; this.session = session;
+            pending = new ArrayDeque<McpCatalog.Server>(servers);
         }
-        final int mine = generation;
-        final long session = host.session();
-        refresh = work; refreshing = serverId; statusServer = serverId; status = "正在刷新工具列表…";
-        host.refreshMenu();
-        new Thread(() -> {
-            Exception failure = null;
-            try { work.run(); }
-            catch (Exception error) { failure = error; }
-            finally { work.close(); }
-            final Exception error = failure;
-            main.post(() -> {
-                if (mine != generation || refresh != work || !host.current(owner)) return;
-                refresh = null; refreshing = "";
-                status = error == null ? "工具列表已更新" : "";
-                if (error != null) report(error, session, "MCP 工具列表刷新失败");
-                catalog = null;
-                host.refreshMenu();
-            });
-        }, "backcast-mcp-menu-refresh").start();
+        void start() {
+            final int count = Math.min(2, pending.size());
+            remaining = count;
+            for (int i = 0; i < count; i++) {
+                Future<?> worker = REFRESH_WORKERS.submit(this);
+                synchronized (this) {
+                    if (closed) worker.cancel(true);
+                    else workers.add(worker);
+                }
+            }
+        }
+        @Override public void run() {
+            try {
+                while (true) {
+                    McpCatalog.Server server;
+                    synchronized (this) { server = closed ? null : pending.poll(); }
+                    if (server == null) return;
+                    McpCatalog.Refresh client = null;
+                    try {
+                        client = RunHub.get(context).newMcpRefresh(server.id);
+                        boolean accepted;
+                        synchronized (this) {
+                            accepted = !closed;
+                            if (accepted) clients.add(client);
+                        }
+                        if (!accepted) return;
+                        client.run();
+                    } catch (Exception error) {
+                        main.post(() -> {
+                            if (!current(mine, owner)) return;
+                            report(error, session, "MCP 工具列表更新失败", !notified);
+                            notified = true;
+                        });
+                    } finally {
+                        if (client != null) {
+                            synchronized (this) { clients.remove(client); }
+                            client.close();
+                        }
+                    }
+                }
+            } finally {
+                boolean finished;
+                synchronized (this) { finished = --remaining == 0 && !closed; }
+                if (finished) publish();
+            }
+        }
+        private void publish() {
+            try {
+                final List<McpCatalog.Server> loaded = RunHub.get(context).cachedMcpCatalog();
+                main.post(() -> {
+                    if (!current(mine, owner)) return;
+                    catalog = loaded;
+                    host.refreshMenu();
+                });
+            } catch (Exception error) {
+                main.post(() -> {
+                    if (!current(mine, owner)) return;
+                    report(error, session, "MCP 工具列表读取失败", !notified);
+                    notified = true;
+                });
+            }
+        }
+        void close() {
+            List<McpCatalog.Refresh> active;
+            List<Future<?>> tasks;
+            synchronized (this) {
+                closed = true; pending.clear();
+                active = new ArrayList<McpCatalog.Refresh>(clients);
+                tasks = new ArrayList<Future<?>>(workers);
+                clients.clear(); workers.clear();
+            }
+            for (McpCatalog.Refresh client : active) client.close();
+            for (Future<?> worker : tasks) worker.cancel(true);
+        }
     }
 
     private void edit(final McpSelection tool) {
@@ -252,7 +330,10 @@ public final class McpToolPicker {
     }
 
     private void report(final Exception error, final long session, final String summary) {
-        Toast.makeText(context, summary + "，请稍后重试", Toast.LENGTH_SHORT).show();
+        report(error, session, summary, true);
+    }
+    private void report(final Exception error, final long session, final String summary, boolean notify) {
+        if (notify) Toast.makeText(context, summary + "，请稍后重试", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             try {
                 java.util.List<String> secrets = new java.util.ArrayList<String>();
@@ -289,14 +370,11 @@ public final class McpToolPicker {
     public void reset() {
         cancelUi();
         if (selectedText != null && selectedText.equals(host.text())) host.draft("");
-        selection = null; selectedText = null; statusServer = ""; status = ""; catalog = null;
+        selection = null; selectedText = null; catalog = null;
     }
-    public void reloadCatalog() { cancelUi(); catalog = null; catalogFailed = false; }
+    public void reloadCatalog() { cancelUi(); catalog = null; }
     public void cancelUi() {
-        generation++;
-        catalogLoading = false;
-        McpCatalog.Refresh active = refresh; refresh = null; refreshing = "";
-        if (active != null) active.close();
+        menuClosed();
         if (dialog != null) { AlertDialog previous = dialog; dialog = null; previous.dismiss(); }
     }
     private TextView addText(LinearLayout content, String value, int size) {

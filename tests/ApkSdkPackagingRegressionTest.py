@@ -71,6 +71,7 @@ def main():
             "Lcom/mkei/backcast/mcp/McpSelection;",
             "Lcom/mkei/backcast/ui/SlashMenuPopup;",
             "Lcom/mkei/backcast/ui/McpToolPicker;",
+            "Lcom/mkei/backcast/ui/MessageActions;",
             "Lcom/openai/client/okhttp/OpenAIOkHttpClient;",
             "Lcom/openai/models/chat/completions/ChatCompletionChunk;",
             "Lcom/openai/services/blocking/chat/ChatCompletionServiceImpl;",

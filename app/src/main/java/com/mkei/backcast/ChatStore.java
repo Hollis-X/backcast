@@ -33,18 +33,22 @@ public class ChatStore extends SQLiteOpenHelper {
         public final List<Message> messages;
         public final long firstId;
         public final long earlierCount;
-        public final String requestBefore;
+        /** Original human request before this page, including local retry metadata. */
+        public final Message requestBefore;
+        /** Disclosure belongs only to the latest USER, never an earlier goal request. */
+        public final String disclosureBefore;
         /** Only tool call labels, for results whose assistant is in the previous page. */
         public final Message leadingAssistant;
         /** Results just after this page; used to finish existing labels, never drawn twice. */
         public final List<Message> trailingResults;
 
         public MessagePage(List<Message> messages, long firstId, long earlierCount,
-                String requestBefore, Message leadingAssistant, List<Message> trailingResults) {
+                Message requestBefore, String disclosureBefore, Message leadingAssistant, List<Message> trailingResults) {
             this.messages = Collections.unmodifiableList(messages);
             this.firstId = firstId;
             this.earlierCount = earlierCount;
             this.requestBefore = requestBefore;
+            this.disclosureBefore = disclosureBefore;
             this.leadingAssistant = leadingAssistant;
             this.trailingResults = Collections.unmodifiableList(trailingResults);
         }
@@ -394,7 +398,7 @@ public class ChatStore extends SQLiteOpenHelper {
             c.close();
         }
         Collections.reverse(out);
-        if (out.isEmpty()) return new MessagePage(out, 0, 0, "", null, Collections.<Message>emptyList());
+        if (out.isEmpty()) return new MessagePage(out, 0, 0, null, "", null, Collections.<Message>emptyList());
 
         String[] prefixArgs = new String[]{String.valueOf(sessionId), String.valueOf(firstId)};
         long earlierCount = 0;
@@ -404,16 +408,27 @@ public class ChatStore extends SQLiteOpenHelper {
         } finally {
             count.close();
         }
-        String request = "";
-        Cursor user = db.query("messages", new String[]{"content"},
+        Message request = null;
+        String disclosure = "";
+        Cursor user = db.query("messages", new String[]{"role", "content", "reasoning",
+                "tool_calls", "tool_call_id", "elapsed_ms", "think_ms", "display_parts", "work_dir", "mcp_selection"},
                 "session_id=? AND id<? AND role=?",
                 new String[]{prefixArgs[0], prefixArgs[1], Message.USER},
-                null, null, "id DESC", "1");
+                null, null, "id DESC", null);
         try {
-            if (user.moveToFirst()) {
-                String text = user.getString(0);
-                if (text != null && !com.mkei.backcast.agent.Goal.isSteer(text)
-                        && !com.mkei.backcast.agent.Goal.isNote(text)) request = text;
+            boolean latest = true;
+            while (user.moveToNext()) {
+                String text = user.getString(1);
+                boolean internal = com.mkei.backcast.agent.Goal.isSteer(text)
+                        || com.mkei.backcast.agent.Goal.isNote(text);
+                if (latest) {
+                    if (!internal && text != null) disclosure = text;
+                    latest = false;
+                }
+                if (!internal) {
+                    request = readMessage(user, 0);
+                    break;
+                }
             }
         } finally {
             user.close();
@@ -450,7 +465,7 @@ public class ChatStore extends SQLiteOpenHelper {
                 previous.close();
             }
         }
-        return new MessagePage(out, firstId, earlierCount, request, leading,
+        return new MessagePage(out, firstId, earlierCount, request, disclosure, leading,
                 trailingResults(db, sessionId, lastId, out));
     }
 

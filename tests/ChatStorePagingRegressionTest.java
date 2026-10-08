@@ -158,7 +158,7 @@ public final class ChatStorePagingRegressionTest {
         check(number(page, "firstId") == 953, "Incorrect page cursor");
         check(number(page, "earlierCount") == 952, "Earlier count included another session");
         for (int i = 0; i < 48; i++) check(messages(page).get(i).content.equals("message " + (952 + i)), "Page is not chronological");
-        check("message 951".equals(field(page, "requestBefore")), "Lost user context before page");
+        check("message 951".equals(((Message)field(page, "requestBefore")).content), "Lost user context before page");
     }
 
     private static void cursorSurvivesNewMessages() throws Exception {
@@ -196,7 +196,7 @@ public final class ChatStorePagingRegressionTest {
                 "Tool results lost labels or included calls outside the page");
         check(leading.content.length() == 0 && leading.reasoning == null && leading.displayParts == null,
                 "Leading context would duplicate assistant content");
-        check("inspect files".equals(field(page, "requestBefore")), "Tool page lost user request context");
+        check("inspect files".equals(((Message)field(page, "requestBefore")).content), "Tool page lost user request context");
         check(messages(page).size() == 2 && number(page, "firstId") == 4, "Leading assistant altered paging cursor");
         append(store, 7, Message.user("new user"));
         append(store, 7, Message.toolResult("c1", "unrelated result"));
@@ -210,8 +210,93 @@ public final class ChatStorePagingRegressionTest {
         Object page = page(store, 7, -1, Integer.MAX_VALUE);
         check(messages(page).size() == 128, "Page expanded to a whole unbounded turn");
         check(number(page, "earlierCount") == 873, "Hard limit has an incorrect earlier count");
-        check("one long task".equals(field(page, "requestBefore")), "Long turn lost original request");
+        check("one long task".equals(((Message)field(page, "requestBefore")).content), "Long turn lost original request");
         check(messages(page(store, 7, -1, 0)).size() == 1, "Nonpositive limit did not remain bounded");
+    }
+
+    private static void prefixRequestRetainsRetryMetadataWithoutChangingPage() throws Exception {
+        Object store = fresh();
+        Message previous = Message.user("Earlier request"); previous.workDir = "/earlier";
+        append(store, 7L, previous); append(store, 7L, Message.assistant("earlier finished", null));
+        Message request = Message.user("Run the selected remote task"); request.workDir = "/original/project";
+        request.mcpSelection = selection(); append(store, 7L, request);
+        append(store, 8L, Message.user("Other session must not own retry"));
+        append(store, 7L, Message.assistant("partial answer", null));
+        Object page = page(store, 7L, -1L, 1);
+        Message context = (Message)field(page, "requestBefore");
+        check(context != null && Message.USER.equals(context.role) && context.content.equals(request.content)
+                && context.workDir.equals(request.workDir) && context.mcpSelection != null
+                && context.mcpSelection.toJson().similar(request.mcpSelection.toJson()),
+                "Assistant page retry context lost the original user text, directory or selected MCP identity");
+        check(request.content.equals(field(page, "disclosureBefore")), "Ordinary request lost its disclosure scope");
+        check(messages(page).size() == 1 && Message.ASSISTANT.equals(messages(page).get(0).role)
+                && number(page, "firstId") == 5L && number(page, "earlierCount") == 3L,
+                "Complete retry context changed bounded page contents or cursor");
+        append(store, 7L, Message.toolResult("pending", "tool result"));
+        page = page(store, 7L, -1L, 1); context = (Message)field(page, "requestBefore");
+        check(context != null && context.mcpSelection != null && context.content.equals(request.content),
+                "Tool-result page could not bind a retry to its original human request");
+        Message next = Message.user("New request"); next.workDir = "/new/project"; append(store, 7L, next);
+        append(store, 7L, Message.assistant("new answer", null));
+        context = (Message)field(page(store, 7L, -1L, 1), "requestBefore");
+        check(context != null && context.content.equals(next.content) && context.workDir.equals(next.workDir)
+                && context.mcpSelection == null, "Retry context leaked the prior request selection into the next turn");
+    }
+
+    private static void continuationRetryAndDisclosureScopesRemainSeparate() throws Exception {
+        Object store = fresh();
+        Message request = Message.user("Show the requested private field");
+        request.workDir = "/original/project"; request.mcpSelection = selection();
+        append(store, 7L, request); append(store, 7L, Message.assistant("first answer", null));
+        for (String internal : Arrays.asList("⟦目标续跑⟧", "⟦目标续跑⟧\nContinue the existing goal")) {
+            // Current append excludes internal USER rows; simulate a transcript saved by an older version.
+            append(store, 7L, Message.user("legacy internal row"));
+            List<Map<String, Object>> saved = records("messages", 7L);
+            updateRecord(store, "messages", number(saved.get(saved.size() - 1), "id"), "content", internal);
+            append(store, 7L, Message.assistant("continued answer", null));
+            Object page = page(store, 7L, -1L, 1);
+            Message retry = (Message)field(page, "requestBefore");
+            check(retry != null && retry.content.equals(request.content) && retry.workDir.equals(request.workDir)
+                    && retry.mcpSelection != null && retry.mcpSelection.toJson().similar(request.mcpSelection.toJson()),
+                    "Goal continuation lost the original human retry request or its metadata");
+            check("".equals(field(page, "disclosureBefore")),
+                    "Goal continuation inherited the original request's disclosure scope");
+            check(messages(page).size() == 1, "Searching continuation ancestry enlarged the page");
+        }
+        Message next = Message.user("Describe the summary only"); append(store, 7L, next);
+        append(store, 7L, Message.assistant("new request answer", null));
+        Object page = page(store, 7L, -1L, 1);
+        check(((Message)field(page, "requestBefore")).content.equals(next.content)
+                && next.content.equals(field(page, "disclosureBefore")),
+                "New human request did not replace both independent page scopes");
+        store = fresh(); append(store, 7L, Message.user("legacy internal row"));
+        updateRecord(store, "messages", number(records("messages", 7L).get(0), "id"), "content", "⟦目标续跑⟧");
+        append(store, 7L, Message.assistant("no original human request", null));
+        page = page(store, 7L, -1L, 1);
+        check(field(page, "requestBefore") == null && "".equals(field(page, "disclosureBefore")),
+                "Internal-only ancestry invented a retry request or disclosure scope");
+    }
+
+    private static void prefixRequestCorruptionAndUserlessPageStayExplicit() throws Exception {
+        Object store = fresh();
+        append(store, 7L, Message.assistant("No human request exists", null));
+        check(field(page(store, 7L, -1L, 1), "requestBefore") == null,
+                "Userless assistant page invented a retry request");
+        store = fresh(); Message request = Message.user("Selected request"); request.mcpSelection = selection();
+        append(store, 7L, request); append(store, 7L, Message.assistant("selected answer", null));
+        List<Map<String, Object>> rows = (List<Map<String, Object>>)databaseType.getMethod("records", String.class, long.class)
+                .invoke(null, "messages", 7L);
+        // Update only the off-page original request; page decoding itself remains valid.
+        Class<?> valuesType = storeType.getClassLoader().loadClass("android.content.ContentValues");
+        Map<String, Object> values = (Map<String, Object>)valuesType.getDeclaredConstructor().newInstance();
+        values.put("mcp_selection", "broken selection metadata");
+        Object db = storeType.getMethod("getWritableDatabase").invoke(store);
+        databaseType.getMethod("update", String.class, valuesType, String.class, String[].class)
+                .invoke(db, "messages", values, "id=?", new String[]{String.valueOf(rows.get(0).get("id"))});
+        try { page(store, 7L, -1L, 1); throw new AssertionError("Corrupt off-page retry selection was silently discarded"); }
+        catch (java.lang.reflect.InvocationTargetException rejected) {
+            check(rejected.getCause() instanceof IllegalStateException, "Wrong prefix selection corruption failure");
+        }
     }
 
     private static void messageMetadataSurvivesPaging() throws Exception {
@@ -313,7 +398,8 @@ public final class ChatStorePagingRegressionTest {
     private static void emptyPageHasNoContext() throws Exception {
         Object page = page(fresh(), 7, -1, 48);
         check(messages(page).isEmpty() && number(page, "firstId") == 0
-                && number(page, "earlierCount") == 0 && "".equals(field(page, "requestBefore"))
+                && number(page, "earlierCount") == 0 && field(page, "requestBefore") == null
+                && "".equals(field(page, "disclosureBefore"))
                 && field(page, "leadingAssistant") == null, "Empty page carried stale cursors or context");
     }
 
@@ -703,7 +789,9 @@ public final class ChatStorePagingRegressionTest {
                 contextType = loader.loadClass("android.content.Context");
                 for (String name : Arrays.asList("newestPageIsBoundedAndAscending", "cursorSurvivesNewMessages",
                         "toolPageRetainsOnlyLeadingLabels", "hugeTurnStillHasHardPageLimit",
-                        "messageMetadataSurvivesPaging", "selectedMcpToolSurvivesTranscriptAndContextCheckpoint",
+                        "prefixRequestRetainsRetryMetadataWithoutChangingPage",
+                        "continuationRetryAndDisclosureScopesRemainSeparate",
+                        "prefixRequestCorruptionAndUserlessPageStayExplicit", "messageMetadataSurvivesPaging", "selectedMcpToolSurvivesTranscriptAndContextCheckpoint",
                         "corruptedMcpSelectionCannotSilentlyRestoreAnotherRequest", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
                         "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
                         "legacyDatabaseUpgradeAddsLocalRequestDiagnostics", "versionElevenMigrationPreservesRequestRows",

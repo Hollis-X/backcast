@@ -31,6 +31,7 @@ public final class SlashMenuPopup {
     private final PopupWindow popup;
     private int lastX, lastY, lastWidth, lastHeight;
     private boolean observing;
+    private Runnable dismissed;
     private final ViewTreeObserver.OnGlobalLayoutListener layouts = new ViewTreeObserver.OnGlobalLayoutListener() {
         @Override public void onGlobalLayout() { if (popup.isShowing()) position(); }
     };
@@ -50,7 +51,10 @@ public final class SlashMenuPopup {
         popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NEEDED);
         popup.setAnimationStyle(R.style.SlashPopupAnimation);
         popup.setOnDismissListener(new PopupWindow.OnDismissListener() {
-            @Override public void onDismiss() { stopObserving(); }
+            @Override public void onDismiss() {
+                stopObserving();
+                if (dismissed != null) dismissed.run();
+            }
         });
     }
 
@@ -111,6 +115,7 @@ public final class SlashMenuPopup {
     }
 
     public boolean isShowing() { return popup.isShowing(); }
+    public void setOnDismissListener(Runnable listener) { dismissed = listener; }
     public void dismiss() { popup.dismiss(); stopObserving(); }
     private void stopObserving() {
         if (observing && anchor.getViewTreeObserver().isAlive())

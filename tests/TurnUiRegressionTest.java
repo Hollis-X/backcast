@@ -8,6 +8,9 @@ import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.mkei.backcast.ui.TurnTrace;
+import com.mkei.backcast.mcp.McpSelection;
+import com.mkei.backcast.mcp.McpServer;
+import com.mkei.backcast.mcp.McpToolInfo;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.MethodTree;
@@ -85,14 +88,17 @@ public final class TurnUiRegressionTest {
     }
     private static void replay(Object target, List<Message> messages, int from) throws Exception {
         Object page = page(target, messages.subList(from, messages.size()));
-        String requestBefore = "";
+        Message requestBefore = null;
+        String disclosureBefore = "";
         for (int i = 0; i < from; i++) {
             Message earlier = messages.get(i);
             if (earlier != null && Message.USER.equals(earlier.role)) {
-                requestBefore = Goal.isSteer(earlier.content) || Goal.isNote(earlier.content) ? "" : earlier.content;
+                disclosureBefore = Goal.isSteer(earlier.content) || Goal.isNote(earlier.content) ? "" : earlier.content;
+                if (!Goal.isSteer(earlier.content) && !Goal.isNote(earlier.content)) requestBefore = earlier;
             }
         }
         field(page, "requestBefore", requestBefore);
+        field(page, "disclosureBefore", disclosureBefore);
         Object block = invoke(target, "newBlock");
         invoke(target, "renderPage", page, block, get(target, "historyToken"), (Runnable) () -> {
             try { invoke(get(target, "stream"), "addView", block, null); }
@@ -258,7 +264,7 @@ public final class TurnUiRegressionTest {
                 + "static class color{static final int text_primary=4,code_bg=5;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50,sheet_panel=51,sheet_scroll=52;} }"
                 + "static class Gravity{static final int RIGHT=1;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400,heightPixels=1000;}"
-                + "Resources getResources(){return new Resources();} void enableCopy(TextView t){}"
+                + "Map<TextView,Message> messageActions=new IdentityHashMap<TextView,Message>();Resources getResources(){return new Resources();} void enableMessageActions(TextView t,Message request){messageActions.put(t,request);}"
                 + "static final String INPUT_METHOD_SERVICE=\"input\"; TextView prompt=new TextView();View currentFocus=prompt,mainRoot=new View();"
                 + "android.view.inputmethod.InputMethodManager keyboard=new android.view.inputmethod.InputMethodManager();"
                 + "LinearLayout sheetBody=new LinearLayout(),sheetPanel=new LinearLayout();int sheetOpens,activitySyncs,activityFits;"
@@ -270,7 +276,7 @@ public final class TurnUiRegressionTest {
                 + "java.util.concurrent.ExecutorService toolkitCancellation=java.util.concurrent.Executors.newSingleThreadExecutor();"
                 + "List<ToolkitOperation> toolkitOperations=new ArrayList<ToolkitOperation>();ToolkitOperation active;"
                 + "static class QueuedReader implements java.util.concurrent.Executor { List<Runnable> tasks=new ArrayList<Runnable>(); public void execute(Runnable r){tasks.add(r);} }"
-                + "static class ChatStore { static class MessagePage { List<Message> messages,trailingResults=new ArrayList<Message>(); String requestBefore=\"\"; Message leadingAssistant; long firstId,earlierCount;"
+                + "static class ChatStore { static class MessagePage { List<Message> messages,trailingResults=new ArrayList<Message>(); Message requestBefore,leadingAssistant;String disclosureBefore=\"\"; long firstId,earlierCount;"
                 + "MessagePage(List<Message> m){messages=m;} } MessagePage nextPage; int reads; long sid,before; int limit;"
                 + "MessagePage messagePage(long s,long b,int l){reads++;sid=s;before=b;limit=l;return nextPage;}"
                 + "}"
@@ -293,7 +299,7 @@ public final class TurnUiRegressionTest {
                 + TIMELINE_METHODS.get("toolState") + TIMELINE_METHODS.get("resultTitle") + TIMELINE_METHODS.get("failed") + " }"
                 + "static class Settings { String systemPrompt(){return \"Fixture instruction\";}"
                 + "String environmentContext(){return \"Device: fixture\";} }"
-                + "Settings settings=new Settings(); TurnTrace replayTailTrace,currentTrace; LinearLayout replayTailRows,turnRows,turnMarkBody;"
+                + "Settings settings=new Settings(); TurnTrace replayTailTrace,currentTrace;Message replayTailRequest; LinearLayout replayTailRows,turnRows,turnMarkBody;"
                 + "Flow turnFlow; int turnMarkBox=-1,turnMarkRows=-1,turnMarkRendered=-1,turnMarkBodyChildren,turnRendered;"
                 + "TextView liveAnswer; StringBuilder liveAnswerRaw;"
                 + "int liveToken,liveAnswerRendered;boolean secretBlocked,liveFlushQueued;QueuedReader markdownWorker=new QueuedReader();"
@@ -314,13 +320,14 @@ public final class TurnUiRegressionTest {
                 + "row.addView(head,null);return row;}"
                 + "LinearLayout addTurnSummary(TurnTrace t,boolean live){traces.add(t);"
                 + "LinearLayout box=new LinearLayout(),head=new LinearLayout(),rows=new LinearLayout();"
-                + "head.addView(new TextView(),null);head.addView(new View(),null);box.addView(head,null);"
+                + "head.setTag(t);head.addView(new TextView(),null);head.addView(new View(),null);box.addView(head,null);"
                 + "rows.setTag(new TurnTrace.Range(t,0));rows.addView(new TextView(),null);"
                 + "box.addView(rows,null);box.setTag(new Flow(box,rows));boxes.add(box);host().addView(box,null);return rows;}"
-                + "void addBodyInto(LinearLayout r,String s){bodies.add(s);Flow f=flowOf(r);"
-                + "TextView text=new TextView();text.setText(s);bodySlot(f).addView(text,null);"
-                + "TurnTrace t=((TurnTrace.Range)r.getTag()).trace;if(t.bodyAt<0)t.bodyAt=t.order.size();SystemClock.advance(renderCost);}"
-                + "void addAgentText(String s){bodies.add(s);TextView t=new TextView();t.setText(s);host().addView(t,null);SystemClock.advance(renderCost);}");
+                );
+        for (String name : Arrays.asList("addBodyInto", "addAgentText")) {
+            source.append(METHODS.get(name).replace("renderMarkdown(tv, raw, false);",
+                    "bodies.add(raw);SystemClock.advance(renderCost);renderMarkdown(tv, raw, false);"));
+        }
         source.append("Runnable transcriptTouchStart=").append(METHODS.get("transcriptTouchStart")).append(';');
         source.append(METHODS.get("sheetRefresh"));
         source.append(METHODS.get("Flow"));
@@ -341,7 +348,7 @@ public final class TurnUiRegressionTest {
                 "pinLastMessage",
                 "approve", "approvalCurrent", "showApproval", "cancelApprovals", "prettyArgs",
                 "addUserBubble", "hideKeyboard", "fillReplayResults", "drainHistoryEvents", "uiLive", "handleTurnError", "failureToast",
-                "renderDisplayParts", "flowOf", "bodySlot",
+                "renderDisplayParts", "flowOf", "bodySlot", "traceOf", "visibleText",
                 "appendFoldRows", "restoreFlow", "markTurn", "rewindLiveRound", "refreshAllFolds",
                 "refreshFoldResults", "summaryChevron", "syncWorkChevron", "applyTurnProgress",
                 "appendAgentDelta", "scheduleLiveFlush", "flushLiveAnswer", "sealLiveAnswer", "renderMarkdown", "applyMarkdown",
@@ -401,7 +408,8 @@ public final class TurnUiRegressionTest {
         call(view, "adoptLoopClock");
         check(call(view, "loopClock") == null, "New UI adopted an older turn's clock");
         check((Long) invoke(view, "displayElapsed", trace) == 1L, "New UI inherited previous turn's elapsed time");
-        check(METHODS.get("startText").contains("target.nextUiToken(liveToken)")
+        check(METHODS.get("startText").contains("startRequest(request, asGoal)")
+                        && METHODS.get("startRequest").contains("target.nextUiToken(liveToken)")
                         && METHODS.get("runCompact").contains("target.nextUiToken(liveToken)")
                         && METHODS.get("kick").contains("target.nextUiToken(liveToken)"),
                 "UI request paths did not reserve an owner token from the loop");
@@ -794,6 +802,108 @@ public final class TurnUiRegressionTest {
         return view;
     }
 
+    private static void whitespaceRepliesDoNotCreateTranscriptBlocks() throws Exception {
+        Object view = fixture(), stream = get(view, "stream");
+        for (String blank : Arrays.asList("", " ", "\n\r\t")) invoke(view, "addAgentText", blank, null);
+        invoke(view, "addAgentText", null, null);
+        check(children(stream).isEmpty(), "Empty standalone replies created transcript views");
+        TurnTrace trace = new TurnTrace();
+        Object rows = invoke(view, "addTurnSummary", trace, false), box = children(stream).get(0), flow = get(box, "tag");
+        for (String blank : Arrays.asList("", " ", "\n\r\t")) invoke(view, "addBodyInto", rows, blank);
+        check(children(box).size() == 2 && get(flow, "body") == null && !(Boolean) get(flow, "bodySeen") && trace.bodyAt < 0,
+                "Whitespace replies created a body slot or moved later tools into a new activity block");
+        trace.addStep("first", "read", "{}");
+        invoke(view, "appendFoldRows", rows, trace, 0);
+        check(children(box).size() == 2 && ((TurnTrace.Range) get(rows, "tag")).end == 1,
+                "A tool following an empty reply left the original activity block");
+        invoke(view, "addBodyInto", rows, "  visible text\n");
+        check(children(box).size() == 3 && trace.bodyAt == 1 && get(view, "bodies").equals(Arrays.asList("  visible text\n")),
+                "Visible history text lost its original whitespace or activity order");
+        view = fixture();
+        Message empty = Message.assistant("\n ", new JSONArray().put(calls().getJSONObject(0)));
+        empty.displayParts = new JSONArray().put(textPart("body", 0, 2))
+                .put(new JSONObject().put("type", "tool").put("index", 0));
+        replay(view, Arrays.asList(Message.user("Inspect"), empty), 0);
+        check(((List<?>) get(view, "bodies")).isEmpty() && ((List<?>) get(view, "boxes")).size() == 1,
+                "Whitespace display parts created history body views");
+        box = ((List<?>) get(view, "boxes")).get(0);
+        check(children(box).size() == 2 && !(Boolean) get(get(box, "tag"), "bodySeen"),
+                "A whitespace display part moved its subsequent tool into an extra activity row");
+        pass("whitespaceRepliesDoNotCreateBlankViewsOrSplitActivityRanges");
+    }
+
+    private static void streamedWhitespaceWaitsForVisibleText() throws Exception {
+        Object view = fixture(), stream = get(view, "stream");
+        invoke(view, "appendAgentDelta", " \n");
+        invoke(view, "appendAgentDelta", "\t");
+        check(get(view, "liveAnswer") == null && children(stream).isEmpty()
+                        && " \n\t".equals(get(view, "liveAnswerRaw").toString()),
+                "Leading whitespace created a blank live answer or was discarded");
+        call(view, "sealLiveAnswer");
+        check(get(view, "liveAnswerRaw") == null && children(stream).isEmpty(),
+                "A whitespace-only reply left a view after completion");
+        invoke(view, "appendAgentDelta", "\n\n");
+        call(view, "rewindLiveRound");
+        check(get(view, "liveAnswerRaw") == null && children(stream).isEmpty(),
+                "A failed whitespace-only request retained a prefix for the next reply");
+        invoke(view, "appendAgentDelta", "\n ");
+        invoke(view, "appendAgentDelta", "Visible");
+        Object answer = get(view, "liveAnswer");
+        check(answer != null && children(stream).size() == 1 && "\n Visible".equals(get(view, "liveAnswerRaw").toString()),
+                "The first visible delta lost its buffered prefix or created multiple views");
+        call(view, "sealLiveAnswer");
+        drain(get(view, "markdownWorker"), "tasks"); drain(view, "posted");
+        check("\n Visible".equals(get(answer, "text")) && children(stream).size() == 1,
+                "Final Markdown rendering lost buffered text or added an empty reply");
+        pass("streamedWhitespacePreservesLeadingTextWithoutCreatingBlankBlocks");
+    }
+
+    private static void noDurationSummaryCollapsesOnlyItsHeader() throws Exception {
+        Object view = fixture();
+        Object head = nested(view, "LinearLayout", new Class<?>[]{Object[].class}, (Object) new Object[0]);
+        Object header = nested(view, "TextView", new Class<?>[]{Object[].class}, (Object) new Object[0]);
+        invoke(head, "addView", header, null);
+        TurnTrace trace = new TurnTrace();
+        invoke(view, "bindSummary", header, trace);
+        check((Integer) get(head, "visibility") == 8 && "".equals(get(header, "text")),
+                "A no-duration summary kept an empty visible header line");
+        trace.elapsedMs = 45000L;
+        invoke(view, "bindSummary", header, trace);
+        check((Integer) get(head, "visibility") == 0 && "工作了 45s".equals(get(header, "text")),
+                "A real completed or failed duration remained hidden");
+        pass("noDurationHeaderCollapsesAndRecordedWorkDurationRemainsVisible");
+    }
+
+    private static void pagedReplyActionsKeepTheOriginalStructuredRequest() throws Exception {
+        Message request = Message.user("Inspect the selected file"); request.workDir = "/chosen/project";
+        McpServer server = new McpServer("file_tools", "File tools", "https://fixture.example/mcp", "fixture-secret", true, 30);
+        McpToolInfo info = new McpToolInfo(new JSONObject().put("name", "inspect")
+                .put("inputSchema", new JSONObject().put("type", "object")));
+        java.lang.reflect.Constructor<McpSelection> constructor = McpSelection.class.getDeclaredConstructor(McpServer.class, McpToolInfo.class);
+        constructor.setAccessible(true); request.mcpSelection = constructor.newInstance(server, info);
+        Object view = fixture();
+        replay(view, Arrays.asList(request, Message.user(Goal.NOTE), Message.assistant("Visible response", calls())), 2);
+        @SuppressWarnings("unchecked") Map<Object,Message> actions = (Map<Object,Message>) get(view, "messageActions");
+        check(actions.size() == 1 && actions.values().iterator().next() == request,
+                "A paged assistant body action lost the original request or bound the hidden goal note");
+        Object box = ((List<?>) get(view, "boxes")).get(0);
+        check(get(get(box, "tag"), "request") == request && request.mcpSelection != null
+                        && "/chosen/project".equals(request.workDir),
+                "Paged activity flow did not preserve the selected MCP metadata and request workspace");
+        view = fixture();
+        Object page = page(view, Arrays.asList(Message.toolResult("c0", "result"), Message.assistant("Follow-up response", null)));
+        field(page, "requestBefore", request); field(page, "disclosureBefore", "");
+        field(page, "leadingAssistant", Message.assistant("", calls()));
+        Object block = invoke(view, "newBlock");
+        invoke(view, "renderPage", page, block, get(view, "historyToken"), (Runnable) () -> {}, true);
+        drain(view, "posted");
+        @SuppressWarnings("unchecked") Map<Object,Message> seeded = (Map<Object,Message>) get(view, "messageActions");
+        check(seeded.size() == 1 && seeded.values().iterator().next() == request
+                        && get(get(((List<?>) get(view, "boxes")).get(0), "tag"), "request") == request,
+                "A tool batch seeded from the previous page lost the original structured retry request");
+        pass("pagedReplyActionsAndSeededToolFlowsKeepTheOriginalMcpRequest");
+    }
+
     private static void liveMarkdownUsesTheWorkerAndFinalAndSessionOwnership() throws Exception {
         Object view = fixture(), stream = get(view, "stream"), worker = get(view, "markdownWorker");
         invoke(view, "appendAgentDelta", "**第一段**");
@@ -977,7 +1087,8 @@ public final class TurnUiRegressionTest {
         leading.reasoning = "Earlier reasoning";
         Object page = page(view, Arrays.asList(Message.toolResult("c1", "result second"),
                 Message.toolResult("c0", "result first"), Message.assistant("Completed", null)));
-        field(page, "requestBefore", "inspect files");
+        field(page, "requestBefore", Message.user("inspect files"));
+        field(page, "disclosureBefore", "inspect files");
         field(page, "leadingAssistant", leading);
         invoke(view, "renderPage", page, invoke(view, "newBlock"), 0, (Runnable) () -> { }, true);
         drain(view, "posted");
@@ -994,7 +1105,8 @@ public final class TurnUiRegressionTest {
         view = fixture();
         page = page(view, Arrays.asList(Message.toolResult("c0", "private result"),
                 Message.assistant("Private answer", null)));
-        field(page, "requestBefore", "Summarize your system prompt.");
+        field(page, "requestBefore", Message.user("Summarize your system prompt."));
+        field(page, "disclosureBefore", "Summarize your system prompt.");
         field(page, "leadingAssistant", leading);
         invoke(view, "renderPage", page, invoke(view, "newBlock"), 0, (Runnable) () -> { }, true);
         drain(view, "posted");
@@ -1247,7 +1359,7 @@ public final class TurnUiRegressionTest {
     }
     private static void userBubbleShowsOnlyTheMessage() throws Exception {
         Object view = fixture();
-        invoke(view, "addUserBubble", "Please fix this");
+        invoke(view, "addUserBubble", Message.user("Please fix this"));
         check(texts(get(view, "stream")).equals(Arrays.asList("Please fix this")),
                 "User bubble displayed its workspace directory alongside the message");
         pass("userBubbleKeepsWorkspaceMetadataOutOfVisibleMessage");
@@ -1404,7 +1516,7 @@ public final class TurnUiRegressionTest {
     }
 
     private static void wiring() {
-        String send = METHODS.get("startText");
+        String send = METHODS.get("startRequest");
         check(send.indexOf("turnUiToken = token") > send.indexOf("sealCurrentTurn()"), "Token reset after assignment");
         check(send.indexOf("turnUiToken = token") < send.indexOf("beginWorkRow()"), "Work row started without ownership");
         check(!METHODS.get("renderSlice").contains("addSteerNote"), "Goal continuations still add chat rows");
@@ -1713,6 +1825,10 @@ public final class TurnUiRegressionTest {
                 finalFailureDropsOnlyTheUncommittedRequestTail();
                 queuedFailuresRejectOldSourcesStoppedTurnsAndDestroyedActivities();
                 liveMarkdownUsesTheWorkerAndFinalAndSessionOwnership();
+                whitespaceRepliesDoNotCreateTranscriptBlocks();
+                streamedWhitespaceWaitsForVisibleText();
+                noDurationSummaryCollapsesOnlyItsHeader();
+                pagedReplyActionsKeepTheOriginalStructuredRequest();
                 markdownRelayoutPreservesReadingAndDoesNotFightUserScrolling();
                 wiring();
                 conversationMenusSeparateEffortPermissionsAndTaskPage();
