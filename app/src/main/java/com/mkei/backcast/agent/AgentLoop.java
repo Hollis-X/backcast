@@ -848,6 +848,20 @@ public class AgentLoop {
                     }
                 } catch (InterruptedException stopped) {
                     Thread.currentThread().interrupt();
+                } catch (RuntimeException checkpointFailure) {
+                    // Periodic clock storage is best effort. End this checkpoint
+                    // without interrupting the model/tool worker or resending work.
+                    try {
+                        recordError(Diagnostics.failure(checkpointFailure), "clock_checkpoint",
+                                "计时检查点保存失败，本轮周期保存已停止");
+                    } catch (Throwable diagnosticFailure) {
+                        // Even a broken diagnostic sink must stay inside this
+                        // auxiliary thread instead of reaching the App handler.
+                    }
+                } finally {
+                    synchronized (lock) {
+                        if (clockCheckpoint == Thread.currentThread()) clockCheckpoint = null;
+                    }
                 }
             }
         }, "agent-clock-checkpoint");

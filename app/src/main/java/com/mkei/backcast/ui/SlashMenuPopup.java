@@ -60,6 +60,7 @@ public final class SlashMenuPopup {
 
     public void show(List<Item> items) {
         rows.removeAllViews();
+        boolean previousAction = false;
         for (final Item item : items) {
             LinearLayout row = new LinearLayout(context);
             row.setOrientation(LinearLayout.VERTICAL);
@@ -79,7 +80,10 @@ public final class SlashMenuPopup {
                 detail.setPadding(0, dp(2), 0, 0);
                 row.addView(detail);
             }
-            rows.addView(row, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+            if (previousAction) layout.topMargin = dp(8);
+            rows.addView(row, layout);
+            previousAction = item.action != null;
         }
         scroll.scrollTo(0, 0);
         if (!observing) {

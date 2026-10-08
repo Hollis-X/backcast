@@ -45,6 +45,9 @@ public final class MultiDexConfigRegressionTest {
         String source = "import java.util.*;class Context{}class Application extends Context {"
                 + "public void onCreate(){GlobalApplication.events.add(\"super-create\");}}"
                 + "public class GlobalApplication extends Application {public static final List<String> events=new ArrayList<String>();"
+                + "public static final java.util.concurrent.CountDownLatch exitEvidence=new java.util.concurrent.CountDownLatch(1);"
+                + "public static volatile Thread exitThread;public static volatile Object exitContext;"
+                + "static class AgentService{static void recordPreviousExit(Context c){exitThread=Thread.currentThread();exitContext=c;exitEvidence.countDown();}}"
                 + "static class CrashHandler{static CrashHandler getInstance(){return new CrashHandler();}"
                 + "void registerGlobal(Context c){events.add(\"global-crash\");}"
                 + "void registerPart(Context c){events.add(\"part-crash\");}}"
@@ -65,6 +68,12 @@ public final class MultiDexConfigRegressionTest {
             Object instance = application.getConstructor().newInstance(); application.getMethod("start").invoke(instance);
             check(application.getField("events").get(null).equals(Arrays.asList("super-create", "global-crash", "part-crash")),
                     "Application/crash runtime startup order changed");
+            java.util.concurrent.CountDownLatch exitEvidence = (java.util.concurrent.CountDownLatch)
+                    application.getField("exitEvidence").get(null);
+            check(exitEvidence.await(2, java.util.concurrent.TimeUnit.SECONDS)
+                    && application.getField("exitThread").get(null) != Thread.currentThread()
+                    && application.getField("exitContext").get(null) == instance,
+                    "Previous process exit lookup must run outside the application main thread");
             Object route = loader.loadClass("com.mkei.backcast.agent.NetworkRouting").getField("provider").get(null);
             check(route != null && route.getClass().getField("context").get(route) == instance, "Application omitted device network routing installation");
             System.out.println("PASS actual application startup installs network routing and crash runtime without a legacy multidex hook");

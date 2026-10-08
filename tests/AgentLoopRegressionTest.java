@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -711,6 +712,120 @@ public final class AgentLoopRegressionTest {
             if (worker.isAlive()) loop.cancel();
             worker.join(5000L); if (stopper.isAlive()) stopper.join(5000L);
         }
+    }
+
+    private static void checkpointFailureStaysPrivate(boolean brokenDiagnostics) throws Exception {
+        SystemClock.set(100000L);
+        final CountDownLatch requestStarted = new CountDownLatch(1), requestRelease = new CountDownLatch(1);
+        final CountDownLatch diagnosticAttempted = new CountDownLatch(1);
+        final AtomicInteger calls = new AtomicInteger(), aborts = new AtomicInteger(), tools = new AtomicInteger();
+        final AtomicInteger checkpoints = new AtomicInteger(), diagnostics = new AtomicInteger(), uiErrors = new AtomicInteger();
+        final AtomicReference<Throwable> uncaught = new AtomicReference<Throwable>(), workerFailure = new AtomicReference<Throwable>();
+        final AtomicReference<String> evidence = new AtomicReference<String>();
+        final List<Boolean> savedRunning = java.util.Collections.synchronizedList(new ArrayList<Boolean>());
+        final Recorder recorder = new Recorder();
+        final AgentLoop[] box = new AgentLoop[1];
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray schema, Sink sink) {
+                int call = calls.incrementAndGet();
+                Reply reply = new Reply();
+                if (call == 1) {
+                    requestStarted.countDown();
+                    try { check(requestRelease.await(10, TimeUnit.SECONDS), "Checkpoint failure fixture never released its model"); }
+                    catch (InterruptedException interrupted) { throw new IllegalStateException(interrupted); }
+                    reply.toolCalls = new JSONArray().put(new JSONObject().put("id", "done").put("type", "function")
+                            .put("function", new JSONObject().put("name", "update_goal")
+                                    .put("arguments", "{\"status\":\"complete\"}")));
+                } else {
+                    check(call == 2, "Checkpoint storage failure silently resent a model request: " + call);
+                    reply.content = "completed after checkpoint failure";
+                    if (sink != null) sink.onContent(reply.content);
+                }
+                return reply;
+            }
+            @Override public void abort() { aborts.incrementAndGet(); requestRelease.countDown(); }
+        };
+        ToolRegistry registry = new ToolRegistry();
+        registry.register(new Tool() {
+            @Override public String name() { return "update_goal"; }
+            @Override public String description() { return "fixture"; }
+            @Override public JSONObject parameters() { return new JSONObject(); }
+            @Override public String run(JSONObject args) {
+                tools.incrementAndGet();
+                return box[0].closeGoal("complete", "");
+            }
+            @Override public void abort() { }
+        });
+        final AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet() {
+            @Override public void onError(int gen, String message) { uiErrors.incrementAndGet(); }
+        });
+        box[0] = loop;
+        loop.bindSession(1L); loop.reset("system"); loop.setRecorder(recorder); loop.setGoal("finish actual work");
+        loop.setDiagnosticRecorder(null, (sid, source, summary, detail) -> {
+            diagnostics.incrementAndGet();
+            evidence.set(source + "\n" + summary + "\n" + detail);
+            diagnosticAttempted.countDown();
+            if (brokenDiagnostics) throw new AssertionError("diagnostic sink unavailable");
+        });
+        loop.setDurability(new AgentLoop.Durability() {
+            @Override public void save(long sid, boolean running, String goal, String status, long goalMs,
+                    long turnMs, Long thinkMs, long used, long budget, boolean wrapped) {
+                savedRunning.add(Boolean.valueOf(running));
+            }
+            @Override public void saveClock(long sid, long goalMs, long turnMs, Long thinkMs) {
+                checkpoints.incrementAndGet();
+                throw new IllegalStateException("database is closed");
+            }
+        });
+        Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> uncaught.compareAndSet(null, error));
+        Thread worker = new Thread(() -> {
+            try { loop.submit("go", 1L, loop.generation(), 1, null); }
+            catch (Throwable error) { workerFailure.set(error); }
+        }, "checkpoint-failure-model");
+        worker.setDaemon(true);
+        try {
+            worker.start();
+            check(requestStarted.await(3, TimeUnit.SECONDS), "Checkpoint failure fixture did not start its model");
+            Field checkpointField = AgentLoop.class.getDeclaredField("clockCheckpoint");
+            checkpointField.setAccessible(true);
+            Thread checkpoint = (Thread) checkpointField.get(loop);
+            check(checkpoint != null, "No real periodic checkpoint thread");
+            check(diagnosticAttempted.await(6, TimeUnit.SECONDS), "Checkpoint failure did not attempt a private diagnostic");
+            checkpoint.join(2000L);
+            check(!checkpoint.isAlive() && checkpointField.get(loop) == null,
+                    "Failed checkpoint kept running or left a stale thread reference");
+            check(uncaught.get() == null, "Auxiliary checkpoint reached the App uncaught handler: " + uncaught.get());
+            check(checkpoints.get() == 1 && diagnostics.get() == 1,
+                    "Failed checkpoint kept retrying storage or diagnostics");
+            check(evidence.get().startsWith("clock_checkpoint\n")
+                    && evidence.get().contains("java.lang.IllegalStateException"), "Private diagnostic lost the failure source/evidence");
+            check(worker.isAlive() && loop.busy() && Goal.ACTIVE.equals(loop.goalStatus())
+                    && calls.get() == 1 && aborts.get() == 0 && uiErrors.get() == 0,
+                    "Checkpoint failure interrupted or reported an error for active work");
+            requestRelease.countDown(); worker.join(5000L);
+            check(!worker.isAlive() && workerFailure.get() == null && uncaught.get() == null,
+                    "Main request did not finish independently of its failed checkpoint");
+            check(calls.get() == 2 && tools.get() == 1 && aborts.get() == 0 && uiErrors.get() == 0,
+                    "Checkpoint failure resent, canceled, or hid the actual model/tool work");
+            check(Goal.COMPLETE.equals(loop.goalStatus()) && !loop.busy()
+                    && recorder.answer().content.equals("completed after checkpoint failure"),
+                    "Goal/answer did not complete after checkpoint failure");
+            check(savedRunning.contains(Boolean.TRUE) && savedRunning.get(savedRunning.size() - 1).equals(Boolean.FALSE),
+                    "Checkpoint failure bypassed the ordinary final durability save");
+            check(checkpoints.get() == 1 && diagnostics.get() == 1, "Completed worker restarted the failed checkpoint");
+        } finally {
+            requestRelease.countDown(); loop.cancel(); worker.join(5000L);
+            Thread.setDefaultUncaughtExceptionHandler(previous);
+        }
+    }
+
+    private static void checkpointStorageFailureDoesNotKillActiveWork() throws Exception {
+        checkpointFailureStaysPrivate(false);
+    }
+
+    private static void checkpointDiagnosticFailureCannotReachAppHandler() throws Exception {
+        checkpointFailureStaysPrivate(true);
     }
 
     private static void staleFinalSaveCannotStopReplacementWorker() throws Exception {
@@ -1434,7 +1549,7 @@ public final class AgentLoopRegressionTest {
                 "manualCompactionPinsRegistryAndCleansItsLease", "cancelledManualCompactionCleansOnlyItsOriginalLease",
                 "disclosureNeverReachesTransport", "disclosureIsRefusedAfterRecovery",
                 "disclosureGoalStopsWithoutSpinning", "promptFileTaskIsAllowed", "staleCallbacksDoNotChangeNewTurnClock",
-                "trueBackgroundWorkKeepsCounting", "rebootRestorePreservesWorkAndFirstOutput", "legacyRestoreUsesSavedAssistantWorkOnly", "restoredGoalCountsOnlyActualSegments", "periodicCheckpointCannotOvertakeFinalStop", "staleFinalSaveCannotStopReplacementWorker", "automaticGoalContinuationKeepsUserRequestLedger", "uiTokenReservationSurvivesActivityRecreation",
+                "trueBackgroundWorkKeepsCounting", "rebootRestorePreservesWorkAndFirstOutput", "legacyRestoreUsesSavedAssistantWorkOnly", "restoredGoalCountsOnlyActualSegments", "periodicCheckpointCannotOvertakeFinalStop", "checkpointStorageFailureDoesNotKillActiveWork", "checkpointDiagnosticFailureCannotReachAppHandler", "staleFinalSaveCannotStopReplacementWorker", "automaticGoalContinuationKeepsUserRequestLedger", "uiTokenReservationSurvivesActivityRecreation",
                 "restoredGoalAfterPlainAssistantKeepsContinuationLedger",
                 "restoredChildSettlementAfterPlainAssistantKeepsLedger",
                 "completedOrdinaryChatDoesNotRestoreContinuationLedger",

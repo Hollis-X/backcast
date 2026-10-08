@@ -47,6 +47,11 @@ public class GlobalApplication extends Application {
         com.mkei.backcast.agent.NetworkRouting.install(new com.mkei.backcast.net.DeviceNetworks(this));
         CrashHandler.getInstance().registerGlobal(this);
         CrashHandler.getInstance().registerPart(this);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                AgentService.recordPreviousExit(GlobalApplication.this);
+            }
+        }, "backcast-exit-evidence").start();
     }
 
     public static void write(InputStream input, OutputStream output) throws IOException {
@@ -151,6 +156,8 @@ public class GlobalApplication extends Application {
             @Override
             public void uncaughtException(Thread thread, Throwable throwable) {
                 try {
+
+                    AgentService.recordUncaughtException(mContext, thread, throwable);
 
                     String log = buildLog(throwable);
                     writeLog(log);

@@ -5,6 +5,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
 
 /** Real process groups, PPID discovery without children files, and PID identity checks. */
@@ -22,7 +23,87 @@ public final class ProcessIsolationRegressionTest {
     private static String writer() {
         return "(while :; do mkdir -p leaked; touch leaked/alive; sleep 0.05; done) & ";
     }
+    private static Thread command(final ShellTool shell, final String command, final AtomicReference<String> result) {
+        Thread worker = new Thread(() -> {
+            try { result.set(shell.run(new JSONObject().put("command", command))); }
+            catch (Exception failed) { result.set("exception:" + failed); }
+        });
+        worker.start();
+        return worker;
+    }
+    private static void awaitFile(File file) throws Exception {
+        long until = System.nanoTime() + 5000000000L;
+        while (!file.isFile() && System.nanoTime() - until < 0) Thread.sleep(20);
+        check(file.isFile(), "Command did not reach its marker: " + file);
+    }
+    private static void siblingIsolation(File project) throws Exception {
+        String appStat = new String(Files.readAllBytes(new File("/proc/self/stat").toPath()), "UTF-8");
+        String appPid = appStat.substring(0, appStat.indexOf(' '));
+        String[] appFields = appStat.substring(appStat.lastIndexOf(')') + 1).trim().split("\\s+");
+        check(appPid.equals(appFields[2]) && appPid.equals(appFields[3]),
+                "Sibling fixture JVM was not isolated from the test runner");
+        ShellTool sibling = new ShellTool(false, project.getPath(), null);
+        ShellTool current = new ShellTool(false, project.getPath(), null);
+        AtomicReference<String> siblingResult = new AtomicReference<String>();
+        AtomicReference<String> cancelledResult = new AtomicReference<String>();
+        Thread other = command(sibling, "touch sibling.ready; "
+                + "while [ ! -f release ]; do sleep 0.02; done; printf sibling-complete", siblingResult);
+        Thread cancelled = null;
+        try {
+            awaitFile(new File(project, "sibling.ready"));
+            String normal = current.run(new JSONObject().put("command", "printf foreground-complete"));
+            check(normal.startsWith("exit=0") && other.isAlive(),
+                    "Normal cleanup killed the sibling command: " + siblingResult.get());
+            cancelled = command(current, "touch cancelled.ready; sleep 20", cancelledResult);
+            awaitFile(new File(project, "cancelled.ready"));
+            current.abort();
+            cancelled.join(5000);
+            check(!cancelled.isAlive() && cancelledResult.get().contains("已停止"),
+                    "Cancellation did not stop its own command: " + cancelledResult.get());
+            check(other.isAlive(), "Cancelling one command killed its sibling: " + siblingResult.get());
+            Files.write(new File(project, "release").toPath(), new byte[0]);
+            other.join(5000);
+            check(!other.isAlive() && siblingResult.get().startsWith("exit=0")
+                    && siblingResult.get().contains("sibling-complete"),
+                    "Sibling did not complete after unrelated cleanup: " + siblingResult.get());
+        } finally {
+            current.abort(); sibling.abort();
+            if (cancelled != null) cancelled.join(5000);
+            other.join(5000);
+        }
+    }
+    private static void runIsolatedSiblingFixture(File project, boolean sharedGroup) throws Exception {
+        File fixture = new File(project, sharedGroup ? "shared-group" : "isolated-group");
+        check(fixture.mkdir(), "Cannot create sibling isolation fixture");
+        File sessionLauncher = null;
+        for (String entry : System.getenv("PATH").split(File.pathSeparator)) {
+            File candidate = new File(entry, "setsid");
+            if (candidate.isFile() && candidate.canExecute()) { sessionLauncher = candidate; break; }
+        }
+        check(sessionLauncher != null, "No isolated session launcher for sibling fixture");
+        ProcessBuilder child = new ProcessBuilder(sessionLauncher.getAbsolutePath(), new File(System.getProperty("java.home"), "bin/java").getPath(),
+                "-cp", System.getProperty("java.class.path"), ProcessIsolationRegressionTest.class.getName(),
+                "sibling", fixture.getPath());
+        if (sharedGroup) {
+            File bin = new File(fixture, "bin"); check(bin.mkdir(), "Cannot create fallback launcher directory");
+            File setsid = new File(bin, "setsid");
+            Files.write(setsid.toPath(), "#!/bin/sh\nexec \"$@\"\n".getBytes("UTF-8"));
+            check(setsid.setExecutable(true), "Cannot create non-isolating setsid fixture");
+            child.environment().put("PATH", bin.getPath() + ":" + System.getenv("PATH"));
+        }
+        // The test JVM acts as the App. Isolate it from the runner so a broken
+        // inherited-group signal fails this fixture without killing other tests.
+        Process process = child.inheritIO().start();
+        try {
+            check(process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS) && process.exitValue() == 0,
+                    "App/sibling isolation failed (shared group=" + sharedGroup + ")");
+        } finally { process.destroyForcibly(); }
+    }
     public static void main(String[] args) throws Exception {
+        if (args.length == 2 && "sibling".equals(args[0])) {
+            siblingIsolation(new File(args[1]));
+            return;
+        }
         File project = Files.createTempDirectory("backcast-process-test-").toFile();
         try {
             ShellTool shell = new ShellTool(false, project.getPath(), null);
@@ -96,6 +177,10 @@ public final class ProcessIsolationRegressionTest {
                         "Group signal lacks session/group/starttime checks");
                 pass("reusedPidAndGroupIdentityProtected");
             } finally { check(tree.stop(), "Fallback process tree did not stop"); process.destroy(); }
+            runIsolatedSiblingFixture(project, false);
+            pass("isolatedCommandsPreserveAppAndSibling");
+            runIsolatedSiblingFixture(project, true);
+            pass("sharedGroupFallbackPreservesAppAndSibling");
             System.out.println("Process isolation regression: " + passed + " passed");
         } finally { remove(project); }
     }

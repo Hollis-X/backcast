@@ -116,6 +116,10 @@ if [ "${3:-}" = "message-actions" ]; then
     java -cp "$build:$json" "$root/tests/MessageActionsUiRegressionTest.java" "$root"
     exit "$?"
 fi
+if [ "${3:-}" = "service" ]; then
+    java -cp "$json" "$root/tests/AgentServiceLifecycleRegressionTest.java" "$root"
+    exit "$?"
+fi
 if [ "${3:-}" = "model-picker" ]; then
     java -cp "$build:$json" "$root/tests/AiModelPickerUiRegressionTest.java" "$root"
     exit "$?"
@@ -309,6 +313,8 @@ java -cp "$build:$json" "$root/tests/ChatStorePagingRegressionTest.java" "$root"
 paging_status=$?
 java -cp "$json" "$root/tests/RunHubRecoveryTest.java" "$root/app/src/main/java/com/mkei/backcast/RunHub.java"
 recovery_status=$?
+java -cp "$json" "$root/tests/AgentServiceLifecycleRegressionTest.java" "$root"
+service_status=$?
 java "$root/tests/ResponsePreferencesRegressionTest.java" "$root"
 preferences_status=$?
 java "$root/tests/SettingsChoiceRegressionTest.java" "$root"
@@ -331,6 +337,7 @@ java "$root/tests/McpConfigUiRegressionTest.java" "$root"
 mcp_ui_status=$?
 if [ "$slash_ui_status" -ne 0 ]; then exit 1; fi
 if [ "$message_actions_status" -ne 0 ]; then exit 1; fi
+if [ "$service_status" -ne 0 ]; then exit 1; fi
 if [ "$mcp_ui_status" -ne 0 ]; then exit 1; fi
 if [ "$mcp_status" -ne 0 ]; then exit 1; fi
 if [ "$resource_reachability_status" -ne 0 ]; then exit 1; fi

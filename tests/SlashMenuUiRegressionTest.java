@@ -38,7 +38,7 @@ public final class SlashMenuUiRegressionTest {
     public static void main(String[] args) throws Exception {
         Path root = Path.of(args[0]), build = Files.createTempDirectory("backcast-slash-ui-");
         List<JavaFileObject> sources = new ArrayList<>();
-        add(sources,"android.util.DisplayMetrics", "package android.util; public class DisplayMetrics {public float density=1;}");
+        add(sources,"android.util.DisplayMetrics", "package android.util; public class DisplayMetrics {public static float scale=1;public float density=scale;}");
         add(sources,"android.content.res.Resources", "package android.content.res; public class Resources {public android.util.DisplayMetrics getDisplayMetrics(){return new android.util.DisplayMetrics();} public int getColor(int v){return v;}}");
         add(sources,"android.content.Context", "package android.content; public class Context {public java.io.File directory; public Context getApplicationContext(){return this;}public java.io.File getFilesDir(){return directory;} public android.content.res.Resources getResources(){return new android.content.res.Resources();} public void startActivity(Intent i){}}");
         add(sources,"android.content.Intent", "package android.content; public class Intent {public Intent(Context c,Class<?> type){}}");
@@ -79,10 +79,11 @@ public final class SlashMenuUiRegressionTest {
         add(sources,"android.widget.LinearLayout", """
             package android.widget;public class LinearLayout extends android.view.View{
               public static final int VERTICAL=1;public java.util.List<android.view.View> children=new java.util.ArrayList<>();
+              public java.util.Map<android.view.View,LayoutParams> layouts=new java.util.IdentityHashMap<>();
               public LinearLayout(android.content.Context c){super(c);}public void setOrientation(int o){}public void addView(android.view.View v){children.add(v);}
-              public void addView(android.view.View v,LayoutParams p){children.add(v);}public void removeAllViews(){children.clear();}
-              public int getMeasuredHeight(){int n=16;for(var v:children)n+=v.getMeasuredHeight()+16;return n;}
-              public static class LayoutParams{public LayoutParams(int w,int h){}}
+              public void addView(android.view.View v,LayoutParams p){children.add(v);layouts.put(v,p);}public void removeAllViews(){children.clear();layouts.clear();}
+              public int getMeasuredHeight(){int n=16;for(var v:children)n+=v.getMeasuredHeight()+16+(layouts.containsKey(v)?layouts.get(v).topMargin:0);return n;}
+              public static class LayoutParams{public int topMargin;public LayoutParams(int w,int h){}}
             }
             """);
         add(sources,"android.widget.ScrollView", "package android.widget;public class ScrollView extends android.view.View{public android.view.View child;public ScrollView(android.content.Context c){super(c);}public void addView(android.view.View c){child=c;}public void scrollTo(int x,int y){}}");
@@ -225,6 +226,23 @@ public final class SlashMenuUiRegressionTest {
             check(popup.x>=8&&popup.x+popup.width<=392&&!popup.focusable&&!popup.outside,"Popup stole input focus or exceeded visible frame");
             menu.dismiss();check(anchor.observer.listeners.isEmpty(),"Dismiss leaked global layout listener");pass("fixedPopupContainerRefreshesAndFitsKeyboardViewport");
           }
+          static void optionCardSpacing(){
+            for(int density:new int[]{1,3}){
+              android.util.DisplayMetrics.scale=density;
+              SlashMenuPopup menu=new SlashMenuPopup(context,new View(context));Runnable action=()->{};
+              menu.show(List.of(new SlashMenuPopup.Item("指令","",null),new SlashMenuPopup.Item("/compact","压缩上下文",action),
+                new SlashMenuPopup.Item("/goal","设置目标",action),new SlashMenuPopup.Item("MCP · Database","2 个工具",null),
+                new SlashMenuPopup.Item("inspect","检查表",action),new SlashMenuPopup.Item("query","查询数据",action)));
+              LinearLayout body=(LinearLayout)((ScrollView)PopupWindow.last.content).child;
+              int[] expected={0,0,8,8,0,8};check(body.children.size()==expected.length,"Spacing introduced extra menu rows");
+              for(int i=0;i<expected.length;i++)check(body.layouts.get(body.children.get(i)).topMargin==expected[i]*density,
+                "Card/section gap was not an independent density-scaled margin at row "+i);
+              menu.show(List.of(new SlashMenuPopup.Item("query","查询数据",action)));
+              check(body.layouts.get(body.children.get(0)).topMargin==0,"Filtering retained previous row gap on first result");
+              menu.dismiss();
+            }
+            android.util.DisplayMetrics.scale=1;pass("slashAndMcpCardsHaveEightDpOuterGapsWithoutSeparatingTitlesFromTheirFirstCard");
+          }
           static void busySlash(){
             MainSlashFixture ui=new MainSlashFixture();ui.prompt.setText("/");ui.setBusy(true);check(ui.slashPopup.isShowing(),"Busy loop hid slash menu");
             ui.syncSlashPopup("/mcp inspect");check(ui.slashPopup.isShowing(),"MCP filtering rejected spaces");
@@ -324,7 +342,7 @@ public final class SlashMenuUiRegressionTest {
             check(remote.calls.get()==0,"Lifecycle cleanup executed an MCP tool");pass("viewportDismissPauseAndSessionResetCancelTheirAutomaticRefresh");
           }
           public static void run()throws Exception{
-            setup();try{popupLayout();busySlash();cachedFiltering();}finally{cleanup();}
+            setup();try{popupLayout();optionCardSpacing();busySlash();cachedFiltering();}finally{cleanup();}
             setup();try{boundedRows();}finally{cleanup();}setup();try{parametersAndDraft();}finally{cleanup();}
             setup();try{invalidSelectionDiagnosed();}finally{cleanup();}setup();try{staleCallbacks();}finally{cleanup();}
             setup();try{readAndRefreshFailures();}finally{cleanup();}
