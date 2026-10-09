@@ -46,7 +46,6 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private View installProgressContainer;
     private ProgressBar installProgress;
     private boolean progressTerminal;
-    private boolean batchTerminal;
     private String probeContext = "";
     private View batchProgressContainer;
     private ProgressBar batchProgress;
@@ -64,8 +63,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
         volatile boolean cancelled;
         volatile java.util.concurrent.Future<?> future;
         RunHub.ToolkitSession session;
-        boolean installing, probingAll, progressQueued;
+        boolean installing, removing, probingAll, progressQueued;
         EmbeddedToolchain.Progress pendingProgress;
+        volatile EmbeddedToolchain.Progress lastProgress;
     }
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -138,7 +138,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
         }
     }
 
-    @Override protected void onResume() { super.onResume(); if (active == null) loadTools(progressTerminal || batchTerminal); }
+    @Override protected void onResume() { super.onResume(); if (active == null) loadTools(false); }
 
     @Override protected void onSaveInstanceState(Bundle state) {
         JSONArray results = new JSONArray();
@@ -149,11 +149,12 @@ public final class ToolConfigActivity extends AppCompatActivity {
     }
 
     @Override protected void onStop() {
-        boolean installing = active != null && active.installing;
+        boolean managing = active != null && (active.installing || active.removing);
+        boolean removing = active != null && active.removing;
         boolean probingAll = active != null && active.probingAll;
         for (ToolkitOperation operation : pendingOperations()) cancelToolkitOperation(operation);
         active = null;
-        if (installing) finishInstallProgress(null);
+        if (managing) finishInstallProgress(null, removing);
         if (probingAll) finishBatchProbe(null);
         super.onStop();
     }
@@ -178,7 +179,10 @@ public final class ToolConfigActivity extends AppCompatActivity {
                 else {
                     active = null; setBusy(false);
                     String error = result.optString("error");
-                    if (error.length() > 0) operationStatus.setText(getString(R.string.toolkit_progress_refresh_failed, error));
+                    if (error.length() > 0) {
+                        operationStatus.setText(R.string.toolkit_progress_refresh_failed);
+                        operationStatus.setVisibility(View.VISIBLE);
+                    }
                 }
                 renderTools(result);
             }
@@ -188,11 +192,11 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private void manage(String action, int status) {
         probeResults.clear(); probeContext = "";
         begin(getString(status));
-        if ("package_install".equals(action)) beginInstallProgress();
+        if ("package_install".equals(action) || "package_remove".equals(action)) beginInstallProgress("package_remove".equals(action));
         active = requestToolkit(toolkitArguments(action, ""), new ToolkitResult() {
             @Override public void apply(JSONObject result) {
                 finishOperation(result);
-                if (!"error".equals(result.optString("state")) && !"cancelled".equals(result.optString("state"))) loadTools(progressTerminal);
+                loadTools(progressTerminal);
             }
         });
     }
@@ -200,30 +204,32 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private void begin(String text) {
         if (active != null) cancelToolkitOperation(active);
         progressTerminal = false;
-        batchTerminal = false;
         installProgressContainer.setVisibility(View.GONE);
+        installProgressText.setText("");
         batchProgressContainer.setVisibility(View.GONE);
         operationStatus.setText(text); operationStatus.setVisibility(View.VISIBLE); setBusy(true);
     }
 
     private void finishOperation(JSONObject result) {
-        boolean installing = active != null && active.installing;
+        boolean managing = active != null && (active.installing || active.removing);
+        boolean removing = active != null && active.removing;
         boolean probingAll = active != null && active.probingAll;
         active = null; setBusy(false);
-        if (installing) { finishInstallProgress(result); return; }
+        if (managing) { finishInstallProgress(result, removing); return; }
         if (probingAll) { finishBatchProbe(result); return; }
         String error = result.optString("error");
         operationStatus.setText(error.length() > 0 ? error : toolkitState(result.optString("state")));
         operationStatus.setVisibility(error.length() > 0 || "cancelled".equals(result.optString("state")) ? View.VISIBLE : View.GONE);
     }
 
-    private void beginInstallProgress() {
+    private void beginInstallProgress(boolean removing) {
         installProgress.setMax(100); installProgress.setProgress(0); installProgress.setIndeterminate(true);
-        installProgressText.setText(R.string.toolkit_progress_preparing);
+        installProgressText.setText(removing ? R.string.toolkit_progress_remove_preparing : R.string.toolkit_progress_preparing);
         installProgressContainer.setVisibility(View.VISIBLE);
     }
 
     private void queueInstallProgress(final ToolkitOperation operation, EmbeddedToolchain.Progress progress) {
+        operation.lastProgress = progress;
         synchronized (operation) {
             if (operation.cancelled) return;
             operation.pendingProgress = progress;
@@ -246,22 +252,24 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private void applyInstallProgress(EmbeddedToolchain.Progress progress) {
         if (progress.total <= 0) {
             installProgress.setIndeterminate(true);
-            installProgressText.setText(R.string.toolkit_progress_preparing);
+            installProgressText.setText("removing".equals(progress.stage) ? R.string.toolkit_progress_remove_preparing : R.string.toolkit_progress_preparing);
             return;
         }
         // Final publication still has to return successfully and close its UI session.
         int percent = Math.max(installProgress.getProgress(), Math.min(99, Math.max(0, progress.percent())));
         installProgress.setIndeterminate(false); installProgress.setProgress(percent);
-        String phase = installProgressPhase(progress.stage);
+        boolean removing = active != null && active.removing;
+        String phase = installProgressPhase(removing ? "removing" : progress.stage);
         if (progress.artifact.length() > 0) {
             String artifact = "any".equals(progress.artifact) ? getString(R.string.toolkit_progress_common)
                     : getString(R.string.toolkit_progress_device);
             phase = getString(R.string.toolkit_progress_phase_artifact, phase, artifact);
         }
         installProgressText.setText(getString(R.string.toolkit_progress_value, percent, phase)
-                + "\n" + getString(R.string.toolkit_progress_bytes,
+                + "\n" + (removing ? getString(R.string.toolkit_progress_files, progress.completed, progress.total)
+                    : getString(R.string.toolkit_progress_bytes,
                         android.text.format.Formatter.formatFileSize(this, progress.completed),
-                        android.text.format.Formatter.formatFileSize(this, progress.total)));
+                        android.text.format.Formatter.formatFileSize(this, progress.total))));
     }
 
     private String installProgressPhase(String stage) {
@@ -272,23 +280,26 @@ public final class ToolConfigActivity extends AppCompatActivity {
                 : "verifying".equals(stage) ? R.string.toolkit_progress_verifying
                 : "unpacking".equals(stage) ? R.string.toolkit_progress_unpacking
                 : "publishing".equals(stage) ? R.string.toolkit_progress_publishing
+                : "removing".equals(stage) ? R.string.toolkit_progress_removing
                 : "registering".equals(stage) || "complete".equals(stage) ? R.string.toolkit_progress_registering
                 : R.string.toolkit_progress_checking;
         return getString(resource);
     }
 
-    private void finishInstallProgress(JSONObject result) {
-        boolean success = result != null && "installed".equals(result.optString("state")) && result.optBoolean("installed")
-                && result.optString("error").length() == 0;
+    private void finishInstallProgress(JSONObject result, boolean removing) {
+        boolean success = result != null && result.optString("error").length() == 0
+                && (removing ? ("removed".equals(result.optString("state")) || "not_installed".equals(result.optString("state")))
+                    && !result.optBoolean("installed") && result.optLong("installed_bytes") == 0
+                    : "installed".equals(result.optString("state")) && result.optBoolean("installed"));
         progressTerminal = true;
         installProgress.setIndeterminate(false);
         installProgress.setProgress(success ? 100 : Math.min(99, installProgress.getProgress()));
-        int resource = success ? R.string.toolkit_progress_complete
+        int resource = success ? removing ? R.string.toolkit_progress_removed : R.string.toolkit_progress_complete
                 : result == null || "cancelled".equals(result.optString("state")) ? R.string.toolkit_cancelled : R.string.toolkit_failed;
         installProgressText.setText(getString(R.string.toolkit_progress_value, installProgress.getProgress(), getString(resource)));
         String error = result == null ? "" : result.optString("error");
         operationStatus.setText(error.length() > 0 ? error : getString(resource));
-        operationStatus.setVisibility(View.VISIBLE);
+        operationStatus.setVisibility(success ? View.GONE : View.VISIBLE);
     }
 
     private void restoreProbeResults(Bundle state) {
@@ -378,7 +389,6 @@ public final class ToolConfigActivity extends AppCompatActivity {
     }
 
     private void finishBatchProbe(JSONObject result) {
-        batchTerminal = true;
         boolean finished = result != null && "batch_complete".equals(result.optString("state")) && result.optString("error").length() == 0;
         if (finished) {
             batchProgress.setMax(result.optInt("total")); batchProgress.setProgress(result.optInt("completed"));
@@ -397,19 +407,20 @@ public final class ToolConfigActivity extends AppCompatActivity {
     }
 
     private void cancelActiveToolkit() {
-        boolean installing = active != null && active.installing;
+        boolean managing = active != null && (active.installing || active.removing);
+        boolean removing = active != null && active.removing;
         boolean probingAll = active != null && active.probingAll;
         if (active != null) cancelToolkitOperation(active);
         active = null; setBusy(false);
         operationStatus.setText(R.string.toolkit_cancelled);
         operationStatus.setVisibility(View.VISIBLE);
-        if (installing) finishInstallProgress(null);
+        if (managing) { finishInstallProgress(null, removing); loadTools(true); }
         if (probingAll) finishBatchProbe(null);
     }
 
     private void setBusy(boolean busy) {
         install.setEnabled(!busy && !"unsupported".equals(bundle.optString("state")));
-        remove.setEnabled(!busy && (bundle.optBoolean("installed") || "removed".equals(bundle.optString("state"))));
+        remove.setEnabled(!busy && (bundle.optBoolean("installed") || bundle.optBoolean("can_remove")));
         probe.setEnabled(!busy && bundle.optBoolean("installed"));
         batchProbe.setEnabled(!busy && bundle.optBoolean("installed"));
         cancel.setVisibility(busy ? View.VISIBLE : View.GONE);
@@ -422,12 +433,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
             invalidateProbeContext();
             String state = bundle.optString("state");
             String storage = getString(R.string.toolkit_storage, result.optString("storage"), result.optString("abi"));
-            long bytes = bundle.optLong("installed_bytes");
-            packageStatus.setText(toolkitState(state) + "\n" + storage
-                    + (bytes > 0 ? "\n" + getString(R.string.toolkit_bundle_bytes, android.text.format.Formatter.formatFileSize(this, bytes)) : "")
-                    + (bundle.optBoolean("busy") ? "\n" + getString(R.string.toolkit_busy) : ""));
+            packageStatus.setText(packageSummary(bundle, storage));
             install.setEnabled(!"unsupported".equals(state));
-            remove.setEnabled(bundle.optBoolean("installed") || "removed".equals(state));
+            remove.setEnabled(bundle.optBoolean("installed") || bundle.optBoolean("can_remove"));
             probe.setEnabled(bundle.optBoolean("installed"));
             batchProbe.setEnabled(bundle.optBoolean("installed"));
         }
@@ -473,6 +481,14 @@ public final class ToolConfigActivity extends AppCompatActivity {
         }
     }
 
+    private String packageSummary(JSONObject packageInfo, String storage) {
+        long bytes = packageInfo.optBoolean("installed") ? Math.max(0, packageInfo.optLong("installed_bytes")) : 0;
+        return toolkitState(packageInfo.optString("state")) + "\n" + storage
+                + (packageInfo.optBoolean("installed_size_unknown") ? "\n" + getString(R.string.toolkit_bundle_size_unavailable)
+                    : bytes > 0 ? "\n" + getString(R.string.toolkit_bundle_bytes, android.text.format.Formatter.formatFileSize(this, bytes)) : "")
+                + (packageInfo.optBoolean("busy") ? "\n" + getString(R.string.toolkit_busy) : "");
+    }
+
     private void showProbe(JSONObject result) {
         try { if (toolId.length() > 0) { probeResults.put(toolId, new JSONObject(result.toString())); probeContext = currentProbeContext(); } }
         catch (Exception ignored) { }
@@ -516,8 +532,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private String toolkitState(String state) {
         if ("ready".equals(state)) return getString(R.string.toolkit_ready);
         if ("installed".equals(state)) return getString(R.string.toolkit_installed);
-        if ("removed".equals(state)) return getString(R.string.toolkit_removed);
-        if ("not_installed".equals(state)) return getString(R.string.toolkit_not_installed);
+        if ("removed".equals(state) || "not_installed".equals(state)) return getString(R.string.toolkit_not_installed);
         if ("unsupported".equals(state)) return getString(R.string.toolkit_unsupported);
         if ("configured_not_probed".equals(state)) return getString(R.string.toolkit_configured);
         if ("needs_runtime".equals(state)) return getString(R.string.toolkit_needs_runtime);
@@ -538,6 +553,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private ToolkitOperation requestToolkit(final JSONObject args, final ToolkitResult callback) {
         final ToolkitOperation operation = new ToolkitOperation();
         operation.installing = "package_install".equals(args.optString("action"));
+        operation.removing = "package_remove".equals(args.optString("action"));
         operation.probingAll = "batch_status".equals(args.optString("action"));
         synchronized (toolkitOperations) { toolkitOperations.add(operation); }
         operation.future = toolkitReader.submit(new Runnable() {
@@ -552,7 +568,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
                     if ("package_install".equals(action)) result = session.toolkit.installBundled(new EmbeddedToolchain.ProgressListener() {
                         @Override public void onProgress(EmbeddedToolchain.Progress progress) { queueInstallProgress(operation, progress); }
                     });
-                    else if ("package_remove".equals(action)) result = session.toolkit.removeBundled();
+                    else if ("package_remove".equals(action)) result = session.toolkit.removeBundled(new EmbeddedToolchain.ProgressListener() {
+                        @Override public void onProgress(EmbeddedToolchain.Progress progress) { queueInstallProgress(operation, progress); }
+                    });
                     else if ("batch_status".equals(action)) result = ToolBatchProbe.run(session.toolkit,
                             new ToolchainInstaller.Cancellation() { public void check() throws Exception {
                                 if (operation.cancelled || Thread.currentThread().isInterrupted()) throw new InterruptedException("批量检测已取消。");
@@ -565,13 +583,13 @@ public final class ToolConfigActivity extends AppCompatActivity {
                     try { result.put("state", "cancelled").put("error", String.valueOf(cancellation.getMessage())); }
                     catch (Exception ignored) { }
                 } catch (Exception failure) {
-                    recordToolkitFailure(args, failure);
+                    recordToolkitFailure(args, failure, operation);
                     try { result.put("state", "error").put("error", getString(R.string.toolkit_failed)); }
                     catch (Exception ignored) { }
                 } finally {
                     try { closeToolkitSession(operation); }
                     catch (Exception cleanup) {
-                        recordToolkitFailure(args, cleanup);
+                        recordToolkitFailure(args, cleanup, operation);
                         try { result.put("state", "error").put("error", getString(R.string.toolkit_failed)); }
                         catch (Exception ignored) { }
                     }
@@ -603,7 +621,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
         session.close();
     }
 
-    private void recordToolkitFailure(JSONObject args, Throwable failure) {
+    private void recordToolkitFailure(JSONObject args, Throwable failure, ToolkitOperation operation) {
         ChatStore diagnostics = null;
         try {
             List<String> secrets = new ArrayList<String>();
@@ -611,7 +629,17 @@ public final class ToolConfigActivity extends AppCompatActivity {
             JSONObject evidence = Diagnostics.failure(failure);
             evidence.put("reason", failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage());
             evidence.put("action", args.optString("action")).put("tool", args.optString("tool"));
-            if (failure instanceof ToolchainDownloader.Failure) evidence.put("download", new JSONObject(((ToolchainDownloader.Failure) failure).diagnostic()));
+            EmbeddedToolchain.Progress progress = operation.lastProgress;
+            if (progress != null) evidence.put("progress", new JSONObject().put("stage", progress.stage)
+                    .put("artifact", progress.artifact).put("completed", progress.completed).put("total", progress.total));
+            evidence.put("sdk", android.os.Build.VERSION.SDK_INT).put("abis", new JSONArray(android.os.Build.SUPPORTED_ABIS));
+            java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Throwable, Boolean>());
+            for (Throwable cause = failure; cause != null && seen.size() < 16 && seen.add(cause); cause = cause.getCause()) {
+                if (cause instanceof ToolchainDownloader.Failure) {
+                    evidence.put("download", new JSONObject(((ToolchainDownloader.Failure) cause).diagnostic()));
+                    break;
+                }
+            }
             diagnostics = new ChatStore(getApplicationContext());
             diagnostics.recordDiagnostic(-1L, "toolkit", "工具配置操作失败", Diagnostics.boundedJson(evidence, secrets.toArray(new String[secrets.size()])));
         } catch (Exception unavailable) {

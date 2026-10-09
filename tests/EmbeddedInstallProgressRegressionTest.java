@@ -39,14 +39,16 @@ public final class EmbeddedInstallProgressRegressionTest {
             return ToolchainFixtures.pin(new JSONObject().put("abi", abi).put("file", name + ".tar.gz").put("sha256", hash(source))
                     .put("bytes", source.length).put("tar_sha256", hash(raw)).put("tar_bytes", raw.length), "progress-fixture", source);
         }
-        public InputStream open(String name) throws Exception {
+        public synchronized InputStream open(String name) throws Exception {
             opens++;
             byte[] source = name.endsWith("manifest.json") ? manifest.toString().getBytes("UTF-8") : name.contains("common") ? common : nativeGzip;
             if (damaged && name.contains("native")) { source = source.clone(); source[source.length - 1] = 1; }
             return new ByteArrayInputStream(source) {
                 private boolean closed;
                 @Override public void close() throws java.io.IOException {
-                    if (!closed) { closed = true; closedStreams++; }
+                    synchronized (Payload.this) {
+                        if (!closed) { closed = true; closedStreams++; }
+                    }
                     super.close();
                 }
             };
@@ -100,7 +102,7 @@ public final class EmbeddedInstallProgressRegressionTest {
                 for (int i = 0; i < catalog.length(); i++) check("bundled".equals(store.configuration(catalog.getJSONObject(i).getString("id")).optString("origin")),
                         "100% preceded durable launcher registration");
             } catch (Exception failure) { throw new AssertionError(failure); }
-        } }).getBoolean("installed"), "Offline install failed"); events.validate(true);
+        } }, false).getBoolean("installed"), "Offline install failed"); events.validate(true);
         EmbeddedToolchain.Progress last = events.values.get(events.values.size() - 1);
         check(last.total == payload.common.length + payload.commonTar.length + payload.nativeGzip.length + payload.nativeTar.length + 3, "Budget did not include verified downloaded bytes, expanded TAR bytes, publications and registration");
         List<String> phases = new ArrayList<String>();
@@ -121,11 +123,11 @@ public final class EmbeddedInstallProgressRegressionTest {
         check(events.values.size() < 30, "Fast byte reads were emitted without throttling"); stagingGone(store);
     }
     private static void cachedAndReinstalledPackagesResetTheirProgress() throws Exception {
-        Payload payload = new Payload(); ToolchainStore store = payload.store("cache"); store.installBundled(LIVE, null);
-        int opened = payload.opens; Events cached = new Events(); store.installBundled(LIVE, cached); cached.validate(true);
+        Payload payload = new Payload(); ToolchainStore store = payload.store("cache"); store.installBundled(LIVE, null, false);
+        int opened = payload.opens; Events cached = new Events(); store.installBundled(LIVE, cached, false); cached.validate(true);
         check(payload.opens == opened && !cached.has("verifying") && !cached.has("unpacking"), "Cached installation faked copying or reread assets");
         check(cached.values.get(cached.values.size() - 1).total == 1, "Cached progress retained an earlier byte budget");
-        store.removeBundled(LIVE); Events fresh = new Events(); store.installBundled(LIVE, fresh); fresh.validate(true);
+        store.removeBundled(LIVE, null, false); Events fresh = new Events(); store.installBundled(LIVE, fresh, false); fresh.validate(true);
         check(fresh.has("verifying") && fresh.values.get(0).completed == 0, "Reinstallation reused stale progress");
     }
     private static void cancellationNeverCompletesAndCleansEveryExtractionPhase() throws Exception {
@@ -136,14 +138,14 @@ public final class EmbeddedInstallProgressRegressionTest {
                 if (cancelled.get()) throw new InterruptedException("cancelled progress fixture");
             } }, new EmbeddedToolchain.ProgressListener() { public void onProgress(EmbeddedToolchain.Progress value) {
                 events.onProgress(value); if (stage.equals(value.stage)) cancelled.set(true);
-            } }); } catch (InterruptedException expected) { interrupted = true; }
+            } }, false); } catch (InterruptedException expected) { interrupted = true; }
             check(interrupted, "Progress callback swallowed cancellation at " + stage); events.validate(false); stagingGone(store);
-            check(store.installBundled(LIVE, null).getBoolean("installed"), "Cancelled phase prevented a verified retry");
+            check(store.installBundled(LIVE, null, false).getBoolean("installed"), "Cancelled phase prevented a verified retry");
         }
     }
     private static void checksumAndObserverFailureCannotReportSuccess() throws Exception {
         Payload payload = new Payload(); payload.damaged = true; ToolchainStore store = payload.store("sha"); Events events = new Events();
-        boolean failed = false; try { store.installBundled(LIVE, events); } catch (java.io.IOException expected) { failed = true; }
+        boolean failed = false; try { store.installBundled(LIVE, events, false); } catch (java.io.IOException expected) { failed = true; }
         check(failed && !store.packageStatus().getBoolean("installed"), "Corrupt payload was published"); events.validate(false); stagingGone(store);
         check(payload.opens == payload.closedStreams, "Checksum failure leaked an APK asset stream");
         for (final String observerStage : new String[]{"verifying", "unpacking", "bytes"}) {
@@ -154,7 +156,7 @@ public final class EmbeddedInstallProgressRegressionTest {
                     if (observerStage.equals(value.stage) || "bytes".equals(observerStage) && "verifying".equals(value.stage) && value.completed > 0)
                         throw new IllegalStateException("broken observer");
                 }
-            }); } catch (IllegalStateException expected) { failed = true; }
+            }, false); } catch (IllegalStateException expected) { failed = true; }
             check(failed, "Observer failure was swallowed"); observed.validate(false); stagingGone(listenerStore);
             check(listenerPayload.opens == listenerPayload.closedStreams, "Observer failure leaked an APK asset stream at " + observerStage);
         }
@@ -166,7 +168,7 @@ public final class EmbeddedInstallProgressRegressionTest {
                 try { check(new File(outputStore.root(), ".downloads/" + hash(outputPayload.common) + ".part").mkdir(), "Could not inject a destination-open failure"); }
                 catch (Exception failure) { throw new AssertionError(failure); }
             }
-        } }); } catch (java.io.IOException expected) { failed = true; }
+        } }, false); } catch (java.io.IOException expected) { failed = true; }
         check(failed && outputPayload.opens == outputPayload.closedStreams, "Opening the destination failed after opening its asset stream without closing it");
         outputEvents.validate(false); stagingGone(outputStore);
         final ToolchainStore registryStore = new Payload().store("registry-failure"); final Events registryEvents = new Events();
@@ -175,28 +177,28 @@ public final class EmbeddedInstallProgressRegressionTest {
             registryEvents.onProgress(value);
             if ("registering".equals(value.stage)) try { Files.write(new File(registryStore.root(), "registry.json").toPath(), "corrupted fixture".getBytes("UTF-8")); }
             catch (Exception failure) { throw new AssertionError(failure); }
-        } }); } catch (Exception expected) { failed = true; }
+        } }, false); } catch (Exception expected) { failed = true; }
         check(failed, "Broken persistent registration was reported as successful"); registryEvents.validate(false); stagingGone(registryStore);
         Files.delete(new File(registryStore.root(), "registry.json").toPath());
-        check(registryStore.installBundled(LIVE, null).getBoolean("installed"), "Registration failure prevented a clean verified retry");
+        check(registryStore.installBundled(LIVE, null, false).getBoolean("installed"), "Registration failure prevented a clean verified retry");
     }
     private static void callbacksKeepThePackageMutationGateHeld() throws Exception {
         final ToolchainStore store = new Payload().store("gate"); final Throwable[] failure = new Throwable[1]; final boolean[] tested = new boolean[1];
         store.installBundled(LIVE, new EmbeddedToolchain.ProgressListener() { public void onProgress(EmbeddedToolchain.Progress progress) {
             if (tested[0] || !"verifying".equals(progress.stage)) return; tested[0] = true;
             Thread other = new Thread(new Runnable() { public void run() {
-                try { store.removeBundled(LIVE); failure[0] = new AssertionError("Progress released the mutation gate"); }
+                try { store.removeBundled(LIVE, null, false); failure[0] = new AssertionError("Progress released the mutation gate"); }
                 catch (IllegalStateException expected) { } catch (Throwable error) { failure[0] = error; }
             } }); other.start();
             try { other.join(2000); if (other.isAlive()) throw new AssertionError("Busy mutation did not return promptly"); }
             catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new AssertionError(error); }
-        } });
+        } }, false);
         check(tested[0] && failure[0] == null, "Cross-thread package deletion bypassed the installer");
     }
     private static void progressSnapshotsAreImmutable() throws Exception {
         for (Field field : EmbeddedToolchain.Progress.class.getFields()) check(Modifier.isFinal(field.getModifiers()), "Progress fields can change after delivery");
         Payload payload = new Payload(); Events events = new Events();
-        ToolkitTool tool = new ToolkitTool(new ShellTool(false, root.getPath(), null), payload.store("toolkit"), root.getPath(), null, "arm64-v8a");
+        ToolkitTool tool = new ToolkitTool(new ShellTool(false, root.getPath(), null), payload.store("toolkit"), root.getPath(), null, "arm64-v8a", false);
         check(tool.installBundled(events).getBoolean("installed"), "Toolkit/UI bridge did not forward installation progress"); events.validate(true);
         check(events.values.get(0).completed == 0 && events.values.get(0).total == 0, "The initial immutable snapshot was mutated during installation");
     }

@@ -129,7 +129,7 @@ public final class ToolkitDiagnosticsRegressionTest {
                         ? clientOutput : "exit=0\nobjection: 1.12.5\n";
             }
         };
-        toolkit = new ToolkitTool(probe, store, project.getPath(), temporary, "arm64-v8a");
+        toolkit = new ToolkitTool(probe, store, project.getPath(), temporary, "arm64-v8a", false);
         try {
             int passed = 0;
             for (String name : new String[]{"modelMetadataOmitsBundledBootstrapWithoutChangingExecution", "customConfigurationRemainsVisible",

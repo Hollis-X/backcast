@@ -49,7 +49,7 @@ public final class EmbeddedToolchainRegressionTest {
         } }, manifest);
     }
     private static ToolkitTool toolkit(ToolchainStore store) {
-        return new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a");
+        return new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a", false);
     }
     private static File apktoolJar(ToolchainStore.Launcher launcher) {
         int classpath = launcher.prefix.indexOf("-cp");
@@ -104,7 +104,7 @@ public final class EmbeddedToolchainRegressionTest {
         check("not_installed".equals(toolkit(arm64).status("apktool").getString("state")), "Probe did not report an uninstalled package");
         check("not_installed".equals(new JSONObject(toolkit(arm64).run(new JSONObject().put("action", "diagnose").put("tool", "apktool"))).getString("state")), "Diagnose installed a package implicitly");
         check("not_installed".equals(new JSONObject(toolkit(arm64).run(new JSONObject().put("action", "run").put("tool", "apktool").put("arguments", new JSONArray().put("--version")))).getString("state")) && releaseReads.get() == opened, "Model invocation downloaded release files");
-        arm64.installBundled(LIVE, null); arm.installBundled(LIVE, null);
+        arm64.installBundled(LIVE, null, false); arm.installBundled(LIVE, null, false);
         for (ToolchainStore preparedStore : new ToolchainStore[]{arm64, arm}) {
             List<File> packagedFiles = new ArrayList<File>(); collect(preparedStore.root(), packagedFiles);
             for (File file : packagedFiles) check(!file.getName().endsWith(".pyc") && !file.getPath().contains(File.separator + "__pycache__" + File.separator),
@@ -231,7 +231,7 @@ public final class EmbeddedToolchainRegressionTest {
                 "Upgrade retained a previously registered app_process launcher");
         final ToolchainStore cancelled = new ToolchainStore(new File(root, "cancelled"), packaged(), "arm64-v8a", 30, ANDROID_RUNTIME, downloads());
         final java.util.concurrent.atomic.AtomicInteger checks = new java.util.concurrent.atomic.AtomicInteger(); boolean interrupted = false;
-        try { cancelled.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { if (checks.incrementAndGet() >= 10) throw new InterruptedException("fixture"); } }, null); }
+        try { cancelled.installBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { if (checks.incrementAndGet() >= 10) throw new InterruptedException("fixture"); } }, null, false); }
         catch (InterruptedException expected) { interrupted = true; }
         check(interrupted && noPublishedFiles(cancelled), "Cancelled extraction published software"); checkNoStages(cancelled);
     }
@@ -265,7 +265,7 @@ public final class EmbeddedToolchainRegressionTest {
             }
         }, updated));
         check(upgraded.launcher("apktool", LIVE) == null && oldJar.isFile(), "Upgrade silently downloaded new release bytes");
-        upgraded.installBundled(LIVE, null);
+        upgraded.installBundled(LIVE, null, false);
         File newJar = apktoolJar(upgraded.launcher("apktool", ToolchainFixtures.LIVE));
         check(!oldJar.equals(newJar) && oldJar.isFile() && newJar.isFile(), "Payload update overwrote/deleted a potentially running tool or failed on reused release date");
     }
@@ -333,7 +333,7 @@ public final class EmbeddedToolchainRegressionTest {
 
     private static void compressedReleaseInstallsWithoutApkArchiveReads() throws Exception {
         ArchiveFixture fixture = new ArchiveFixture(); ToolchainStore store = fixture.store("gzip-release", fixture.gzip, fixture.manifest);
-        store.installBundled(LIVE, null); File directory = store.prepareBundled(LIVE);
+        store.installBundled(LIVE, null, false); File directory = store.prepareBundled(LIVE);
         check("verified payload".equals(new String(bytes(new File(directory, "fixture.txt")), "UTF-8")), "Verified release file failed to install");
         checkNoStages(store);
     }
@@ -341,12 +341,12 @@ public final class EmbeddedToolchainRegressionTest {
     private static void corruptedOrUndeclaredReleaseFilesNeverPublish() throws Exception {
         ArchiveFixture fixture = new ArchiveFixture(); byte[] corrupted = fixture.tar.clone(); corrupted[512] ^= 1;
         ToolchainStore tampered = fixture.store("tampered-release", corrupted, fixture.manifest);
-        boolean refused = false; try { tampered.installBundled(LIVE, null); } catch (Exception expected) { refused = true; }
+        boolean refused = false; try { tampered.installBundled(LIVE, null, false); } catch (Exception expected) { refused = true; }
         check(refused && noPublishedFiles(tampered), "Corrupt release skipped its SHA-256 verification"); checkNoStages(tampered);
         JSONObject undeclared = new JSONObject(fixture.manifest.toString());
         for (int i = 0; i < undeclared.getJSONArray("artifacts").length(); i++) undeclared.getJSONArray("artifacts").getJSONObject(i).remove("tar_sha256");
         ToolchainStore noDigest = fixture.store("unverified-release", fixture.gzip, undeclared);
-        refused = false; try { noDigest.installBundled(LIVE, null); } catch (Exception expected) { refused = true; }
+        refused = false; try { noDigest.installBundled(LIVE, null, false); } catch (Exception expected) { refused = true; }
         check(refused && noPublishedFiles(noDigest), "Undeclared fallback archive was accepted"); checkNoStages(noDigest);
     }
 
@@ -354,7 +354,7 @@ public final class EmbeddedToolchainRegressionTest {
         ArchiveFixture fixture = new ArchiveFixture(); JSONObject metadata = new JSONObject(fixture.manifest.toString());
         metadata.getJSONArray("artifacts").getJSONObject(0).put("tar_sha256", "0000000000000000000000000000000000000000000000000000000000000000");
         ToolchainStore store = fixture.store("wrong-inner-sha", fixture.gzip, metadata);
-        boolean refused = false; try { store.installBundled(LIVE, null); } catch (Exception expected) { refused = true; }
+        boolean refused = false; try { store.installBundled(LIVE, null, false); } catch (Exception expected) { refused = true; }
         check(refused && noPublishedFiles(store), "Compressed SHA success bypassed the declared TAR content checksum"); checkNoStages(store);
     }
 

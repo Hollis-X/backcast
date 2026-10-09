@@ -203,7 +203,7 @@ public final class RunHub {
         }
         ShellTool shell = new ShellTool(root, dir, uiMaterials);
         return new ToolkitSession(new ToolkitTool(shell, toolchains, dir, uiMaterials,
-                android.os.Build.CPU_ABI), uiMaterials);
+                android.os.Build.CPU_ABI, root), uiMaterials);
     }
 
     public static final class ToolkitSession {
@@ -529,7 +529,7 @@ public final class RunHub {
         next.register(new EditTool(dir, root, materials));
         next.register(new WriteTool(dir, root, materials));
         next.register(new TemporaryTool(materials, dir, roots));
-        next.register(new ToolkitTool(shell, toolchains, dir, materials, android.os.Build.CPU_ABI));
+        next.register(new ToolkitTool(shell, toolchains, dir, materials, android.os.Build.CPU_ABI, root));
         McpTools remote = null;
         try { remote = mcpSnapshot == null ? McpTools.register(next, mcp) : McpTools.register(next, mcp, mcpSnapshot); }
         catch (RuntimeException invalid) {

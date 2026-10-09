@@ -12,6 +12,7 @@ public final class ToolkitTool implements Tool {
     private final ShellTool shell;
     private final ToolchainStore store;
     private final String abi;
+    private final boolean allowRootCleanup;
     private String workDir;
     private TemporaryWorkspace temporary;
     private volatile int epoch;
@@ -19,10 +20,11 @@ public final class ToolkitTool implements Tool {
     private ToolchainInstaller.Cancellation installation;
 
     public ToolkitTool(ShellTool shell, ToolchainStore store, String workDir,
-            TemporaryWorkspace temporary, String abi) {
+            TemporaryWorkspace temporary, String abi, boolean allowRootCleanup) {
         if (shell == null || store == null) throw new IllegalArgumentException("工具运行器和私有配置不能为空。");
         this.shell = shell; this.store = store; this.abi = abi;
         this.workDir = workDir; this.temporary = temporary;
+        this.allowRootCleanup = allowRootCleanup;
     }
 
     @Override public String name() { return "toolkit"; }
@@ -168,14 +170,14 @@ public final class ToolkitTool implements Tool {
         }
         try {
             checkEpoch(mine);
-            return store.installBundled(owned, listener);
+            return store.installBundled(owned, listener, allowRootCleanup);
         } finally {
             synchronized (installationLock) { if (installation == owned) installation = null; }
         }
     }
-    public JSONObject removeBundled() throws Exception {
+    public JSONObject removeBundled(EmbeddedToolchain.ProgressListener listener) throws Exception {
         final int mine = epoch;
-        return store.removeBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } });
+        return store.removeBundled(new ToolchainInstaller.Cancellation() { public void check() throws Exception { checkEpoch(mine); } }, listener, allowRootCleanup);
     }
 
     public JSONObject status(String id) throws Exception {

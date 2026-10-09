@@ -98,7 +98,6 @@
     <string name="toolkit_install_package">下载并安装工具包</string>
     <string name="toolkit_remove_package">删除已安装工具包</string>
     <string name="toolkit_not_installed">尚未安装</string>
-    <string name="toolkit_removed">已删除，可重新下载安装</string>
     <string name="toolkit_installed">已安装，尚未探测</string>
     <string name="toolkit_busy">工具正在执行，稍后再管理</string>
     <string name="toolkit_version">工具包版本</string>
@@ -106,7 +105,11 @@
     <string name="toolkit_installing">正在下载并安装工具包…</string>
     <string name="toolkit_root_note">跨应用动态分析需要 root，设备授权结果以实际执行为准</string>
     <string name="toolkit_bundle_bytes">已安装大小：%1$s</string>
+    <string name="toolkit_bundle_size_unavailable">已安装大小暂不可读取</string>
     <string name="toolkit_progress_preparing">正在准备安装…</string>
+    <string name="toolkit_progress_remove_preparing">正在统计要删除的工具文件…</string>
+    <string name="toolkit_progress_removing">删除工具文件</string>
+    <string name="toolkit_progress_removed">工具包删除完成</string>
     <string name="toolkit_progress_value">%1$d%% · %2$s</string>
     <string name="toolkit_progress_checking">检查工具包</string>
     <string name="toolkit_progress_probing">选择可用下载源</string>
@@ -115,11 +118,12 @@
     <string name="toolkit_progress_switching">切换下载源并续传</string>
     <string name="toolkit_progress_verifying">校验工具包</string>
     <string name="toolkit_progress_bytes">%1$s / %2$s</string>
+    <string name="toolkit_progress_files">%1$d / %2$d 项</string>
     <string name="toolkit_progress_unpacking">释放工具和运行依赖</string>
     <string name="toolkit_progress_publishing">完成工具文件安装</string>
     <string name="toolkit_progress_registering">登记工具配置</string>
     <string name="toolkit_progress_complete">工具包安装完成</string>
-    <string name="toolkit_progress_refresh_failed">更新工具状态失败：%1$s</string>
+    <string name="toolkit_progress_refresh_failed">更新工具状态失败，详细原因已记录。</string>
     <string name="toolkit_progress_common">公共工具</string>
     <string name="toolkit_progress_device">当前设备工具</string>
     <string name="toolkit_progress_phase_artifact">%1$s · %2$s</string>

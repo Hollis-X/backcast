@@ -20,7 +20,7 @@ public final class EmbeddedToolchain {
     public static final class Progress {
         public final String stage, artifact;
         public final long completed, total;
-        private Progress(String stage, String artifact, long completed, long total) {
+        Progress(String stage, String artifact, long completed, long total) {
             this.stage = stage; this.artifact = artifact; this.completed = completed; this.total = total;
         }
         public int percent() {
@@ -90,10 +90,13 @@ public final class EmbeddedToolchain {
         File nativeDir = new File(store.root(), "builtin-" + abi + "-" + version + "-" + nativeTools.getString("sha256").substring(0, 16));
         boolean installed = verified(commonDir, common.getString("sha256")) && verified(nativeDir, nativeTools.getString("sha256"));
         boolean removed = store.bundledRemoved();
-        return new JSONObject().put("state", removed ? "removed" : installed ? "installed" : "not_installed")
+        long commonBytes = installed && !removed ? store.payloadBytes(commonDir) : 0;
+        long nativeBytes = installed && !removed ? store.payloadBytes(nativeDir) : 0;
+        long bytes = commonBytes < 0 || nativeBytes < 0 ? -1 : commonBytes + nativeBytes;
+        return new JSONObject().put("state", installed && !removed ? "installed" : "not_installed")
                 .put("installed", installed && !removed).put("storage", store.root().getPath()).put("abi", abi)
                 .put("version", version).put("manifest", new JSONObject(data.toString()))
-                .put("installed_bytes", installed ? common.optLong("tar_bytes") + nativeTools.optLong("tar_bytes") : 0);
+                .put("installed_bytes", Math.max(0, bytes)).put("installed_size_unknown", bytes < 0);
     }
 
     private boolean verified(File directory, String digest) throws Exception {

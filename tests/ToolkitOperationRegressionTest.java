@@ -96,7 +96,7 @@ public final class ToolkitOperationRegressionTest {
         ShellTool failing = new ShellTool(false, project.getPath(), temporary) {
             @Override String runProgram(ToolchainStore.Launcher launcher, List<String> args, boolean temp, int timeout, int epoch) { return output[0]; }
         };
-        ToolkitTool target = new ToolkitTool(failing, store, project.getPath(), temporary, "arm64-v8a");
+        ToolkitTool target = new ToolkitTool(failing, store, project.getPath(), temporary, "arm64-v8a", false);
         ToolchainFixtures.configure(store, "objection", new File(root, "objection").getPath(), null);
         for (String override : new String[]{"--host=192.0.2.1", "-h192.0.2.1", "--port=1234", "-P1234", "--network",
                 "-N", "--local", "-L", "--serial=remote", "-Sremote", "-dN"}) {
@@ -169,7 +169,7 @@ public final class ToolkitOperationRegressionTest {
         root = Files.createTempDirectory("backcast-toolkit-operation-tests-").toFile(); project = new File(root, "project"); project.mkdir();
         input = new File(project, "sample.so"); Files.copy(new File("/bin/ls").toPath(), input.toPath());
         temporary = new TemporaryWorkspace(project.getPath(), false, new File(root, "private/materials"), 1); temporary.beginTurn();
-        store = new ToolchainStore(new File(root, "private/toolchains"), null, "", 0); toolkit = new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a");
+        store = new ToolchainStore(new File(root, "private/toolchains"), null, "", 0); toolkit = new ToolkitTool(new ShellTool(false, project.getPath(), temporary), store, project.getPath(), temporary, "arm64-v8a", false);
         int passed = 0;
         try {
             for (String test : new String[]{"rabinInfoImportsAndEntrypointsAreDistinctFromRadareScripts", "radareAnalysisAndFiltersAreAllowedWhileExecutionAndWritingAreRejected",

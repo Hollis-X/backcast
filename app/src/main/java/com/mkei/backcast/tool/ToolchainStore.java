@@ -95,10 +95,11 @@ public final class ToolchainStore {
 
     public JSONObject packageStatus() throws Exception {
         if (embedded == null) return new JSONObject().put("state", "unconfigured").put("installed", false);
-        return embedded.packageStatus().put("busy", operations.getReadLockCount() > 0 || operations.isWriteLocked());
+        return embedded.packageStatus().put("busy", operations.getReadLockCount() > 0 || operations.isWriteLocked())
+                .put("can_remove", !releasedBundles().isEmpty() || !downloadFiles().isEmpty());
     }
 
-    public JSONObject installBundled(final ToolchainInstaller.Cancellation cancellation, final EmbeddedToolchain.ProgressListener listener) throws Exception {
+    public JSONObject installBundled(final ToolchainInstaller.Cancellation cancellation, final EmbeddedToolchain.ProgressListener listener, boolean allowRootCleanup) throws Exception {
         cancellation.check();
         if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
         try {
@@ -108,7 +109,7 @@ public final class ToolchainStore {
                 embedded.resetPrepared();
                 // A cancelled deletion may leave only part of a verified
                 // directory; never treat that receipt as a complete install.
-                for (File file : releasedBundles()) { cancellation.check(); removeManaged(file, cancellation); }
+                for (File file : releasedBundles()) { cancellation.check(); removeManaged(file, cancellation, null, allowRootCleanup); }
             }
             synchronized (this) { JSONObject data = load(); data.put("bundled_removed", false); save(data); }
             try {
@@ -131,12 +132,18 @@ public final class ToolchainStore {
         } finally { operations.writeLock().unlock(); }
     }
 
-    public JSONObject removeBundled(ToolchainInstaller.Cancellation cancellation) throws Exception {
+    public JSONObject removeBundled(ToolchainInstaller.Cancellation cancellation, EmbeddedToolchain.ProgressListener listener, boolean allowRootCleanup) throws Exception {
         cancellation.check();
         if (!operations.writeLock().tryLock()) throw new IllegalStateException("工具正在执行，暂时不能安装或删除工具包。");
         try {
             if (embedded == null) throw new IllegalArgumentException("当前构建没有工具包清单。");
             List<File> removable = releasedBundles();
+            List<File> downloads = downloadFiles();
+            RemovalProgress progress = new RemovalProgress(listener);
+            for (File file : removable) progress.total += countManaged(file, cancellation, allowRootCleanup);
+            for (File file : downloads) progress.total += countManaged(file, cancellation, allowRootCleanup);
+            File downloadDirectory = managed(new File(root, ".downloads").getPath());
+            if (downloadDirectory.isDirectory() && downloadDirectory.list().length == downloads.size()) progress.total++;
             cancellation.check();
             // Disable implicit installation before deletion, including interrupted deletion.
             synchronized (this) {
@@ -151,9 +158,20 @@ public final class ToolchainStore {
                 data.put("bundled_removed", true); save(data);
             }
             embedded.resetPrepared();
-            for (File file : removable) { cancellation.check(); removeManaged(file, cancellation); }
-            removeDownloads(cancellation);
-            return packageStatus();
+            progress.emit(true);
+            for (File file : removable) { cancellation.check(); removeManaged(file, cancellation, progress, allowRootCleanup); }
+            for (File file : downloads) { cancellation.check(); removeManaged(file, cancellation, progress, allowRootCleanup); }
+            if (downloadDirectory.isDirectory() && downloadDirectory.list().length == 0) {
+                cancellation.check();
+                if (!downloadDirectory.delete()) throw new IOException("无法删除工具包下载缓存目录。");
+                progress.advance(1);
+            }
+            cancellation.check();
+            JSONObject status = packageStatus();
+            if (status.optBoolean("installed") || status.optLong("installed_bytes") != 0 || status.optBoolean("can_remove"))
+                throw new IOException("工具包仍有文件未清理，删除尚未完成。");
+            progress.finish();
+            return status;
         } finally { operations.writeLock().unlock(); }
     }
 
@@ -165,7 +183,8 @@ public final class ToolchainStore {
             if (!file.getName().matches("builtin-(?:common|arm64-v8a|armeabi-v7a)-[A-Za-z0-9._-]+-[0-9a-f]{16}")) continue;
             managed(file.getPath());
             File receipt = managed(new File(file, ".verified-sha256").getPath());
-            if (!receipt.isFile() || !new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8").matches("[0-9a-f]{64}")) {
+            String digest = receipt.isFile() ? new String(ToolPaths.readBytes(receipt, 128, false), "UTF-8") : "";
+            if (!digest.matches("[0-9a-f]{64}") || !file.getName().endsWith("-" + digest.substring(0, 16))) {
                 throw new IOException("私有工具包缺少校验记录，拒绝删除：" + file.getName());
             }
             removable.add(file);
@@ -173,36 +192,117 @@ public final class ToolchainStore {
         return removable;
     }
 
-    private void removeManaged(File file, ToolchainInstaller.Cancellation cancellation) throws Exception {
+    private void removeManaged(File file, ToolchainInstaller.Cancellation cancellation, RemovalProgress progress, boolean allowRootCleanup) throws Exception {
         cancellation.check(); managed(file.getPath());
+        if (file.isDirectory()) makeRemovableDirectory(file, cancellation, allowRootCleanup);
         File[] children = file.listFiles();
         if (children != null) {
             File receipt = null;
             for (File child : children) {
                 if (".verified-sha256".equals(child.getName())) receipt = child;
-                else removeManaged(child, cancellation);
+                else removeManaged(child, cancellation, progress, allowRootCleanup);
             }
             // Keep ownership evidence until the directory is empty so a
             // cancelled deletion can be resumed by the next remove request.
             if (receipt != null) {
+                cancellation.check();
                 managed(receipt.getPath());
+                byte[] ownership = ToolPaths.readBytes(receipt, 128, false);
                 if (!receipt.delete()) throw new IOException("无法删除私有工具校验记录。");
+                // Keep receipt and its directory as one cancellation unit. If
+                // rmdir fails, restore ownership for a later cleanup attempt.
+                if (!file.delete()) {
+                    ToolPaths.writeBytes(receipt, ownership, false);
+                    throw new IOException("无法删除私有工具目录：" + file.getName());
+                }
+                if (progress != null) progress.advance(2);
+                return;
             }
         }
         if (file.exists() && !file.delete()) throw new IOException("无法删除私有工具文件：" + file.getName());
+        if (progress != null) progress.advance(1);
     }
 
-    private void removeDownloads(ToolchainInstaller.Cancellation cancellation) throws Exception {
+    private List<File> downloadFiles() throws Exception {
         File directory = managed(new File(root, ".downloads").getPath());
         File[] files = directory.listFiles();
-        if (files == null) return;
-        for (File file : files) {
-            cancellation.check(); managed(file.getPath());
-            if (file.isFile() && file.getName().matches("[0-9a-f]{64}\\.(?:part|archive)")) {
-                if (!file.delete()) throw new IOException("无法删除工具包下载缓存。");
-            }
+        List<File> downloads = new ArrayList<File>();
+        if (files == null) {
+            if (directory.exists()) throw new IOException("无法读取工具包下载缓存。");
+            return downloads;
         }
-        if (directory.list().length == 0 && !directory.delete()) throw new IOException("无法删除工具包下载缓存目录。");
+        for (File file : files) {
+            if (!file.getName().matches("[0-9a-f]{64}\\.(?:part|archive)")) continue;
+            managed(file.getPath());
+            if (!file.isFile()) throw new IOException("工具包下载缓存不是普通文件。");
+            downloads.add(file);
+        }
+        return downloads;
+    }
+
+    long payloadBytes(File file) throws Exception {
+        managed(file.getPath());
+        if (file.isFile()) return ".verified-sha256".equals(file.getName()) ? 0 : file.length();
+        File[] children = file.listFiles();
+        if (children == null) return -1;
+        long bytes = 0;
+        for (File child : children) {
+            long size = payloadBytes(child);
+            if (size < 0) return -1;
+            bytes += size;
+        }
+        return bytes;
+    }
+
+    private long countManaged(File file, ToolchainInstaller.Cancellation cancellation, boolean allowRootCleanup) throws Exception {
+        cancellation.check(); managed(file.getPath());
+        if (file.isFile()) return 1;
+        makeRemovableDirectory(file, cancellation, allowRootCleanup);
+        File[] children = file.listFiles();
+        if (children == null) throw new IOException("无法读取待删除工具目录。");
+        long count = 1;
+        for (File child : children) count += countManaged(child, cancellation, allowRootCleanup);
+        return count;
+    }
+
+    private void makeRemovableDirectory(File directory, ToolchainInstaller.Cancellation cancellation, boolean allowRootCleanup) throws Exception {
+        cancellation.check(); managed(directory.getPath());
+        if (directory.canRead() && directory.canWrite() && directory.canExecute()) return;
+        // TAR extraction creates app-owned directories. A rooted tool may add
+        // its own cache directories later; repair only this verified payload.
+        directory.setReadable(true, true); directory.setWritable(true, true); directory.setExecutable(true, true);
+        if (directory.canRead() && directory.canWrite() && directory.canExecute()) return;
+        File owner = directory;
+        while (owner.getParentFile() != null && !owner.getParentFile().equals(root)) owner = owner.getParentFile();
+        if (owner.getParentFile() == null || !owner.getParentFile().equals(root)
+                || !releasedBundles().contains(owner)) throw new IOException("待删除目录不属于已校验工具包。");
+        if (!allowRootCleanup || !RootShell.available(cancellation)) throw new IOException("工具目录由 root 创建，无法清理；请启用 root 后重试删除。");
+        String rootPath = RootShell.quote(root.getPath()), path = RootShell.quote(directory.getPath());
+        String guard = "[ ! -L " + rootPath + " ] && [ \"$(readlink -f " + rootPath + ")\" = " + rootPath + " ]"
+                + " && [ ! -L " + path + " ] && [ \"$(readlink -f " + path + ")\" = " + path + " ] || exit 1; ";
+        RootShell.Out repaired = RootShell.exec(guard + "owner=$(stat -c '%u:%g' " + rootPath + ") || exit 1; "
+                + "case \"$owner\" in *[!0-9:]*|:*|*:) exit 1;; esac; "
+                + "chown \"$owner\" " + path + " && chmod u+rwx " + path, null, 512, 10000, cancellation);
+        managed(directory.getPath());
+        if (repaired.exit != 0 || !directory.canRead() || !directory.canWrite() || !directory.canExecute())
+            throw new IOException("无法恢复已校验工具目录的清理权限。");
+    }
+
+    private static final class RemovalProgress {
+        final EmbeddedToolchain.ProgressListener listener;
+        long completed, total, notified;
+        RemovalProgress(EmbeddedToolchain.ProgressListener listener) { this.listener = listener; }
+        void advance(long count) { completed += count; emit(completed == count || completed == total); }
+        void emit(boolean force) {
+            if (listener == null) return;
+            long now = System.nanoTime();
+            if (!force && now - notified < 100000000L) return;
+            notified = now;
+            listener.onProgress(new EmbeddedToolchain.Progress("removing", "", completed, total));
+        }
+        void finish() {
+            if (listener != null) listener.onProgress(new EmbeddedToolchain.Progress("complete", "", completed, total));
+        }
     }
 
     public synchronized JSONObject configuration(String id) throws Exception {

@@ -76,7 +76,7 @@ public final class ToolkitRegressionTest {
         ToolchainStore isolated = new ToolchainStore(new File(state, "argument-check"), new EmbeddedToolchain.Assets() {
             public InputStream open(String name) { opened[0]++; throw new AssertionError("Invalid arguments opened assets"); }
         }, "arm64-v8a", 30);
-        ToolkitTool target = new ToolkitTool(shell, isolated, project.getPath(), temporary, "arm64-v8a");
+        ToolkitTool target = new ToolkitTool(shell, isolated, project.getPath(), temporary, "arm64-v8a", false);
         for (JSONObject args : new JSONObject[]{new JSONObject().put("action", "status"),
                 new JSONObject().put("action", "status").put("arguments", new JSONArray().put("apktool")),
                 new JSONObject().put("action", "run")}) {
@@ -95,7 +95,7 @@ public final class ToolkitRegressionTest {
                 return output[0];
             }
         };
-        ToolkitTool target = new ToolkitTool(probe, store, project.getPath(), temporary, "arm64-v8a");
+        ToolkitTool target = new ToolkitTool(probe, store, project.getPath(), temporary, "arm64-v8a", false);
         ToolchainFixtures.configure(store, "apktool", new File(root, "apktool.jar").getPath(), "/usr/bin/java");
         for (String failed : new String[]{"exit=0\n", "exit=0\nKilled \n", "exit=0\nException in thread \"main\" java.lang.ExceptionInInitializerError\n2.9.3\n"}) {
             output[0] = failed;
@@ -173,7 +173,7 @@ public final class ToolkitRegressionTest {
                 started[0]++; return "exit=0\nfixture\n";
             }
         };
-        final ToolkitTool target = new ToolkitTool(counted, store, project.getPath(), temporary, "arm64-v8a");
+        final ToolkitTool target = new ToolkitTool(counted, store, project.getPath(), temporary, "arm64-v8a", false);
         ToolchainFixtures.configure(store, "readelf", "/usr/bin/readelf", null);
         for (final String action : new String[]{"run", "status"}) {
             final String[] response = new String[1];
@@ -286,7 +286,7 @@ public final class ToolkitRegressionTest {
         store = new ToolchainStore(new File(state, "toolchains"), null, "", 0);
         temporary = new TemporaryWorkspace(project.getPath(), false, new File(state, "temporary-workspaces"), 1);
         temporary.beginTurn(); shell = new ShellTool(false, project.getPath(), temporary);
-        toolkit = new ToolkitTool(shell, store, project.getPath(), temporary, "arm64-v8a");
+        toolkit = new ToolkitTool(shell, store, project.getPath(), temporary, "arm64-v8a", false);
         try {
             for (String name : new String[]{"catalogDoesNotPretendToolsAreInstalled", "legacyConfigurationPersistsAndHiddenMutationsAreRejected",
                     "apktoolNeedsRealJvm", "actualExternalExecutableUsesStructuredArguments", "missingToolsReturnActionableErrorsBeforeOpeningAssets",

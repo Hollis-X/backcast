@@ -50,7 +50,7 @@ public final class ToolInstallProgressUiRegressionTest {
         Map<String,List<String>> ui = members(root.resolve("app/src/main/java/com/mkei/backcast/ToolConfigActivity.java"), "ToolConfigActivity");
         Map<String,List<String>> backend = members(root.resolve("app/src/main/java/com/mkei/backcast/tool/EmbeddedToolchain.java"), "EmbeddedToolchain");
         StringBuilder source = new StringBuilder("import java.util.*;import java.util.concurrent.*;"
-                + "class Activity{protected void onStop(){}protected void onDestroy(){}}"
+                + "class Activity{protected void onResume(){}protected void onStop(){}protected void onDestroy(){}}"
                 + "public class ProgressUiFixture extends Activity{"
                 + "static class View{static final int VISIBLE=0,GONE=8;int visibility=GONE;void setVisibility(int v){visibility=v;}}"
                 + "static class ProgressBar extends View{int progress,max;boolean indeterminate;int mutations;"
@@ -61,17 +61,20 @@ public final class ToolInstallProgressUiRegressionTest {
                 + "synchronized void postDelayed(Runnable r,long d){tasks.add(r);delay=d;}synchronized int size(){return tasks.size();}"
                 + "void drain(){List<Runnable> current;synchronized(this){current=new ArrayList<Runnable>(tasks);tasks.clear();}for(Runnable r:current)r.run();}}"
                 + "static class JSONObject{Map<String,Object> values=new HashMap<String,Object>();JSONObject put(String n,Object v){values.put(n,v);return this;}"
-                + "String optString(String n){Object v=values.get(n);return v==null?\"\":String.valueOf(v);}boolean optBoolean(String n){return Boolean.TRUE.equals(values.get(n));}}"
+                + "String optString(String n){Object v=values.get(n);return v==null?\"\":String.valueOf(v);}boolean optBoolean(String n){return Boolean.TRUE.equals(values.get(n));}long optLong(String n){Object v=values.get(n);return v instanceof Number?((Number)v).longValue():0;}}"
                 + "static class android{static class text{static class format{static class Formatter{static String formatFileSize(Object context,long bytes){return bytes+\" B\";}}}}}"
                 + "static class R{static class string{static final int toolkit_loading=1,toolkit_cancelled=2,toolkit_failed=3,"
                 + "toolkit_progress_preparing=4,toolkit_progress_value=5,toolkit_progress_checking=6,toolkit_progress_verifying=7,"
                 + "toolkit_progress_unpacking=8,toolkit_progress_publishing=9,toolkit_progress_registering=10,toolkit_progress_complete=11,"
                 + "toolkit_progress_refresh_failed=12,toolkit_progress_common=13,toolkit_progress_device=14,toolkit_progress_phase_artifact=15,"
-                + "toolkit_progress_probing=16,toolkit_progress_downloading=17,toolkit_progress_resuming=18,toolkit_progress_switching=19,toolkit_progress_bytes=20;}}"
+                + "toolkit_progress_probing=16,toolkit_progress_downloading=17,toolkit_progress_resuming=18,toolkit_progress_switching=19,toolkit_progress_bytes=20,"
+                + "toolkit_progress_remove_preparing=21,toolkit_progress_removing=22,toolkit_progress_removed=23,toolkit_progress_files=24,toolkit_bundle_bytes=25,toolkit_busy=26,"
+                + "toolkit_not_installed=27,toolkit_installed=28,toolkit_ready=29,toolkit_unsupported=30,toolkit_configured=31,toolkit_needs_runtime=32,toolkit_unconfigured=33,toolkit_unavailable=34,toolkit_bundle_size_unavailable=35;}}"
                 + "static String getLabel(int id){String[] labels={\"\",\"loading\",\"cancelled\",\"failed\",\"preparing\",\"%1$d%% · %2$s\","
-                + "\"checking\",\"verifying\",\"unpacking\",\"publishing\",\"registering\",\"complete\",\"refresh error: %1$s\",\"common\",\"device\",\"%1$s · %2$s\","
-                + "\"probing\",\"downloading\",\"resuming\",\"switching\",\"%1$s / %2$s\"};return labels[id];}"
-                + "String getString(int id,Object...args){return String.format(java.util.Locale.US,getLabel(id),args);}String toolkitState(String s){return s;}"
+                + "\"checking\",\"verifying\",\"unpacking\",\"publishing\",\"registering\",\"complete\",\"refresh error\",\"common\",\"device\",\"%1$s · %2$s\","
+                + "\"probing\",\"downloading\",\"resuming\",\"switching\",\"%1$s / %2$s\",\"counting files\",\"removing\",\"removed\",\"%1$d / %2$d items\",\"installed size: %1$s\",\"busy\","
+                + "\"not installed\",\"installed\",\"ready\",\"unsupported\",\"configured\",\"needs runtime\",\"unconfigured\",\"unavailable\",\"size unavailable\"};return labels[id];}"
+                + "String getString(int id,Object...args){return String.format(java.util.Locale.US,getLabel(id),args);}"
                 + "boolean activityDestroyed,finishing,progressTerminal,batchTerminal,busy;ToolkitOperation active;"
                 + "String probeContext=\"\";Map<String,JSONObject> probeResults=new HashMap<String,JSONObject>();void finishBatchProbe(JSONObject result){}"
                 + "View installProgressContainer=new View(),batchProgressContainer=new View();ProgressBar installProgress=new ProgressBar();"
@@ -85,24 +88,29 @@ public final class ToolInstallProgressUiRegressionTest {
                 + "static class EmbeddedToolchain{" + backend.get("Progress").get(0) + "}"
                 + "JSONObject toolkitArguments(String a,String id){return new JSONObject().put(\"action\",a);}String toolId=\"\";"
                 + "ToolkitOperation requestToolkit(JSONObject args,ToolkitResult callback){ToolkitOperation operation=new ToolkitOperation();"
-                + "operation.installing=\"package_install\".equals(args.optString(\"action\"));toolkitOperations.add(operation);"
+                + "operation.installing=\"package_install\".equals(args.optString(\"action\"));operation.removing=\"package_remove\".equals(args.optString(\"action\"));toolkitOperations.add(operation);"
                 + "response=callback;action=args.optString(\"action\");return operation;}"
                 + "public void start(){manage(\"package_install\",R.string.toolkit_loading);}"
+                + "public void remove(){manage(\"package_remove\",R.string.toolkit_loading);}"
                 + "public Object operation(){return active;}public void replaceOperation(){active=new ToolkitOperation();active.installing=true;}"
                 + "public void event(Object operation,String stage,String artifact,long completed,long total){"
                 + "queueInstallProgress((ToolkitOperation)operation,new EmbeddedToolchain.Progress(stage,artifact,completed,total));}"
                 + "public void drain(){main.drain();}public int queued(){return main.size();}public long delay(){return main.delay;}"
                 + "public int percent(){return installProgress.progress;}public boolean unknown(){return installProgress.indeterminate;}"
                 + "public String label(){return installProgressText.text;}public String status(){return operationStatus.text;}"
+                + "public boolean statusVisible(){return operationStatus.visibility==View.VISIBLE;}"
                 + "public boolean visible(){return installProgressContainer.visibility==View.VISIBLE;}public boolean busy(){return busy;}"
                 + "public boolean terminal(){return progressTerminal;}public int mutations(){return installProgress.mutations;}"
                 + "public String action(){return action;}public int renders(){return renders;}"
                 + "public void respond(String state,boolean installed,String error){response.apply(new JSONObject().put(\"state\",state)"
                 + ".put(\"installed\",installed).put(\"error\",error));}"
+                + "public void respondSized(String state,boolean installed,String error,long size){response.apply(new JSONObject().put(\"state\",state)"
+                + ".put(\"installed\",installed).put(\"error\",error).put(\"installed_bytes\",size));}"
+                + "public String summary(String state,boolean installed,long size){return packageSummary(new JSONObject().put(\"state\",state).put(\"installed\",installed).put(\"installed_bytes\",size),\"private storage\");}"
                 + "public void finishing(){finishing=true;}public void cancel(){cancelActiveToolkit();}"
-                + "public void stop(){onStop();}public void destroy(){onDestroy();}");
+                + "public void resume(){onResume();}public void stop(){onStop();}public void destroy(){onDestroy();}");
         for (String name : List.of("ToolkitOperation", "ToolkitResult", "begin", "beginInstallProgress", "queueInstallProgress", "applyInstallProgress",
-                "installProgressPhase", "finishInstallProgress", "finishOperation", "cancelActiveToolkit", "manage", "loadTools", "onStop", "onDestroy")) {
+                "installProgressPhase", "finishInstallProgress", "finishOperation", "cancelActiveToolkit", "manage", "loadTools", "packageSummary", "toolkitState", "onResume", "onStop", "onDestroy")) {
             check(ui.containsKey(name), "Missing real progress UI member " + name);
             for (String member : ui.get(name)) source.append(member);
         }
@@ -168,7 +176,7 @@ public final class ToolInstallProgressUiRegressionTest {
             check((int)call(successful,"percent")==99,"Backend completion bypassed UI-session cleanup and success result");
             call(successful,"respond","installed",true,"");
             check((int)call(successful,"percent")==100&&(boolean)call(successful,"terminal")&&call(successful,"action").equals("list"),"Accepted installation did not finish at 100 and refresh inventory");
-            check(call(successful,"status").equals("complete")&&call(successful,"label").equals("100% · complete"),"Inventory refresh immediately swallowed the completion summary");
+            check(call(successful,"status").equals("complete")&&call(successful,"label").equals("100% · complete")&&!(boolean)call(successful,"statusVisible"),"Successful operation retained duplicate or old failure status");
             event(successful,successfulOperation,"unpacking","any",60,100);call(successful,"drain");
             check((int)call(successful,"percent")==100,"A completed operation's delayed event overwrote the inventory refresh/terminal state");
             call(successful,"respond","",false,"");
@@ -182,6 +190,44 @@ public final class ToolInstallProgressUiRegressionTest {
                 if(failure.equals("error"))check(call(failed,"status").equals("cleanup failed"),"Cleanup failure evidence was hidden");
             }
             pass("cancelled, cleanup-failed and unconfirmed installs never claim 100%");
+
+            Object removal=type.getConstructor().newInstance();call(removal,"remove");Object removalOperation=call(removal,"operation");
+            check((boolean)call(removal,"visible")&&(boolean)call(removal,"unknown")&&call(removal,"label").equals("counting files"),"Removal has no initial progress or wrong preparation label");
+            event(removal,removalOperation,"removing","",400,1000);call(removal,"drain");
+            check((int)call(removal,"percent")==40&&call(removal,"label").equals("40% · removing\n400 / 1000 items"),"Removal progress invented byte counts or failed to render actual deleted items");
+            event(removal,removalOperation,"complete","",1000,1000);call(removal,"drain");
+            check((int)call(removal,"percent")==99,"Deletion claimed completion before accepted cleanup result");
+            call(removal,"respondSized","not_installed",false,"",0L);
+            check((int)call(removal,"percent")==100&&call(removal,"label").equals("100% · removed")&&!(boolean)call(removal,"statusVisible")&&call(removal,"action").equals("list"),"Confirmed removal failed to refresh inventory or clear operation state");
+            event(removal,removalOperation,"removing","",400,1000);call(removal,"drain");
+            check((int)call(removal,"percent")==100,"Late removal progress replaced accepted completion");
+            pass("deletion reports real item counts and requires accepted cleanup before 100%");
+
+            for(String outcome:List.of("error","cancelled","incomplete")){
+                Object failed=type.getConstructor().newInstance();call(failed,"remove");Object failedOperation=call(failed,"operation");
+                event(failed,failedOperation,"removing","",200,1000);call(failed,"drain");
+                if(outcome.equals("cancelled"))call(failed,"cancel");
+                else call(failed,"respondSized",outcome.equals("incomplete")?"not_installed":outcome,false,outcome.equals("error")?"failed":"",outcome.equals("incomplete")?1L:0L);
+                check((int)call(failed,"percent")<100&&call(failed,"action").equals("list"),"Unconfirmed deletion succeeded or failed to reread residue: "+outcome);
+                event(failed,failedOperation,"complete","",1000,1000);call(failed,"drain");
+                check((int)call(failed,"percent")<100,"Cancelled/deleted operation accepted a late 100% callback");
+                call(failed,"start");
+                check((int)call(failed,"percent")==0&&call(failed,"label").equals("preparing")&&call(failed,"status").equals("loading"),"Next install retained previous deletion failure or progress");
+            }
+            pass("failed or cancelled deletion refreshes residue and the next operation starts clean");
+
+            Object inventory=type.getConstructor().newInstance();
+            check(call(inventory,"summary","installed",true,12345L).toString().contains("installed size: 12345 B"),"Installed package did not display supplied measured bytes");
+            for(String state:List.of("removed","not_installed")){
+                String text=call(inventory,"summary",state,false,270000000L).toString();
+                check(text.equals("not installed\nprivate storage")&&!text.contains("270"),"Uninstalled package displayed removed-state label or stale installed size");
+            }
+            pass("inventory uses measured installed bytes and never shows stale size for uninstalled packages");
+
+            Object reopened=start(type);call(reopened,"respond","error",false,"old failed install");call(reopened,"respond","",false,"");
+            call(reopened,"resume");
+            check(!(boolean)call(reopened,"visible")&&call(reopened,"label").equals("")&&call(reopened,"status").equals("loading"),"Reopened tools page retained old operation failure and percentage");
+            pass("reopening the configuration page clears the previous operation status and progress");
 
             for(String boundary:List.of("replaceOperation","finishing","cancel","stop","destroy")){
                 Object stale=start(type),staleOperation=call(stale,"operation");event(stale,staleOperation,"unpacking","any",70,100);

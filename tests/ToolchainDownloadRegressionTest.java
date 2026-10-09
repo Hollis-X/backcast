@@ -244,8 +244,8 @@ public final class ToolchainDownloadRegressionTest {
     private static void closingAnUnrelatedToolSessionDoesNotCancelAnInstallation() throws Exception {
         final Server server = new Server(payload()); server.blockDownload = true;
         ToolchainStore store = installationStore(server);
-        final ToolkitTool installer = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
-        ToolkitTool unrelated = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
+        final ToolkitTool installer = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a", false);
+        ToolkitTool unrelated = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a", false);
         Throwable[] failure = new Throwable[1]; Thread worker = new Thread(() -> {
             try { installer.installBundled(null); } catch (Throwable error) { failure[0] = error; }
         });
@@ -275,8 +275,8 @@ public final class ToolchainDownloadRegressionTest {
         PausedInstallLock lock = new PausedInstallLock();
         java.lang.reflect.Field field = ToolchainStore.class.getDeclaredField("operations");
         field.setAccessible(true); field.set(store, lock);
-        final ToolkitTool owner = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
-        final ToolkitTool loser = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
+        final ToolkitTool owner = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a", false);
+        final ToolkitTool loser = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a", false);
         Throwable[] ownerFailure = new Throwable[1], loserFailure = new Throwable[1];
         Thread worker = new Thread(() -> { try { owner.installBundled(null); } catch (Throwable error) { ownerFailure[0] = error; } });
         Thread contender = new Thread(() -> { try { loser.installBundled(null); } catch (Throwable error) { loserFailure[0] = error; } });
@@ -301,7 +301,7 @@ public final class ToolchainDownloadRegressionTest {
     private static void repeatedInstallOnOneSessionKeepsTheOriginalCancellationOwner() throws Exception {
         final Server server = new Server(payload()); server.blockDownload = true;
         ToolchainStore store = installationStore(server);
-        final ToolkitTool owner = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
+        final ToolkitTool owner = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a", false);
         Throwable[] failure = new Throwable[1];
         Thread worker = new Thread(() -> { try { owner.installBundled(null); } catch (Throwable error) { failure[0] = error; } });
         try {

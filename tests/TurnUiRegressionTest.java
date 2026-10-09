@@ -222,7 +222,8 @@ public final class TurnUiRegressionTest {
                 + "if(block)while(!cancelled){Thread.sleep(20);}return new JSONObject().put(\"state\",cancelled?\"cancelled\":\"ready\").toString();}"
                 + "JSONObject installBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_install\")));}"
                 + "JSONObject installBundled(EmbeddedToolchain.ProgressListener listener)throws Exception{return installBundled();}"
-                + "JSONObject removeBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_remove\")));}}}"
+                + "JSONObject removeBundled()throws Exception{return new JSONObject(run(new JSONObject().put(\"action\",\"package_remove\")));}"
+                + "JSONObject removeBundled(EmbeddedToolchain.ProgressListener listener)throws Exception{return removeBundled();}}}"
                 + "static class ToolBatchProbe{static class Progress{}interface Listener{void onProgress(Progress p);}"
                 + "static JSONObject run(RunHub.FixtureToolkit toolkit,ToolchainInstaller.Cancellation c,Listener l)throws Exception{c.check();return new JSONObject();}}"
                 + "static class ViewGroup extends View { List<View> children=new ArrayList<View>();"
@@ -262,7 +263,7 @@ public final class TurnUiRegressionTest {
                 + "toolkit_source=29,toolkit_requirements=30,toolkit_path=31,toolkit_runtime=32,toolkit_official_version=33,toolkit_probe_output=34,"
                 + "sub_agents_phase_tool=35,sub_agents_phase_thinking=36,sub_agents_phase_responding=37,sub_agents_phase_reviewing=38,"
                 + "sub_agents_phase_compacting=39,sub_agents_phase_completed=41,sub_agents_phase_model=42,sub_agents_updated=43,"
-                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_removed=48,toolkit_not_installed=49,thinking=50,worked=51,compacting=52,compacted=53; }"
+                + "toolkit_bundled=44,toolkit_unsupported=45,toolkit_version=46,toolkit_installed=47,toolkit_not_installed=49,thinking=50,worked=51,compacting=52,compacted=53; }"
                 + "static class color{static final int text_primary=4,code_bg=5;} static class drawable{static final int bg_bubble_user=5;} static class id{static final int main_root=6,sheet_body=50,sheet_panel=51,sheet_scroll=52;} }"
                 + "static class Gravity{static final int RIGHT=1,CENTER_VERTICAL=2;}"
                 + "static class Resources{int getColor(int v){return v;} Metrics getDisplayMetrics(){return new Metrics();}} static class Metrics{int widthPixels=400,heightPixels=1000;}"
@@ -335,9 +336,9 @@ public final class TurnUiRegressionTest {
         source.append(METHODS.get("Flow"));
         source.append(METHODS.get("ReplayCursor"));
         source.append(METHODS.get("ApprovalRequest"));
-        source.append("void queueInstallProgress(ToolkitOperation op,EmbeddedToolchain.Progress progress){}void finishInstallProgress(JSONObject result){}"
+        source.append("void queueInstallProgress(ToolkitOperation op,EmbeddedToolchain.Progress progress){}void finishInstallProgress(JSONObject result,boolean removing){}"
                 + "void queueBatchProgress(ToolkitOperation op,ToolBatchProbe.Progress progress){}void finishBatchProbe(JSONObject result){}"
-                + "List<Throwable> toolkitFailures=new ArrayList<>();void recordToolkitFailure(JSONObject args,Throwable failure){toolkitFailures.add(failure);}");
+                + "List<Throwable> toolkitFailures=new ArrayList<>();void recordToolkitFailure(JSONObject args,Throwable failure,ToolkitOperation operation){toolkitFailures.add(failure);}");
         source.append(TOOL_METHODS.get("ToolkitOperation"));
         source.append(TOOL_METHODS.get("ToolkitResult"));
         for (String name : Arrays.asList("HISTORY_PAGE_SIZE", "HISTORY_FRAME_SIZE", "BUBBLE_MAX_RATIO")) {

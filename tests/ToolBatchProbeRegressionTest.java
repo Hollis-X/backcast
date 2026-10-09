@@ -40,7 +40,7 @@ public final class ToolBatchProbeRegressionTest {
                     return result.toString();
                 }
             };
-            toolkit = new ToolkitTool(shell, store, project.getPath(), temporary, "arm64-v8a");
+            toolkit = new ToolkitTool(shell, store, project.getPath(), temporary, "arm64-v8a", false);
         }
         void close() { toolkit.abort(); check(temporary.finishTurn() == null, "Independent probe temporary cleanup failed"); }
     }
@@ -91,7 +91,7 @@ public final class ToolBatchProbeRegressionTest {
             public java.io.InputStream open(String name) { throw new AssertionError("Removed tools implicitly opened APK assets"); }
         }, "arm64-v8a", 30);
         store.root().mkdir(); Files.write(new File(store.root(), "registry.json").toPath(), "{\"bundled_removed\":true,\"tools\":{}}".getBytes("UTF-8"));
-        ToolkitTool toolkit = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a");
+        ToolkitTool toolkit = new ToolkitTool(new ShellTool(false, root.getPath(), null), store, root.getPath(), null, "arm64-v8a", false);
         JSONObject result = ToolBatchProbe.run(toolkit, LIVE, null);
         check(result.getInt("ready_count") == 0 && result.getInt("failed_count") == 13, "Deleted tools were claimed ready or restored");
         for (int i = 0; i < result.getJSONArray("results").length(); i++) check("removed".equals(result.getJSONArray("results").getJSONObject(i).getString("state")), "Removed state was concealed");
