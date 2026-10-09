@@ -32,7 +32,8 @@ public class WriteTool implements Tool {
                 + "只用于新文件或整篇重写。改已有文件里的几处用 edit。"
                 + "purpose 必须按真实用途填写：temporary 临时材料、test 正式测试、deliverable 项目文件或交付物。"
                 + "temporary 的相对路径按专用临时目录解析，绝对路径必须在该临时目录内；用完立即 temporary cleanup。"
-                + "test 必须是需要长期保留的正式测试，归类到项目已有测试目录或 tests/，不要把一次性验证脚本标成 test。";
+                + "test 必须是需要长期保留的正式测试，归类到项目已有测试目录或 tests/，不要把一次性验证脚本标成 test。"
+                + ToolPaths.workspaceDescription(workDir, temporary);
     }
 
     @Override

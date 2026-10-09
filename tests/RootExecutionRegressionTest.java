@@ -19,10 +19,91 @@ public final class RootExecutionRegressionTest {
     }
     private static void child(String mode, File directory) throws Exception {
         ShellTool shell = new ShellTool(false, directory.getPath(), null);
+        if ("cleanup-timeout".equals(mode)) {
+            Process owned = new ProcessBuilder("/usr/bin/setsid", "sh", "-c", "sleep 30 & wait").start();
+            ProcessTree tree = new ProcessTree(owned, true);
+            Thread.sleep(60);
+            String stat = new String(Files.readAllBytes(new File("/proc/" + owned.pid() + "/stat").toPath()), "UTF-8");
+            check(tree.observeSupervisor(stat), "Deadline fixture failed to register its isolated supervisor");
+            TemporaryWorkspace materials = new TemporaryWorkspace(directory.getPath(), false, new File(directory, "deadline-materials"), 42);
+            materials.beginTurn(); File temporary = materials.directory();
+            materials.trackProcess(temporary, new TemporaryWorkspace.ProcessCleanup() {
+                public boolean stop() { return tree.stop(); }
+                public boolean stop(long deadline) {
+                    if (!tree.stop(deadline)) throw new IllegalStateException(tree.cleanupFailure());
+                    return true;
+                }
+                public boolean retry(long deadline) {
+                    if (!tree.retryStop(deadline)) throw new IllegalStateException(tree.cleanupFailure());
+                    return true;
+                }
+            });
+            System.setSecurityManager(new SecurityManager() {
+                @Override public void checkPermission(java.security.Permission permission) { }
+                @Override public void checkRead(String path) {
+                    if (path.startsWith("/proc/") && path.endsWith("/stat")) throw new SecurityException("Hidden root proc");
+                }
+            });
+            try {
+                Thread owner = Thread.currentThread();
+                Thread interrupting = new Thread(() -> {
+                    try { Thread.sleep(300); owner.interrupt(); }
+                    catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+                });
+                interrupting.start();
+                long began = System.nanoTime();
+                check(!tree.stop(began + 6000000000L), "Timed-out census incorrectly confirmed exit");
+                check(Thread.interrupted(), "A fresh interrupt during root cleanup was lost");
+                interrupting.join(1000);
+                for (int i = 0; i < 3; i++) check(!tree.stop(System.nanoTime() + 10000000000L), "Repeated unknown stop fabricated confirmation");
+                String failure = materials.finishTurn(System.nanoTime() + 10000000000L);
+                check(failure != null && temporary.isDirectory(), "Timed-out identity census discarded unverified material");
+                check(System.nanoTime() - began < 8000000000L, "Repeated shell stops and immediate lease close restarted the execution cleanup budget");
+                check(new File(directory, "kill-attempted").exists() && owned.waitFor(1, java.util.concurrent.TimeUnit.SECONDS),
+                        "Discovery timeout skipped KILL or left the STOPped supervisor alive");
+                Files.deleteIfExists(new File(directory, "stop-observed").toPath());
+                Files.write(new File(directory, "recovery-allowed").toPath(), new byte[]{1});
+                String recovered = materials.cleanupRecovered();
+                check(recovered == null && !temporary.exists(), "Unknown cleanup was cached as stopped or could not recover: " + recovered);
+                System.out.println("PASS root census timeout is bounded, still attempts KILL and retains retryable material");
+            } finally { System.setSecurityManager(null); owned.destroyForcibly(); }
+            return;
+        }
+        if ("hidden-child".equals(mode)) {
+            File marker = new File(directory, "hidden-child-pid");
+            Process owned = new ProcessBuilder("/usr/bin/setsid", "sh", "-c", "/usr/bin/setsid sh -c 'sleep 30' & child=$!; printf '%s' \"$child\" > "
+                    + RootShell.quote(marker.getPath()) + "; sleep 30").start();
+            long child = -1;
+            try {
+                long until = System.nanoTime() + 2000000000L;
+                while ((!marker.isFile() || marker.length() == 0) && System.nanoTime() < until) Thread.sleep(10);
+                child = Long.parseLong(new String(Files.readAllBytes(marker.toPath()), "UTF-8"));
+                final String hidden = "/proc/" + child + "/stat";
+                System.setSecurityManager(new SecurityManager() {
+                    @Override public void checkPermission(java.security.Permission permission) { }
+                    @Override public void checkRead(String path) { if (hidden.equals(path)) throw new SecurityException("Only detached child identity is hidden"); }
+                });
+                ProcessTree tree = new ProcessTree(owned, true);
+                String leader = new String(Files.readAllBytes(new File("/proc/" + owned.pid() + "/stat").toPath()), "UTF-8");
+                check(tree.observeSupervisor(leader), "Readable root supervisor was not registered");
+                check(tree.stop(), "Readable supervisor with a hidden child could not prove cleanup: " + tree.cleanupFailure());
+                System.setSecurityManager(null);
+                File stat = new File(hidden);
+                if (stat.exists()) {
+                    String value = new String(Files.readAllBytes(stat.toPath()), "UTF-8");
+                    check(value.substring(value.lastIndexOf(')') + 1).trim().charAt(0) == 'Z', "Confirmed cleanup missed a detached hidden child");
+                }
+                System.out.println("PASS readable supervisor still discovers and stops a hidden detached root child");
+            } finally {
+                System.setSecurityManager(null); owned.destroyForcibly();
+                if (child > 1) new ProcessBuilder("sh", "-c", "kill -KILL " + child + " 2>/dev/null || :").start().waitFor();
+            }
+            return;
+        }
         if ("not-root".equals(mode)) {
             File target = new File(directory, "must-not-run-without-root");
             String command = "touch " + RootShell.quote(target.getPath());
-            check(!RootShell.available(), "Non-root UID was accepted as authorization");
+            check(!RootShell.available(LIVE), "Non-root UID was accepted as authorization");
             RootShell.Out result = RootShell.exec(command, null, 100, 2000);
             check(result.exit != 0 && !target.exists(), "Unprivileged su ran a business root command");
             check(rootedShell(shell, command).startsWith("错误：") && !target.exists(), "Shell launched business command despite non-root su");
@@ -39,15 +120,34 @@ public final class RootExecutionRegressionTest {
             final AtomicBoolean stopped = new AtomicBoolean(), ended = new AtomicBoolean();
             RootShell.Out restricted = RootShell.exec("id -u", null, 100, 2000);
             check(restricted.exit == 0, "Hidden /proc root status failed: " + restricted.exit + " " + restricted.stderr);
-            check(RootShell.available(), "Root handshake depended on App access to root /proc");
+            check(RootShell.available(LIVE), "Root handshake depended on App access to root /proc");
             check(RootShell.exec("printf restricted-success", null, 100, 2000).exit == 0, "Hidden /proc root command did not finish");
             Process process = RootShell.start("sleep 30; printf forbidden-late", () -> { if (stopped.get()) throw new InterruptedException(); });
             Thread reader = new Thread(() -> { try { process.getInputStream().read(); } catch (Exception expected) { ended.set(true); } });
             reader.start(); Thread.sleep(150); stopped.set(true); reader.join(3000);
             check(!reader.isAlive() && ended.get(), "Hidden /proc cancellation left root output blocked/recursive");
-            process.destroy(); check(RootShell.available(), "Hidden /proc cancellation corrupted authorization cache");
+            process.destroy(); check(RootShell.available(LIVE), "Hidden /proc cancellation corrupted authorization cache");
+            TemporaryWorkspace materials = new TemporaryWorkspace(directory.getPath(), true,
+                    new File(directory, "restricted-materials"), 41);
+            materials.beginTurn(); File temporary = materials.directory();
+            ShellTool managed = new ShellTool(true, directory.getPath(), materials);
+            String output = rootedShell(managed, "printf rooted-complete");
+            check(output.startsWith("exit=0") && output.contains("rooted-complete"), "Full hidden-proc shell cleanup failed: " + output);
+            // Once the real tree is confirmed gone, neither a revoked transport
+            // nor an interrupted worker should revalidate its old PIDs.
+            File su = new File(new File(directory, "bin"), "su");
+            byte[] originalSu = Files.readAllBytes(su.toPath());
+            Files.write(su.toPath(), "#!/bin/sh\nexit 126\n".getBytes("UTF-8"));
+            Thread.currentThread().interrupt();
+            long cleanupStarted = System.nanoTime();
+            try {
+                check(materials.finishTurn() == null && !temporary.exists(), "Completed root probe depended on root again at lease close");
+                check(Thread.currentThread().isInterrupted(), "Root lease close discarded the cancelled worker interrupt");
+                check(System.nanoTime() - cleanupStarted < 500000000L, "Completed root probe performed fresh root verification");
+            } finally { Thread.interrupted(); Files.write(su.toPath(), originalSu); }
             System.setSecurityManager(null);
-            System.out.println("PASS root handshake and cancellation when Java cannot read /proc"); return;
+            System.out.println("PASS root handshake and cancellation when Java cannot read /proc");
+            System.out.println("PASS complete hidden-proc shell lease closes after root transport revocation and interrupt"); return;
         }
         if ("silent".equals(mode)) {
             for (String command : Arrays.asList("printf hello", "false", "test -f missing.apk", "not_a_backcast_program --version")) {
@@ -62,20 +162,20 @@ public final class RootExecutionRegressionTest {
             File target = new File(directory, "fake-success");
             result = RootShell.exec("cat > " + RootShell.quote(target.getPath()), "actual bytes".getBytes("UTF-8"), 100, 2000);
             check(result.exit != 0 && !target.exists(), "Root write silently succeeded without running");
-            check(!RootShell.available(), "Silent root became available");
+            check(!RootShell.available(LIVE), "Silent root became available");
             File su = new File(new File(directory, "bin"), "su");
             Files.write(su.toPath(), "#!/bin/sh\nexec sh -c \"$2\"\n".getBytes("UTF-8"));
-            check(!RootShell.available(), "Negative root cache repeatedly prompted during its short TTL");
+            check(!RootShell.available(LIVE), "Negative root cache repeatedly prompted during its short TTL");
             java.lang.reflect.Field checkedAt = RootShell.class.getDeclaredField("availableCheckedAt"); checkedAt.setAccessible(true);
             checkedAt.setLong(null, System.nanoTime() - 6000000000L);
-            check(RootShell.available(), "Authorizing root after a failed probe stayed unavailable forever");
+            check(RootShell.available(LIVE), "Authorizing root after a failed probe stayed unavailable forever");
         } else {
             if ("cleanup-silent".equals(mode)) {
-                check(RootShell.available(), "Initial real uid probe failed");
+                check(RootShell.available(LIVE), "Initial real uid probe failed");
                 for (int i = 0; i < 4; i++) {
                     String success = rootedShell(shell, "id");
                     check(success.contains("exit=0\nuid=0"), "Business root command failed: " + success);
-                    check(RootShell.available(), "A cleanup/status failure poisoned successful root authorization at repetition " + i);
+                    check(RootShell.available(LIVE), "A cleanup/status failure poisoned successful root authorization at repetition " + i);
                     RootShell.Out read = RootShell.exec("printf immediately-readable", null, 100, 2000);
                     check(read.exit == 0 && new String(read.stdout, "UTF-8").equals("immediately-readable"), "Root file path failed immediately after root shell cleanup");
                 }
@@ -138,7 +238,10 @@ public final class RootExecutionRegressionTest {
         try {
             check(bin.mkdir(), "No fixture bin");
             File su = new File(bin, "su");
-            Files.write(su.toPath(), ("#!/bin/sh\ncase \"$BACKCAST_TEST_SU\" in\nsilent) exit 0;;\ncleanup-silent) case \"$2\" in *__backcast_root_start_*kill*) exit 0;; esac; exec sh -c \"$2\";;\ndetached) exec 3<&0; sh -c \"$2\" <&3 & exit 0;;\n*) exec sh -c \"$2\";;\nesac\n").getBytes("UTF-8"));
+            Files.write(su.toPath(), ("#!/bin/sh\ncase \"$BACKCAST_TEST_SU\" in\nsilent) exit 0;;\ncleanup-silent) case \"$2\" in *__backcast_root_start_*kill*) exit 0;; esac; exec sh -c \"$2\";;\n"
+                    + "cleanup-timeout) case \"$2\" in *'kill -s STOP'*) touch \"$BACKCAST_TEST_DIR/stop-observed\";; *'kill -s KILL'*) touch \"$BACKCAST_TEST_DIR/kill-attempted\";; "
+                    + "*'for f in /proc/'*) if [ -f \"$BACKCAST_TEST_DIR/stop-observed\" ] && [ ! -f \"$BACKCAST_TEST_DIR/recovery-allowed\" ]; then sleep 30; fi;; esac; exec sh -c \"$2\";;\n"
+                    + "detached) exec 3<&0; sh -c \"$2\" <&3 & exit 0;;\n*) exec sh -c \"$2\";;\nesac\n").getBytes("UTF-8"));
             check(su.setExecutable(true), "Fake su is not executable");
             File setsid = new File(bin, "setsid");
             Files.write(setsid.toPath(), "#!/bin/sh\nexec 3<&0\n\"$@\" <&3 &\nexit 0\n".getBytes("UTF-8"));
@@ -146,10 +249,13 @@ public final class RootExecutionRegressionTest {
             File id = new File(bin, "id");
             Files.write(id.toPath(), "#!/bin/sh\nif [ \"$1\" = -u ]; then if [ \"$BACKCAST_TEST_SU\" = not-root ]; then printf '1000\\n'; else printf '0\\n'; fi; else printf 'uid=0(root) gid=0(root)\\n'; fi\n".getBytes("UTF-8"));
             check(id.setExecutable(true), "Fake root probe id is not executable");
-            for (String mode : Arrays.asList("cleanup-silent", "normal", "detached", "silent", "restricted-proc", "not-root")) {
+            byte[] originalSu = Files.readAllBytes(su.toPath());
+            for (String mode : Arrays.asList("cleanup-silent", "normal", "detached", "silent", "restricted-proc", "not-root", "cleanup-timeout", "hidden-child")) {
+                Files.write(su.toPath(), originalSu);
                 ProcessBuilder child = new ProcessBuilder(new File(System.getProperty("java.home"), "bin/java").getPath(),
                         "-cp", System.getProperty("java.class.path"), RootExecutionRegressionTest.class.getName(), mode, directory.getPath());
                 child.environment().put("PATH", bin.getPath() + ":/usr/bin:/bin"); child.environment().put("BACKCAST_TEST_SU", mode);
+                child.environment().put("BACKCAST_TEST_DIR", directory.getPath());
                 Process process = child.inheritIO().start();
                 check(process.waitFor(45, java.util.concurrent.TimeUnit.SECONDS) && process.exitValue() == 0, "Root execution fixture failed: " + mode);
             }

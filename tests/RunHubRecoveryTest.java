@@ -46,7 +46,7 @@ public final class RunHubRecoveryTest {
         add(files, "android.content.Context", "public class Context { public int serviceStops; public Context getApplicationContext() { return this; } public java.io.File getFilesDir() { return new java.io.File(System.getProperty(\"java.io.tmpdir\")); } public android.content.res.AssetManager getAssets() { return new android.content.res.AssetManager(); } public boolean stopService(Intent i) { serviceStops++;return true; } }");
         add(files, "android.content.res.AssetManager", "public class AssetManager {public static String lastName;public java.io.InputStream open(String name) {lastName=name;return new java.io.ByteArrayInputStream(new byte[]{42});}}");
         add(files, "android.content.Intent", "public class Intent { public Intent(Context c, Class<?> cls) {} }");
-        add(files, "android.os.Build", "public class Build {public static final String CPU_ABI=\"arm64-v8a\";public static class VERSION {public static final int SDK_INT=30;}}");
+        add(files, "android.os.Build", "public class Build {public static final String CPU_ABI=\"arm64-v8a\";public static final String[] SUPPORTED_ABIS={CPU_ABI};public static class VERSION {public static final int SDK_INT=30;}}");
         add(files, "com.mkei.backcast.Settings", "public class Settings {"
                 + "public static final String AGENT_OFF=\"off\",EFFORT_ULTRA=\"ultra\";public static String mode=\"manual\",effort=\"off\",directory=\".\";"
                 + "public static String provider=\"deepseek\",url=\"http://localhost\",key=\"fixture\",selectedModel=\"fixture\";public static boolean failLegacyProfileReads;"
@@ -163,14 +163,18 @@ public final class RunHubRecoveryTest {
         add(files, "com.mkei.backcast.mcp.McpCatalog", "public class McpCatalog{public static class Server{}public static class Refresh{public Refresh(McpStore store,String id){}}public static java.util.List<Server> cached(McpStore store){return java.util.Collections.emptyList();}}");
         add(files, "com.mkei.backcast.mcp.McpStore", "public class McpStore{public java.io.File directory;public McpStore(java.io.File directory){this.directory=directory;}public void validateSelection(McpSelection selection){}}");
         add(files, "com.mkei.backcast.mcp.McpTools", "public class McpTools{public org.json.JSONObject contextSnapshot(){return new org.json.JSONObject().put(\"servers\",new org.json.JSONArray());}public static McpTools register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store){McpTools source=new McpTools();registry.register(source);return source;}public static McpTools register(com.mkei.backcast.agent.ToolRegistry registry,McpStore store,org.json.JSONObject snapshot){return register(registry,store);}}");
-        add(files, "com.mkei.backcast.tool.EmbeddedToolchain", "public class EmbeddedToolchain {public interface Assets {java.io.InputStream open(String name) throws Exception;}}");
+        add(files, "android.util.Log", "public class Log {public static int w(String tag,String message){return 0;}}");
+        add(files, "com.mkei.backcast.tool.ToolchainDownloader", "public class ToolchainDownloader {public static class Failure extends Exception{public String diagnostic(){return \"{}\";}}}");
+        add(files, "com.mkei.backcast.tool.ToolBatchProbe", "public class ToolBatchProbe {public interface Session {ToolkitTool toolkit();void abort();void close() throws Exception;}public interface SessionFactory {Session open() throws Exception;}}");
+        add(files, "com.mkei.backcast.tool.ToolkitOperationManager", "public class ToolkitOperationManager {public interface FactorySource {ToolBatchProbe.SessionFactory capture() throws Exception;}public interface Diagnostics {void onFailure(String action,String tool,String stage,Throwable failure,EmbeddedToolchain.Progress progress);}public interface WorkListener {void onWorkChanged();}public final WorkListener workListener;public boolean busyState;public ToolkitOperationManager(FactorySource source,Diagnostics diagnostics,WorkListener listener){workListener=listener;}public boolean busy(){return busyState;}}");
+        add(files, "com.mkei.backcast.tool.EmbeddedToolchain", "public class EmbeddedToolchain {public static class Progress {public String stage,artifact;public long completed,total;}public interface Assets {java.io.InputStream open(String name) throws Exception;}}");
         add(files, "com.mkei.backcast.tool.ToolchainStore", "public class ToolchainStore {public java.io.File directory;public EmbeddedToolchain.Assets assets;public String abi;public int sdk;public ToolchainStore(java.io.File d,EmbeddedToolchain.Assets a,String b,int s){directory=d;assets=a;abi=b;sdk=s;}}");
         add(files, "com.mkei.backcast.tool.TemporaryWorkspace", "public class TemporaryWorkspace {public Object[] args;public long sessionId;public String directory;public boolean root;"
                 + "public TemporaryWorkspace(Object... args) {this.args=args;sessionId=((Number)args[3]).longValue();}"
                 + "public boolean requireTransaction;private void checkTransaction(){if(requireTransaction&&!Thread.holdsLock(this))throw new AssertionError(\"UI workspace configuration was not atomic\");}"
-                + "public int begins,finishes;public void beginTurn(){checkTransaction();begins++;}public String finishTurn(){finishes++;return null;}"
+                + "public int begins,finishes;public void beginTurn(){checkTransaction();begins++;}public String finishTurn(){finishes++;return null;}public String finishTurn(long deadline){return finishTurn();}"
                 + "public java.util.List<String> roots;public void configureWorkDirs(java.util.List<String> dirs){checkTransaction();roots=new java.util.ArrayList<String>(dirs);}"
-                + "public void configure(String dir,boolean r) {checkTransaction();directory=dir;root=r;}public void bindSession(long sid) {sessionId=sid;}public String cleanupRecovered() {checkTransaction(); return null; } }");
+                + "public void configure(String dir,boolean r) {checkTransaction();directory=dir;root=r;}public void bindSession(long sid) {sessionId=sid;}public String cleanupRecovered() {checkTransaction(); return null; }public String cleanupRecovered(long deadline){return cleanupRecovered();} }");
     }
 
     private static Object call(Object target, String name, Class<?>[] types, Object... args) throws Exception {
@@ -582,19 +586,25 @@ public final class RunHubRecoveryTest {
         check(children(hub,root)==null && !((Map<?,?>)field(hub,"temporary")).containsKey(child)
                 && !((Map<?,?>)field(hub,"childOwners")).containsKey(child),"Dropping the root leaked child ownership or temporary ledgers");
     }
+    private static Object toolkitFactory(Object hub) throws Exception {
+        Method method=hubType.getDeclaredMethod("captureToolkitSessions");method.setAccessible(true);return method.invoke(hub);
+    }
     private static void toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup() throws Exception {
         Object hub=freshHub(),root=bind(hub,27L,listener());
-        field(hub,"uiMaterials").getClass().getField("requireTransaction").setBoolean(field(hub,"uiMaterials"),true);
-        final Object session=call(hub,"newToolkitSession",new Class[0]);
-        Object toolkit=field(session,"toolkit"),materials=field(hub,"uiMaterials");
+        final Object factory=toolkitFactory(hub),session=call(factory,"open",new Class[0]);
+        final Object second=call(factory,"open",new Class[0]);
+        Object toolkit=field(session,"toolkit"),materials=field(session,"materials");
         Object[] args=(Object[])field(toolkit,"args"),materialArgs=(Object[])field(materials,"args");
         java.io.File appFiles=(java.io.File)call(field(hub,"app"),"getFilesDir",new Class[0]);
-        check(materialArgs[2].equals(new java.io.File(appFiles,"temporary-workspaces/tool-ui"))
+        check(((java.io.File)materialArgs[2]).getParentFile().equals(new java.io.File(appFiles,"temporary-workspaces/tool-ui/jobs"))
                 && (Long)field(materials,"sessionId")==0L && (Integer)field(materials,"begins")==1,
                 "Toolkit UI reused a model's temporary session or failed to acquire its own lease");
         @SuppressWarnings("unchecked") List<Object> rootTools=(List<Object>)field(field(root,"registry"),"tools");
         check(args[0]!=rootTools.get(1) && args[3]==materials && args[1]==field(hub,"toolchains"),
                 "Toolkit UI shares an agent shell or lost the persistent software registry");
+        check(field(second,"materials")!=materials && field(second,"toolkit")!=toolkit
+                && !((Object[])field(field(second,"materials"),"args"))[2].equals(materialArgs[2]),
+                "Concurrent UI probes shared runner/workspace ledger");
         final Throwable[] error={null};
         Thread cancelling=new Thread(new Runnable(){@Override public void run(){
             try {call(session,"close",new Class[0]);}catch(Throwable failure){error[0]=failure;}
@@ -605,6 +615,22 @@ public final class RunHubRecoveryTest {
         call(session,"close",new Class[0]);call(session,"close",new Class[0]);
         check((Integer)field(materials,"finishes")==1 && count(root,"cancellations")==0,
                 "Owner cleanup was skipped/duplicated or cancelled a running model session");
+        call(second,"close",new Class[0]);
+        check((Integer)field(field(second,"toolkit"),"aborts")==0,"Normal owner cleanup advanced the runner cancellation epoch");
+    }
+
+    private static void toolkitOnlyWorkOwnsForegroundService() throws Exception {
+        Object hub=freshHub(),manager=call(hub,"toolkitOperations",new Class[0]);
+        manager.getClass().getField("busyState").setBoolean(manager,true);
+        check((Boolean)call(hub,"hasWork",new Class[0]) && "正在管理工具".equals(call(hub,"noteText",new Class[0])),
+                "Independent toolkit operation did not participate in foreground ownership");
+        call(field(manager,"workListener"),"onWorkChanged",new Class[0]);
+        Class<?> service=hubType.getClassLoader().loadClass("com.mkei.backcast.AgentService");
+        check(service.getField("starts").getInt(null)>0,"Toolkit-only work did not start service protection");
+        manager.getClass().getField("busyState").setBoolean(manager,false);
+        call(field(manager,"workListener"),"onWorkChanged",new Class[0]);
+        check(!(Boolean)call(hub,"hasWork",new Class[0])&&(Integer)field(field(hub,"app"),"serviceStops")>0,
+                "Completed toolkit-only operation stranded foreground service");
     }
 
     private static void embeddedToolsUseAppAssetsAndDeviceRuntime() throws Exception {
@@ -638,8 +664,8 @@ public final class RunHubRecoveryTest {
             check(roots.equals(Arrays.asList(".", "/project/additional")), "Parent/child tools lost the complete authorized snapshot");
         }
         check(((List<?>)field(temporary.get(child),"roots")).equals(Collections.singletonList(".")), "Existing child workspace changed with global settings");
-        Object session = call(hub, "newToolkitSession", new Class[0]);
-        @SuppressWarnings("unchecked") List<String> roots = (List<String>) field(field(hub, "uiMaterials"), "roots");
+        Object session = call(toolkitFactory(hub), "open", new Class[0]);
+        @SuppressWarnings("unchecked") List<String> roots = (List<String>) field(field(session, "materials"), "roots");
         check(roots.equals(Arrays.asList(".", "/project/additional")), "Independent UI tool session lost additional directories");
         call(session, "close", new Class[0]);
         extra.clear(); call(hub, "retargetIfNeeded", new Class[0]);
@@ -843,7 +869,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder", "queuedChildUsesCapturedParentConfigAfterGlobalSettingsChange", "childEventsWakeIdleParentOnceAndRespectBusyAndStoppedGuards", "restoredCapturedModelRequiresMatchingPrivateCredentials", "childOnlyRecoveryResumesQueuesWithoutResendingIdleParent","durableChildStopOutranksStaleParentRunningRow","explicitChildRestartRecoveryKeepsClosedParentAndOldQueuesIdle"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "toolkitOnlyWorkOwnsForegroundService", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder", "queuedChildUsesCapturedParentConfigAfterGlobalSettingsChange", "childEventsWakeIdleParentOnceAndRespectBusyAndStoppedGuards", "restoredCapturedModelRequiresMatchingPrivateCredentials", "childOnlyRecoveryResumesQueuesWithoutResendingIdleParent","durableChildStopOutranksStaleParentRunningRow","explicitChildRestartRecoveryKeepsClosedParentAndOldQueuesIdle"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

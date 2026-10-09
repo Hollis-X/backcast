@@ -123,7 +123,6 @@
     <string name="toolkit_progress_publishing">完成工具文件安装</string>
     <string name="toolkit_progress_registering">登记工具配置</string>
     <string name="toolkit_progress_complete">工具包安装完成</string>
-    <string name="toolkit_progress_refresh_failed">更新工具状态失败，详细原因已记录。</string>
     <string name="toolkit_progress_common">公共工具</string>
     <string name="toolkit_progress_device">当前设备工具</string>
     <string name="toolkit_progress_phase_artifact">%1$s · %2$s</string>

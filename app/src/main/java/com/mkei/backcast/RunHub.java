@@ -22,6 +22,8 @@ import com.mkei.backcast.tool.SubAgentTools;
 import com.mkei.backcast.tool.ToolkitTool;
 import com.mkei.backcast.tool.ToolchainStore;
 import com.mkei.backcast.tool.EmbeddedToolchain;
+import com.mkei.backcast.tool.ToolBatchProbe;
+import com.mkei.backcast.tool.ToolkitOperationManager;
 import com.mkei.backcast.mcp.McpStore;
 import com.mkei.backcast.mcp.McpCatalog;
 import com.mkei.backcast.mcp.McpSelection;
@@ -59,6 +61,10 @@ public final class RunHub {
     private final ToolchainStore toolchains;
     private final McpStore mcp;
     private final TemporaryWorkspace uiMaterials;
+    private final ToolkitOperationManager toolkitOperations;
+    private final Object toolkitRecoveryLock = new Object();
+    private final java.util.Set<java.io.File> toolkitStateDirs = new java.util.HashSet<java.io.File>();
+    private final Map<java.io.File, TemporaryWorkspace> toolkitPendingMaterials = new HashMap<java.io.File, TemporaryWorkspace>();
     private final ConcurrentHashMap<Long, Object> sessionPreparations = new ConcurrentHashMap<Long, Object>();
     private final AgentLoop.Recorder recorder;
     private final AgentLoop.Durability durability;
@@ -137,6 +143,13 @@ public final class RunHub {
                 }, android.os.Build.CPU_ABI, android.os.Build.VERSION.SDK_INT);
         uiMaterials = new TemporaryWorkspace(settings.workDir(), settings.useRoot(),
                 new java.io.File(app.getFilesDir(), "temporary-workspaces/tool-ui"), 0);
+        toolkitOperations = new ToolkitOperationManager(new ToolkitOperationManager.FactorySource() {
+            public ToolBatchProbe.SessionFactory capture() { return captureToolkitSessions(); }
+        }, new ToolkitOperationManager.Diagnostics() {
+            public void onFailure(String action, String tool, String stage, Throwable failure, EmbeddedToolchain.Progress progress) {
+                recordToolkitFailure(action, tool, stage, failure, progress);
+            }
+        }, new ToolkitOperationManager.WorkListener() { public void onWorkChanged() { syncService(false); } });
         recorder = new StoredRecorder();
         durability = new AgentLoop.Durability() {
             @Override
@@ -190,44 +203,126 @@ public final class RunHub {
     public void validateMcpSelection(McpSelection selection) { mcp.validateSelection(selection); }
 
     /** UI probes use their own runner so they cannot cancel a model's active command. */
-    public ToolkitSession newToolkitSession() {
-        List<String> roots = settings.authorizedWorkDirs();
-        String dir = roots.get(0);
-        boolean root = settings.useRoot();
-        synchronized (uiMaterials) {
-            uiMaterials.configure(dir, root);
-            uiMaterials.configureWorkDirs(roots);
-            String cleanup = uiMaterials.cleanupRecovered();
-            if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
-            uiMaterials.beginTurn();
-        }
-        ShellTool shell = new ShellTool(root, dir, uiMaterials);
-        return new ToolkitSession(new ToolkitTool(shell, toolchains, dir, uiMaterials,
-                android.os.Build.CPU_ABI, root), uiMaterials);
+    public ToolkitOperationManager toolkitOperations() { return toolkitOperations; }
+
+    /** Capture settings once, then allocate a private runner/ledger on each worker. */
+    private ToolBatchProbe.SessionFactory captureToolkitSessions() {
+        final List<String> roots = new ArrayList<String>(settings.authorizedWorkDirs());
+        final String dir = roots.get(0);
+        final boolean root = settings.useRoot();
+        final String context = root + "|" + settings.accessLevel() + "|" + new JSONArray(roots).toString();
+        return new ToolBatchProbe.SessionFactory() {
+            private boolean recovered;
+            public String context() { return context; }
+            public ToolBatchProbe.Session open() {
+                final java.io.File state;
+                synchronized (toolkitRecoveryLock) {
+                    if (!recovered) {
+                        recoverToolkitMaterials(dir, root, roots);
+                        recovered = true;
+                    }
+                    state = new java.io.File(app.getFilesDir(), "temporary-workspaces/tool-ui/jobs/job-" + java.util.UUID.randomUUID());
+                    toolkitStateDirs.add(state);
+                }
+                final TemporaryWorkspace materials = new TemporaryWorkspace(dir, root, state, 0);
+                materials.configureWorkDirs(roots); materials.beginTurn();
+                synchronized (toolkitRecoveryLock) { toolkitPendingMaterials.put(state, materials); }
+                ShellTool shell = new ShellTool(root, dir, materials);
+                return new ToolkitSession(new ToolkitTool(shell, toolchains, dir, materials,
+                        android.os.Build.CPU_ABI, root), materials, new Runnable() {
+                    public void run() { synchronized (toolkitRecoveryLock) {
+                        toolkitStateDirs.remove(state);
+                        removeEmptyToolkitState(state);
+                        if (!state.exists()) toolkitPendingMaterials.remove(state);
+                    } }
+                });
+            }
+        };
     }
 
-    public static final class ToolkitSession {
+    private void recoverToolkitMaterials(String dir, boolean root, List<String> roots) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        uiMaterials.configure(dir, root); uiMaterials.configureWorkDirs(roots);
+        String legacy = uiMaterials.cleanupRecovered(deadline);
+        if (legacy != null) recordToolkitFailure("recovery", "", "cleanup", new IllegalStateException(legacy), null);
+        java.io.File jobs = new java.io.File(app.getFilesDir(), "temporary-workspaces/tool-ui/jobs");
+        java.io.File[] previous = jobs.listFiles();
+        if (previous == null) return;
+        for (java.io.File state : previous) {
+            if (System.nanoTime() >= deadline) break;
+            if (toolkitStateDirs.contains(state) || !state.getName().startsWith("job-") || !state.isDirectory()) continue;
+            try {
+                if (!state.getAbsolutePath().equals(state.getCanonicalPath())) throw new IllegalStateException("工具临时登记目录被替换成链接。");
+                TemporaryWorkspace materials = toolkitPendingMaterials.get(state);
+                if (materials == null) materials = new TemporaryWorkspace(dir, root, state, 0);
+                materials.configureWorkDirs(roots);
+                String cleanup = materials.cleanupRecovered(deadline);
+                if (cleanup != null) throw new IllegalStateException(cleanup);
+                removeEmptyToolkitState(state);
+                if (!state.exists()) toolkitPendingMaterials.remove(state);
+            } catch (Exception failure) { recordToolkitFailure("recovery", "", "cleanup", failure, null); }
+        }
+    }
+
+    private static void removeEmptyToolkitState(java.io.File state) {
+        try {
+            if (!state.getAbsolutePath().equals(state.getCanonicalPath())) return;
+            java.io.File materials = new java.io.File(state, "materials");
+            java.io.File[] remaining = materials.listFiles();
+            if (remaining != null && remaining.length == 0 && materials.getAbsolutePath().equals(materials.getCanonicalPath())) materials.delete();
+            remaining = state.listFiles();
+            if (remaining != null && remaining.length == 0) state.delete();
+        } catch (java.io.IOException unavailable) { /* Unknown contents remain registered for recovery. */ }
+    }
+
+    public static final class ToolkitSession implements ToolBatchProbe.Session {
         public final ToolkitTool toolkit;
         private final TemporaryWorkspace materials;
         private final Thread owner = Thread.currentThread();
+        private final Runnable released;
         private boolean closed;
 
-        private ToolkitSession(ToolkitTool toolkit, TemporaryWorkspace materials) {
+        private ToolkitSession(ToolkitTool toolkit, TemporaryWorkspace materials, Runnable released) {
             this.toolkit = toolkit;
             this.materials = materials;
+            this.released = released;
         }
 
+        public ToolkitTool toolkit() { return toolkit; }
+        public void abort() { toolkit.abort(); }
+
         public void close() {
-            toolkit.abort();
             // Cancellation can come from the UI; the worker owns the temporary lease.
-            if (Thread.currentThread() != owner) return;
+            if (Thread.currentThread() != owner) { toolkit.abort(); return; }
             synchronized (this) {
                 if (closed) return;
                 closed = true;
             }
-            String cleanup = materials.finishTurn();
-            if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            try {
+                String cleanup = materials.finishTurn(deadline);
+                if (cleanup != null) throw new IllegalStateException("工具临时材料清理失败：" + cleanup);
+            } finally { released.run(); }
         }
+    }
+
+    private void recordToolkitFailure(String action, String tool, String stage, Throwable failure, EmbeddedToolchain.Progress progress) {
+        try {
+            JSONObject evidence = com.mkei.backcast.agent.Diagnostics.failure(failure);
+            evidence.put("reason", failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage())
+                    .put("action", action).put("tool", tool).put("stage", stage)
+                    .put("sdk", android.os.Build.VERSION.SDK_INT).put("abis", new JSONArray(android.os.Build.SUPPORTED_ABIS));
+            if (progress != null) evidence.put("progress", new JSONObject().put("stage", progress.stage)
+                    .put("artifact", progress.artifact).put("completed", progress.completed).put("total", progress.total));
+            java.util.Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Throwable, Boolean>());
+            for (Throwable cause = failure; cause != null && seen.size() < 16 && seen.add(cause); cause = cause.getCause())
+                if (cause instanceof com.mkei.backcast.tool.ToolchainDownloader.Failure) {
+                    evidence.put("download", new JSONObject(((com.mkei.backcast.tool.ToolchainDownloader.Failure) cause).diagnostic())); break;
+                }
+            List<String> secrets = new ArrayList<String>();
+            for (Settings.AiProfile profile : settings.aiProfiles()) secrets.add(profile.apiKey);
+            store.recordDiagnostic(-1L, "toolkit", "工具配置操作失败", com.mkei.backcast.agent.Diagnostics.boundedJson(evidence, secrets.toArray(new String[secrets.size()])));
+        } catch (Exception unavailable) { android.util.Log.w("Backcast", "Unable to persist toolkit configuration diagnostic"); }
     }
 
     public String agentName(AgentLoop loop) {
@@ -379,6 +474,7 @@ public final class RunHub {
     }
 
     public synchronized boolean hasWork() {
+        if (toolkitOperations.busy()) return true;
         if (store.runningIds().size() > 0) {
             return true;
         }
@@ -397,6 +493,7 @@ public final class RunHub {
     }
 
     public synchronized String noteText() {
+        if (toolkitOperations.busy()) return "正在管理工具";
         for (AgentLoop loop : all()) {
             if (loop.busy() && loop.goalText().length() > 0) {
                 return loop.goalText();

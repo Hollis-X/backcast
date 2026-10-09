@@ -22,11 +22,20 @@ public class ToolRegistry {
 
     public interface WorkspaceScoped {
         void restrictWorkspace(List<String> humanPaths);
+        default JSONObject workspaceDiagnostic() { return null; }
     }
 
     public void restrictWorkspace(List<String> humanPaths) {
         for (Tool tool : tools.values()) if (tool instanceof WorkspaceScoped)
             ((WorkspaceScoped) tool).restrictWorkspace(humanPaths);
+    }
+
+    public JSONObject workspaceDiagnostic() {
+        for (Tool tool : tools.values()) if (tool instanceof WorkspaceScoped) {
+            JSONObject snapshot = ((WorkspaceScoped) tool).workspaceDiagnostic();
+            if (snapshot != null) return snapshot;
+        }
+        return null;
     }
 
     private final Map<String, Tool> tools = new LinkedHashMap<String, Tool>();

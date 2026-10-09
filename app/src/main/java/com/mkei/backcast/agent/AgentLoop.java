@@ -2482,7 +2482,7 @@ public class AgentLoop {
                 synchronized (lock) {
                     if (!stale(token, gen)) history.add(result);
                 }
-                recordToolResult(sessionId, result, gen, token, name);
+                recordToolResult(sessionId, result, gen, token, name, args);
                 continue;
             }
             // 同一个调用已经连续拿到相同结果时不再重跑，把结论回给模型。
@@ -2494,7 +2494,7 @@ public class AgentLoop {
                         history.add(stopped);
                     }
                 }
-                recordToolResult(sessionId, stopped, gen, token, name);
+                recordToolResult(sessionId, stopped, gen, token, name, args);
                 return;
             }
             listener.onProgress(gen, "tool_ready", name, argsRaw);
@@ -2512,7 +2512,7 @@ public class AgentLoop {
                         history.add(refused);
                     }
                 }
-                recordToolResult(sessionId, refused, gen, token, name);
+                recordToolResult(sessionId, refused, gen, token, name, args);
                 continue;
             }
 
@@ -2530,7 +2530,7 @@ public class AgentLoop {
                     history.add(toolMsg);
                 }
             }
-            recordToolResult(sessionId, toolMsg, gen, token, name);
+            recordToolResult(sessionId, toolMsg, gen, token, name, args);
         }
     }
 
@@ -2647,17 +2647,32 @@ public class AgentLoop {
         }
     }
 
-    private void recordToolResult(long sessionId, Message message, int gen, int token, String name) {
+    private void recordToolResult(long sessionId, Message message, int gen, int token, String name, JSONObject args) {
         if (ToolOutcome.failed(name, message.content)) {
             JSONObject evidence = new JSONObject();
             try { evidence.put("tool", name).put("tool_call_id", message.toolCallId).put("error", message.content); }
             catch (Exception ignored) { }
+            attachWorkspaceDiagnostic(evidence, args, message.content);
             recordError(evidence, "tool:" + name, "工具执行失败");
         }
         synchronized (uiLock) {
             record(sessionId, message);
             if (!stale(token, gen)) listener.onToolEnd(gen, name, message.content);
         }
+    }
+
+    private void attachWorkspaceDiagnostic(JSONObject evidence, JSONObject args, String reason) {
+        try {
+            ToolRegistry tools = currentTools();
+            JSONObject snapshot = tools == null ? null : tools.workspaceDiagnostic();
+            if (snapshot != null) evidence.put("workspace", snapshot);
+            String target = args == null ? "" : args.optString("path", args.optString("directory", ""));
+            String marker = "路径超出工作目录：";
+            int start = reason == null ? -1 : reason.indexOf(marker);
+            int end = start < 0 ? -1 : reason.indexOf("。允许目录：", start + marker.length());
+            if (end > start) target = reason.substring(start + marker.length(), end);
+            if (!target.isEmpty()) evidence.put("target_path", target);
+        } catch (Exception ignored) { }
     }
 
     private void noteTurnEvent(int token, int gen) {
@@ -2779,6 +2794,7 @@ public class AgentLoop {
         } catch (Exception e) {
             JSONObject evidence = Diagnostics.failure(e);
             try { evidence.put("tool", name); } catch (Exception ignored) { }
+            attachWorkspaceDiagnostic(evidence, args, e.getMessage());
             recordError(evidence, "tool:" + name, "工具执行异常");
             result = FAIL_PREFIX + e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {

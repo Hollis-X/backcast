@@ -31,6 +31,7 @@ public class ShellTool implements Tool {
     private volatile Process running;
     private volatile ProcessTree runningTree;
     private volatile boolean cleanupFailed;
+    private volatile String cleanupDetail = "";
     /** 每次停止加一。正在跑的命令记下旧值，对不上就退出。 */
     private volatile int epoch;
 
@@ -53,7 +54,8 @@ public class ShellTool implements Tool {
                 + "传入完整命令行字符串。TMPDIR、TMP、TEMP 指向本轮专用临时目录。"
                 + "创建临时脚本或中间产物时 temporary=true，命令在专用临时目录运行；"
                 + "需要读项目输入时使用工作目录内的绝对路径，临时输出禁止写到项目根或其它目录。"
-                + "正式测试保留并归类到已有测试目录或 tests/，一次性验证脚本仍是临时材料。";
+                + "正式测试保留并归类到已有测试目录或 tests/，一次性验证脚本仍是临时材料。"
+                + ToolPaths.workspaceDescription(workDir, temporary);
     }
 
     @Override
@@ -92,26 +94,28 @@ public class ShellTool implements Tool {
     }
 
     private void kill(Process process) {
+        long deadlineNanos = System.nanoTime() + CleanupBudget.DEFAULT_NANOS;
         ProcessTree tree = running == process ? runningTree : null;
-        if (tree != null && !tree.stop()) {
-            cleanupFailed = true;
+        if (tree != null) {
+            if (!tree.stop(deadlineNanos)) {
+                cleanupFailed = true;
+                cleanupDetail = tree.cleanupFailure();
+            }
+            // The launcher reaper belongs to the same cleanup attempt as its
+            // descendants. Repeated kill/finally must not start another wait.
+            deadlineNanos = tree.cleanupDeadlineNanos();
         }
-        try {
-            process.getInputStream().close();
-        } catch (Exception ignored) {
-        }
-        try {
-            process.getOutputStream().close();
-        } catch (Exception ignored) {
-        }
-        process.destroy();
-        if (Build.VERSION.SDK_INT >= 26) {
-            process.destroyForcibly();
-        }
-        long deadline = System.currentTimeMillis() + 1000L;
-        while (!finished(process) && System.currentTimeMillis() < deadline) {
-            try { Thread.sleep(10); }
-            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); break; }
+        try (CleanupBudget budget = new CleanupBudget(deadlineNanos)) {
+            try { process.getInputStream().close(); } catch (Exception ignored) { }
+            try { process.getOutputStream().close(); } catch (Exception ignored) { }
+            process.destroy();
+            if (Build.VERSION.SDK_INT >= 26) process.destroyForcibly();
+            try {
+                while (!finished(process)) budget.pause(10);
+            } catch (Exception timedOut) {
+                cleanupFailed = true;
+                cleanupDetail = timedOut.getMessage();
+            }
         }
     }
 
@@ -119,6 +123,7 @@ public class ShellTool implements Tool {
     public String run(JSONObject args) throws Exception {
         final int mine = epoch;
         cleanupFailed = false;
+        cleanupDetail = "";
         String command = args.optString("command", "").trim();
         if (command.length() == 0) {
             return "错误：command 为空。";
@@ -205,6 +210,7 @@ public class ShellTool implements Tool {
             boolean temporaryCommand, int timeoutSec, final int mine) throws Exception {
         if (mine != epoch || Thread.currentThread().isInterrupted()) return "已停止。";
         cleanupFailed = false;
+        cleanupDetail = "";
         try {
             arguments = ToolPaths.prepareProgramArguments(launcher.id, arguments);
             ToolPaths.checkProgram(workDir, launcher.id, arguments, temporary, temporaryCommand);
@@ -302,6 +308,14 @@ public class ShellTool implements Tool {
                 // acknowledge the supervisor and permit any user command.
                 temporary.trackProcess(tempDirectory, new TemporaryWorkspace.ProcessCleanup() {
                     @Override public boolean stop() { return tree.stop(); }
+                    @Override public boolean stop(long deadlineNanos) {
+                        if (!tree.stop(deadlineNanos)) throw new IllegalStateException(tree.cleanupFailure());
+                        return true;
+                    }
+                    @Override public boolean retry(long deadlineNanos) {
+                        if (!tree.retryStop(deadlineNanos)) throw new IllegalStateException(tree.cleanupFailure());
+                        return true;
+                    }
                 });
             } catch (Exception failure) {
                 kill(process);
@@ -458,6 +472,7 @@ public class ShellTool implements Tool {
     }
 
     private String cleanupWarning() {
-        return cleanupFailed ? "错误：未能确认所有后台子进程已结束，临时清理不能视为完成。\n" : "";
+        return cleanupFailed ? "错误：未能确认所有后台子进程已结束，临时清理不能视为完成。"
+                + (cleanupDetail.length() == 0 ? "" : " " + cleanupDetail) + "\n" : "";
     }
 }

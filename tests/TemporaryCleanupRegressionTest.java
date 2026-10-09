@@ -330,6 +330,53 @@ public final class TemporaryCleanupRegressionTest {
         pass("separateTurnLeases");
     }
 
+    private static void cleanupSharesDeadlineAndPreservesUnknown() throws Exception {
+        TemporaryWorkspace materials = manager(30);
+        materials.beginTurn(); File temp = materials.directory();
+        final long deadline = System.nanoTime() + 1000000000L;
+        final long[] observed = {0};
+        materials.trackProcess(temp, new TemporaryWorkspace.ProcessCleanup() {
+            public boolean stop() { throw new AssertionError("Cleanup discarded its shared deadline"); }
+            public boolean stop(long until) {
+                observed[0] = until;
+                check(!Thread.currentThread().isInterrupted(), "Cancelled operation interrupted cleanup verification");
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        });
+        Thread.currentThread().interrupt();
+        String error;
+        try {
+            error = materials.finishTurn(deadline);
+            check(observed[0] == deadline && error != null && temp.isDirectory(), "Unknown process lost its lease or shared deadline");
+            check(Thread.currentThread().isInterrupted(), "Cleanup discarded an existing or new cancellation interrupt");
+        } finally { Thread.interrupted(); }
+        check(materials.cleanupRecovered(System.nanoTime() - 1) != null && temp.isDirectory(), "Expired recovery deleted unverified materials");
+        pass("cleanupSharesDeadlineRetainsUnknownAndRestoresInterrupt");
+    }
+
+    private static void reloadedPendingProcessesRemainUnknown() throws Exception {
+        TemporaryWorkspace original = manager(31);
+        original.beginTurn(); File temp = original.directory();
+        Process process = new ProcessBuilder("sh", "-c", "sleep 30").start();
+        try {
+            original.trackProcess(temp, new TemporaryWorkspace.ProcessCleanup() {
+                public boolean stop() { return !process.isAlive(); }
+            });
+            JSONObject ledger = new JSONObject(new String(Files.readAllBytes(new File(state, "session-31.json").toPath()), "UTF-8"));
+            check(ledger.getJSONArray("directories").getJSONObject(0).getBoolean("process_pending"), "Live process registration was not persisted before execution");
+            check(original.finishTurn() != null && temp.isDirectory(), "Live process did not block cleanup");
+            TemporaryWorkspace reloaded = manager(31);
+            String unknown = reloaded.cleanupRecovered();
+            check(unknown != null && unknown.contains("原进程身份") && temp.isDirectory() && process.isAlive(),
+                    "Reload treated a missing process callback as proven exit");
+            process.destroyForcibly(); process.waitFor();
+            check(reloaded.cleanupRecovered() != null && temp.isDirectory(), "Reload inferred exit without retained identity evidence");
+            check(original.cleanupRecovered() == null && !temp.exists(), "Original retained callback could not verify and clean the stopped process");
+            pass("reloadedPendingProcessesRemainUnknownUntilOriginalEvidenceConfirmsExit");
+        } finally { process.destroyForcibly(); }
+    }
+
     private static void replacedParentCannotDeleteUserFiles() throws Exception {
         File original = new File(state, "swap-parent"), moved = new File(state, "real-parent");
         File foreign = new File(project, "foreign-parent");
@@ -466,6 +513,8 @@ public final class TemporaryCleanupRegressionTest {
             changedOwnershipBlocksCompletion();
             unconfirmedProcessesBlockCleanupAndCanRetry();
             separateTurnLeases();
+            cleanupSharesDeadlineAndPreservesUnknown();
+            reloadedPendingProcessesRemainUnknown();
             replacedParentCannotDeleteUserFiles();
             cancelledShellStopsBeforeCleanup();
             cancelledShellNeverStartsAfterDirectoryWait();

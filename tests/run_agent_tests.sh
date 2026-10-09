@@ -59,6 +59,7 @@ javac -proc:none -encoding UTF-8 -source 8 -target 8 -Xlint:-options -cp "$json"
     "$root"/tests/ProgramArgumentRegressionTest.java \
     "$root"/tests/MultipleWorkspaceRegressionTest.java \
     "$root"/tests/ToolBatchProbeRegressionTest.java \
+    "$root"/tests/ToolkitOperationManagerRegressionTest.java \
     "$root"/tests/ToolkitOperationRegressionTest.java \
     "$root"/tests/ObjectionBootstrapRegressionTest.java \
     "$root"/tests/UiSnapshotRegressionTest.java
@@ -210,6 +211,7 @@ if [ "${3:-}" = "workspaces" ]; then
 fi
 if [ "${3:-}" = "batch-probe" ]; then
     java -cp "$build:$json" com.mkei.backcast.tool.ToolBatchProbeRegressionTest || exit "$?"
+    java -cp "$build:$json" com.mkei.backcast.tool.ToolkitOperationManagerRegressionTest || exit "$?"
     java -cp "$build:$json" "$root/tests/ToolBatchProbeUiRegressionTest.java" "$root"
     exit "$?"
 fi
@@ -305,6 +307,8 @@ java "$root/tests/WorkspaceRegressionTest.java" "$root"
 workspace_ui_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.ToolBatchProbeRegressionTest
 batch_probe_status=$?
+java -cp "$build:$json" com.mkei.backcast.tool.ToolkitOperationManagerRegressionTest
+toolkit_manager_status=$?
 java -cp "$build:$json" "$root/tests/ToolBatchProbeUiRegressionTest.java" "$root"
 batch_probe_ui_status=$?
 java -cp "$build:$json" com.mkei.backcast.tool.ToolkitOperationRegressionTest
@@ -358,5 +362,5 @@ if [ "$mcp_ui_status" -ne 0 ]; then exit 1; fi
 if [ "$mcp_status" -ne 0 ]; then exit 1; fi
 if [ "$resource_reachability_status" -ne 0 ]; then exit 1; fi
 if [ "$network_routing_status" -ne 0 ] || [ "$device_network_status" -ne 0 ] || [ "$markdown_status" -ne 0 ] || [ "$objection_bootstrap_status" -ne 0 ]; then exit 1; fi
-if [ "$diagnostics_status" -ne 0 ] || [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ] || [ "$install_progress_status" -ne 0 ] || [ "$program_arguments_status" -ne 0 ] || [ "$art_runtime_status" -ne 0 ] || [ "$install_ui_status" -ne 0 ] || [ "$workspace_status" -ne 0 ] || [ "$workspace_ui_status" -ne 0 ] || [ "$batch_probe_status" -ne 0 ] || [ "$batch_probe_ui_status" -ne 0 ] || [ "$toolkit_operation_status" -ne 0 ]; then exit 1; fi
+if [ "$diagnostics_status" -ne 0 ] || [ "$navigation_status" -ne 0 ] || [ "$ai_config_status" -ne 0 ] || [ "$package_status" -ne 0 ] || [ "$multidex_status" -ne 0 ] || [ "$resource_budget_status" -ne 0 ] || [ "$install_progress_status" -ne 0 ] || [ "$program_arguments_status" -ne 0 ] || [ "$art_runtime_status" -ne 0 ] || [ "$install_ui_status" -ne 0 ] || [ "$workspace_status" -ne 0 ] || [ "$workspace_ui_status" -ne 0 ] || [ "$batch_probe_status" -ne 0 ] || [ "$batch_probe_ui_status" -ne 0 ] || [ "$toolkit_manager_status" -ne 0 ] || [ "$toolkit_operation_status" -ne 0 ]; then exit 1; fi
 if [ "$network_sdk_status" -ne 0 ] || [ "$model_picker_status" -ne 0 ] || [ "$error_storage_status" -ne 0 ] || [ "$http_runtime_status" -ne 0 ] || [ "$request_policy_status" -ne 0 ] || [ "$loop_status" -ne 0 ] || [ "$goal_status" -ne 0 ] || [ "$context_status" -ne 0 ] || [ "$usage_status" -ne 0 ] || [ "$stream_status" -ne 0 ] || [ "$summary_status" -ne 0 ] || [ "$prompt_status" -ne 0 ] || [ "$file_status" -ne 0 ] || [ "$file_search_status" -ne 0 ] || [ "$temporary_status" -ne 0 ] || [ "$process_status" -ne 0 ] || [ "$root_execution_status" -ne 0 ] || [ "$shell_status" -ne 0 ] || [ "$child_store_status" -ne 0 ] || [ "$subagent_status" -ne 0 ] || [ "$subagent_loop_status" -ne 0 ] || [ "$communication_status" -ne 0 ] || [ "$child_progress_status" -ne 0 ] || [ "$toolkit_status" -ne 0 ] || [ "$embedded_status" -ne 0 ] || [ "$tool_download_status" -ne 0 ] || [ "$snapshot_status" -ne 0 ] || [ "$ui_status" -ne 0 ] || [ "$panel_status" -ne 0 ] || [ "$paging_status" -ne 0 ] || [ "$recovery_status" -ne 0 ] || [ "$preferences_status" -ne 0 ] || [ "$choices_status" -ne 0 ] || [ "$scroll_status" -ne 0 ]; then exit 1; fi

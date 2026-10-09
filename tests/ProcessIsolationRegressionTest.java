@@ -15,6 +15,69 @@ public final class ProcessIsolationRegressionTest {
         if (!ok) throw new AssertionError(message);
     }
     private static void pass(String name) { System.out.println("PASS " + name); passed++; }
+
+    private static void confirmedStopIsReusableWithoutProcOrRemainingTime() throws Exception {
+        Process process = new ProcessBuilder("sh", "-c", "sleep 30 & wait").start();
+        ProcessTree tree = new ProcessTree(process, false);
+        try {
+            Thread.sleep(60);
+            check(tree.stop(), "Initial real tree did not stop");
+            check(!process.isAlive(), "Stopped launcher was not reaped");
+            Thread.currentThread().interrupt();
+            long began = System.nanoTime();
+            check(tree.stop(System.nanoTime() - 1), "Previously confirmed stop was invalidated by a spent cleanup budget");
+            check(Thread.currentThread().isInterrupted(), "Reusing a confirmed stop swallowed cancellation");
+            check(System.nanoTime() - began < 100000000L, "Confirmed stop rescanned or signalled the old tree");
+            pass("confirmedStopReusesEvidenceAfterCancellation");
+        } finally { Thread.interrupted(); process.destroyForcibly(); }
+    }
+
+    private static void cleanupIgnoresAndRestoresInterrupt() throws Exception {
+        Process process = new ProcessBuilder("sh", "-c", "sleep 30 & wait").start();
+        ProcessTree tree = new ProcessTree(process, false);
+        try {
+            Thread.sleep(60);
+            Thread.currentThread().interrupt();
+            check(tree.stop(System.nanoTime() + 2000000000L), "An interrupted owner could not stop its real descendants");
+            check(Thread.currentThread().isInterrupted() && !process.isAlive(), "Cleanup lost cancellation or left its owner alive");
+            pass("cleanupStopsRealTreeWhilePreservingInterrupt");
+        } finally { Thread.interrupted(); process.destroyForcibly(); }
+    }
+
+    private static void repeatedShellKillsShareLauncherWaitDeadline() throws Exception {
+        final Process raw = new ProcessBuilder("sh", "-c", "sleep 30").start();
+        final java.util.concurrent.atomic.AtomicBoolean released = new java.util.concurrent.atomic.AtomicBoolean();
+        // Model a Java reaper that has not acknowledged the actual launcher's
+        // exit. Signals still target and stop a real OS process by its identity.
+        Process stalled = new Process() {
+            public long pid() { return raw.pid(); }
+            public java.io.InputStream getInputStream() { return raw.getInputStream(); }
+            public java.io.InputStream getErrorStream() { return raw.getErrorStream(); }
+            public java.io.OutputStream getOutputStream() { return raw.getOutputStream(); }
+            public int waitFor() throws InterruptedException { return raw.waitFor(); }
+            public int exitValue() { if (!released.get()) throw new IllegalThreadStateException("Reaper pending"); return raw.exitValue(); }
+            public boolean isAlive() { return !released.get() || raw.isAlive(); }
+            public void destroy() { raw.destroy(); }
+            public Process destroyForcibly() { raw.destroyForcibly(); return this; }
+        };
+        final ProcessTree tree = new ProcessTree(stalled, false);
+        final ShellTool shell = new ShellTool(false, ".", null);
+        Field processField = ShellTool.class.getDeclaredField("running"); processField.setAccessible(true); processField.set(shell, stalled);
+        Field treeField = ShellTool.class.getDeclaredField("runningTree"); treeField.setAccessible(true); treeField.set(shell, tree);
+        Method kill = ShellTool.class.getDeclaredMethod("kill", Process.class); kill.setAccessible(true);
+        AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+        Thread worker = new Thread(() -> {
+            try { kill.invoke(shell, stalled); kill.invoke(shell, stalled); }
+            catch (Throwable error) { failure.set(error); }
+        });
+        try {
+            check(!tree.stop(System.nanoTime() + 200000000L), "Stalled launcher reaper was incorrectly confirmed exited");
+            check(raw.waitFor(1, java.util.concurrent.TimeUnit.SECONDS), "Cleanup did not stop the actual launcher");
+            worker.start(); worker.join(1500);
+            check(!worker.isAlive() && failure.get() == null, "Repeated ShellTool kills restarted the launcher wait budget");
+            pass("repeatedShellKillsReuseLauncherReaperDeadline");
+        } finally { released.set(true); raw.destroyForcibly(); worker.join(2000); }
+    }
     private static void remove(File file) throws Exception {
         File[] children = file.listFiles();
         if (children != null) for (File child : children) remove(child);
@@ -181,6 +244,9 @@ public final class ProcessIsolationRegressionTest {
             pass("isolatedCommandsPreserveAppAndSibling");
             runIsolatedSiblingFixture(project, true);
             pass("sharedGroupFallbackPreservesAppAndSibling");
+            confirmedStopIsReusableWithoutProcOrRemainingTime();
+            cleanupIgnoresAndRestoresInterrupt();
+            repeatedShellKillsShareLauncherWaitDeadline();
             System.out.println("Process isolation regression: " + passed + " passed");
         } finally { remove(project); }
     }

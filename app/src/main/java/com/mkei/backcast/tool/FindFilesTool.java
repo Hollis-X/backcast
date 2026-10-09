@@ -37,7 +37,7 @@ public final class FindFilesTool implements Tool {
                 + "有多个候选不要猜，结合用户指定目录或让用户选择后再 read/edit；写新文件仍须指定目标路径。"
                 + "不跟随符号链接、不访问未授权目录或其他会话临时目录。root 开启时可遍历 App 无权读取的项目目录。"
                 + "结果 complete=false 表示扫描受权限、深度、数量、时间或输出限制，不能据此断言文件不存在。"
-                + "本轮项目访问范围：" + ToolPaths.searchRoots(workDir, temporary) + "。";
+                + ToolPaths.workspaceDescription(workDir, temporary);
     }
 
     @Override public JSONObject parameters() {
@@ -112,7 +112,8 @@ public final class FindFilesTool implements Tool {
             throw new IllegalArgumentException("name 必须是文件名或文件名的一部分，不是路径。");
         Search result = new Search();
         List<File> roots = ToolPaths.searchRoots(workDir, temporary);
-        if (roots.isEmpty()) throw new IllegalArgumentException("尚未配置已授权工作目录。");
+        if (roots.isEmpty() && (directory == null || directory.isEmpty()))
+            throw new IllegalArgumentException("本轮没有可用的任务默认目录，请明确指定已授权目录。");
         final long started = System.nanoTime();
         final ToolchainInstaller.Cancellation caller = cancellation;
         ToolchainInstaller.Cancellation bounded = new ToolchainInstaller.Cancellation() {

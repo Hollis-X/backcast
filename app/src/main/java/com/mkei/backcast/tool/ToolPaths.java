@@ -10,7 +10,6 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.LinkOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Collections;
@@ -165,22 +164,14 @@ final class ToolPaths {
         if (path == null || path.length() == 0 || path.indexOf('\0') >= 0
                 || path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0)
             throw new IllegalArgumentException("路径不合法。");
-        File target = new File(path);
-        if (!target.isAbsolute()) {
-            String directory = temporary == null ? workDir : temporary.projectDirectory(workDir);
-            if (directory == null || directory.length() == 0) throw new IllegalArgumentException("路径必须是绝对路径。");
-            target = new File(directory, path);
-        }
-        target = Paths.get(target.getAbsolutePath()).normalize().toFile();
+        WorkspaceRoots roots = temporary == null ? new WorkspaceRoots(workDir, null) : temporary.projectRoots(workDir);
+        File target = roots.lexicalPath(path);
         if (temporary != null && temporary.isPrivateStorageLexical(target))
             throw new IllegalArgumentException("App 私有临时存储只允许访问本轮登记目录，不能访问其他会话或登记文件。");
-        List<File> roots = temporary == null
-                ? new WorkspaceRoots(workDir, null).directories() : temporary.projectRoots(workDir).directories();
-        for (File root : roots) {
-            String base = root.getAbsolutePath(), value = target.getAbsolutePath();
-            if (value.equals(base) || value.startsWith(base.endsWith(File.separator) ? base : base + File.separator)) return target;
-        }
-        throw new IllegalArgumentException("路径超出工作目录：" + path + "。允许目录：" + roots + "。");
+        try { if (roots.lexicalRootFor(target) != null) return target; }
+        catch (IOException inaccessible) { throw new IllegalArgumentException("无法确认路径：" + path, inaccessible); }
+        throw new IllegalArgumentException("路径超出工作目录：" + path + "。允许目录：" + roots.directories()
+                + "。任务默认目录：" + roots.focusDirectories() + "。");
     }
 
     /** Resolve even a new file through the nearest existing ancestor, as seen by root. */
@@ -198,9 +189,15 @@ final class ToolPaths {
     }
 
     static List<File> searchRoots(String workDir, TemporaryWorkspace temporary) {
-        if (temporary != null) return temporary.projectRoots(workDir).directories();
+        if (temporary != null) return temporary.projectRoots(workDir).focusDirectories();
         if (workDir == null || workDir.length() == 0) return Collections.emptyList();
         return new WorkspaceRoots(workDir, null).directories();
+    }
+
+    static String workspaceDescription(String workDir, TemporaryWorkspace temporary) {
+        WorkspaceRoots roots = temporary == null ? new WorkspaceRoots(workDir, null) : temporary.projectRoots(workDir);
+        return "本轮项目访问范围：" + roots.directories() + "。任务默认目录：" + roots.focusDirectories()
+                + "。相对路径及默认搜索只使用第一个任务默认目录；附加目录须明确指定路径，不能因未找到或权限失败而自动搜索。";
     }
 
     static final class DirectoryEntry {
@@ -889,11 +886,6 @@ final class ToolPaths {
      * 应用看不见 sdcard 上的文件时，exists 会说不存在。
      * 开了 root 就再问一次，避免把没权限说成文件不在。
      */
-    static Probe probe(File file, boolean useRoot) {
-        try { return probe(file, useRoot, LIVE); }
-        catch (Exception failure) { return Probe.denied(); }
-    }
-
     static Probe probe(File file, boolean useRoot, ToolchainInstaller.Cancellation cancellation) throws Exception {
         cancellation.check();
         // Android can expose a name while returning a misleading zero size to the App uid.

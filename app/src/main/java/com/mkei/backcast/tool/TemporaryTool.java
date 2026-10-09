@@ -22,8 +22,8 @@ public final class TemporaryTool implements Tool, TemporaryCleanup, com.mkei.bac
                 + "临时脚本、临时验证辅助文件、中间结果必须放入此目录，用完立即 cleanup。"
                 + "正式测试和用户交付物不要放入此目录；正式测试应归类到项目已有测试目录或 tests/。"
                 + "目标完成前及本轮结束、失败、停止时也会自动清理。"
-                + "本轮项目访问范围：" + workspace.projectRoots(roots.primary()).directories()
-                + "。相对项目路径从第一个范围开始；权限失败、空目录或文件中的链接都不能授权访问其父级或兄弟目录。";
+                + ToolPaths.workspaceDescription(roots.primary(), workspace)
+                + "权限失败、空目录或文件中的链接都不能授权访问其父级或兄弟目录。";
     }
 
     @Override public JSONObject parameters() {
@@ -53,6 +53,20 @@ public final class TemporaryTool implements Tool, TemporaryCleanup, com.mkei.bac
         workspace.beginTurn(roots);
     }
     @Override public void restrictWorkspace(java.util.List<String> paths) { workspace.restrictToTask(roots, paths); }
+    @Override public JSONObject workspaceDiagnostic() {
+        try {
+            WorkspaceRoots current = workspace.projectRoots(roots.primary());
+            return new JSONObject().put("primary", roots.primary() == null ? "" : roots.primary())
+                    .put("authorized_snapshot", paths(roots.directories()))
+                    .put("allowed_roots", paths(current.directories()))
+                    .put("task_focus", paths(current.focusDirectories()));
+        } catch (Exception failure) { return null; }
+    }
+    private static JSONArray paths(java.util.List<java.io.File> directories) {
+        JSONArray result = new JSONArray();
+        for (java.io.File directory : directories) result.put(directory.getPath());
+        return result;
+    }
     @Override public String cleanupTemporary() { return workspace.cleanup(); }
     @Override public String finishTurn() { return workspace.finishTurn(); }
 }

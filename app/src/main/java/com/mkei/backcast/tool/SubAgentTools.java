@@ -23,6 +23,7 @@ public final class SubAgentTools implements Tool {
     @Override public String name() { return name; }
     @Override public String description() {
         if ("spawn_agent".equals(name)) return "创建独立子任务并并行执行。默认全新上下文；fork=true才复制父有效完整历史与已配对工具记录。"
+                + "派活时由主会话按任务需要选择：独立工作使用新上下文，依赖已有分析或接续工作才fork；不要求每个子任务fork。两种方式都继承必要运行配置和已授权目录。"
                 + "只有 ultra 允许主动派活；其他思考程度仅在真实用户明确要求子 agent 时可调用。"
                 + "返回任务 id 后可发送追加任务复用空闲子 agent，最终交付前必须等待并收集结果，不要重复自己已委派的工作。";
         if ("send_message".equals(name)) return "向同会话 agent 通信。kind=message只发送消息，不启动新任务；kind=task才明确追加任务并复用子会话。目标main只接收消息。运行中在下一次模型请求前送达，不中断正在执行的API或工具。";
@@ -39,7 +40,7 @@ public final class SubAgentTools implements Tool {
             if ("spawn_agent".equals(name)) {
                 properties.put("task", field("string", "独立子任务的完整要求")); required.put("task");
                 properties.put("name", field("string", "简短任务名"));
-                properties.put("fork", field("boolean", "复制父有效完整上下文，默认false"));
+                properties.put("fork", field("boolean", "由派活会话按任务需要选择；依赖已有分析或接续工作才true，独立任务false，默认false。true复制父有效完整上下文"));
             } else if ("send_message".equals(name)) {
                 properties.put("target", field("string", "目标agent id或main")); required.put("target");
                 properties.put("message", field("string", "通信文本或明确追加的任务要求")); required.put("message");

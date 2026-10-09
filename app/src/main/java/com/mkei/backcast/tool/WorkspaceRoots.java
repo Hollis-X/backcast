@@ -6,10 +6,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/** An immutable snapshot of project roots; relative paths use the first root. */
+/** Immutable access grants and task focus; relative paths use the first focus root. */
 final class WorkspaceRoots {
     private final String primary;
     private final List<File> roots;
+    private final List<File> focus;
+    private final File restrictedPrimary;
+    private final List<File> attached;
 
     WorkspaceRoots(String primary, List<String> directories) {
         this.primary = primary;
@@ -17,16 +20,23 @@ final class WorkspaceRoots {
         if (primary != null && primary.length() > 0) add(values, primary);
         if (directories != null) for (String directory : directories) add(values, directory);
         roots = Collections.unmodifiableList(values);
+        focus = roots;
+        restrictedPrimary = null;
+        attached = roots.size() < 2 ? Collections.<File>emptyList() : roots.subList(1, roots.size());
     }
 
-    private WorkspaceRoots(String primary, File[] captured) {
+    private WorkspaceRoots(String primary, List<File> captured, List<File> focused,
+            File restrictedPrimary, List<File> attached) {
         this.primary = primary;
-        roots = Collections.unmodifiableList(java.util.Arrays.asList(captured));
+        roots = Collections.unmodifiableList(new ArrayList<File>(captured));
+        focus = Collections.unmodifiableList(new ArrayList<File>(focused));
+        this.restrictedPrimary = restrictedPrimary;
+        this.attached = attached;
     }
 
     String primary() { return primary; }
 
-    /** Narrow configured capability to the human's task; file links never expand it. */
+    /** Narrow the primary project, while retaining explicitly attached access grants. */
     WorkspaceRoots forTask(List<String> paths) {
         ArrayList<File> selected = new ArrayList<File>();
         if (paths.isEmpty()) {
@@ -53,11 +63,16 @@ final class WorkspaceRoots {
                 if (requested.isFile()) requested = requested.getParentFile();
                 if (requested != null && !selected.contains(requested)) selected.add(requested);
             } catch (IllegalArgumentException rejected) {
-                // An explicit but unauthorized path cannot make other roots accessible.
+                // An unauthorized task path cannot become a default search root.
             }
         }
-        // A failed resolution must not fall back to the whole configured storage root.
-        return new WorkspaceRoots(primary, selected.toArray(new File[selected.size()]));
+        // Attached folders are access grants, not implicit search targets. A task
+        // path can narrow the main project without silently revoking those grants.
+        ArrayList<File> allowed = new ArrayList<File>(selected);
+        for (int i = 1; i < roots.size(); i++) if (!allowed.contains(roots.get(i))) allowed.add(roots.get(i));
+        // Failed task resolution keeps the default focus empty; relative commands
+        // must not fall back to an attached folder or the broad configured root.
+        return new WorkspaceRoots(primary, allowed, selected, roots.isEmpty() ? null : roots.get(0), attached);
     }
 
     private String alias(String path) {
@@ -84,31 +99,59 @@ final class WorkspaceRoots {
     }
 
     File resolve(String path) throws IOException {
-        if (path == null || path.length() == 0 || path.indexOf('\0') >= 0
-                || path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0) throw new IllegalArgumentException("路径不合法。");
-        File file = new File(alias(path));
-        if (!file.isAbsolute() && !roots.isEmpty()) file = new File(roots.get(0), path);
-        file = file.getCanonicalFile();
+        File file = lexicalPath(path).getCanonicalFile();
         if (rootFor(file) == null) {
             throw new IllegalArgumentException("路径超出工作目录：" + path + "。允许目录：" + roots
-                    + "。请在工作文件夹中添加该目录后再访问。");
+                    + "。任务默认目录：" + focus + "。请在工作文件夹中添加该目录后再访问。");
         }
         return file;
     }
 
+    File lexicalPath(String path) {
+        if (path == null || path.length() == 0 || path.indexOf('\0') >= 0
+                || path.indexOf('\n') >= 0 || path.indexOf('\r') >= 0) throw new IllegalArgumentException("路径不合法。");
+        File file = new File(alias(path));
+        if (!file.isAbsolute()) {
+            if (focus.isEmpty()) throw new IllegalArgumentException("本轮指定路径不在已授权工作目录内，不能解析相对路径。");
+            file = new File(focus.get(0), path);
+        }
+        return file.toPath().toAbsolutePath().normalize().toFile();
+    }
+
     File rootFor(File file) throws IOException {
+        return matchingRoot(file.getCanonicalFile(), true);
+    }
+
+    /** Used only after root has resolved the actual path when Java traversal fails. */
+    File lexicalRootFor(File file) throws IOException {
+        return matchingRoot(file.toPath().toAbsolutePath().normalize().toFile(), false);
+    }
+
+    private File matchingRoot(File file, boolean canonical) throws IOException {
+        if (restrictedPrimary != null && inside(restrictedPrimary, file)) {
+            boolean primaryAllowed = false;
+            for (File root : focus) if (inside(root, file)) primaryAllowed = true;
+            // A separately granted child of the main project remains accessible;
+            // an attached ancestor cannot undo a narrower main-project task.
+            for (File root : attached) if (inside(restrictedPrimary, root) && inside(root, file)) primaryAllowed = true;
+            if (!primaryAllowed) return null;
+        }
         File best = null;
         for (File root : roots) {
             // A captured root replaced by a link cannot broaden the original authorization.
-            if (!root.getPath().equals(root.getCanonicalPath())) continue;
-            String base = root.getPath(), path = file.getCanonicalPath();
-            if ((path.equals(base) || path.startsWith(base.endsWith("/") ? base : base + "/"))
-                    && (best == null || base.length() > best.getPath().length())) best = root;
+            if (canonical && !root.getPath().equals(root.getCanonicalPath())) continue;
+            if (inside(root, file) && (best == null || root.getPath().length() > best.getPath().length())) best = root;
         }
         return best;
+    }
+
+    private static boolean inside(File root, File file) {
+        String base = root.getPath(), value = file.getPath();
+        return value.equals(base) || value.startsWith(base.endsWith("/") ? base : base + "/");
     }
 
     boolean isRoot(File file) throws IOException { return roots.contains(file.getCanonicalFile()); }
 
     List<File> directories() { return roots; }
+    List<File> focusDirectories() { return focus; }
 }

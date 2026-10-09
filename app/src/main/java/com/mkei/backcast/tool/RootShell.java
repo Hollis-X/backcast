@@ -39,18 +39,20 @@ final class RootShell {
     private RootShell() {
     }
 
-    static boolean available() {
-        try { return available(INTERRUPTIBLE); }
-        catch (Exception stopped) { return false; }
-    }
-
     static boolean available(ToolchainInstaller.Cancellation cancellation) throws Exception {
         cancellation.check();
         Boolean cached = available;
         if (cached != null && (cached.booleanValue() || System.nanoTime() - availableCheckedAt < NEGATIVE_CACHE_NANOS)) {
             return cached.booleanValue();
         }
-        while (!PROBE_LOCK.tryLock(50, TimeUnit.MILLISECONDS)) cancellation.check();
+        while (true) {
+            cancellation.check();
+            try { if (PROBE_LOCK.tryLock(50, TimeUnit.MILLISECONDS)) break; }
+            catch (InterruptedException cancelled) {
+                if (!(cancellation instanceof CleanupBudget)) throw cancelled;
+                ((CleanupBudget)cancellation).recordInterrupt();
+            }
+        }
         try {
             cancellation.check();
             if (available != null && (available.booleanValue() || System.nanoTime() - availableCheckedAt < NEGATIVE_CACHE_NANOS)) {
@@ -116,12 +118,15 @@ final class RootShell {
         volatile boolean began, controlEnded, destroyed;
         volatile RootIdentity supervisor;
         volatile String failure = "";
+        volatile long cleanupDeadlineNanos;
 
         CommandProcess(final Process raw, final String begin, final String done,
                        ToolchainInstaller.Cancellation cancellation) {
             // RootShell is ProcessTree's lowest-level transport. Its own cleanup must
             // not reenter RootShell through root signals or unreadable /proc scans.
             this.raw = raw; this.cancellation = cancellation; tree = new ProcessTree(raw, false);
+            cleanupDeadlineNanos = cancellation instanceof CleanupBudget
+                    ? ((CleanupBudget)cancellation).deadlineNanos : 0;
             stdout = new FilterInputStream(raw.getInputStream()) {
                 @Override public int read() throws IOException {
                     check(); int value = super.read(); check(); if (value < 0) verifyEof(); return value;
@@ -248,11 +253,15 @@ final class RootShell {
             synchronized (this) { if (destroyed) return; destroyed = true; }
             // Completed file operations have already released their children.
             // Interrupt only a command whose identity was actually observed.
-            if (began && code == Integer.MIN_VALUE && supervisor != null) supervisor.stop();
-            tree.stop();
-            try { raw.getInputStream().close(); } catch (Exception ignored) { }
-            try { raw.getOutputStream().close(); } catch (Exception ignored) { }
-            raw.destroyForcibly();
+            long deadline = cleanupDeadlineNanos == 0 ? System.nanoTime() + CleanupBudget.DEFAULT_NANOS : cleanupDeadlineNanos;
+            try (CleanupBudget budget = new CleanupBudget(deadline)) {
+                if (began && code == Integer.MIN_VALUE && supervisor != null) supervisor.stop(budget);
+                tree.stop(deadline);
+            } finally {
+                try { raw.getInputStream().close(); } catch (Exception ignored) { }
+                try { raw.getOutputStream().close(); } catch (Exception ignored) { }
+                raw.destroyForcibly();
+            }
         }
         @Override public Process destroyForcibly() { destroy(); return this; }
     }
@@ -273,7 +282,7 @@ final class RootShell {
             } catch (Exception invalid) { return null; }
         }
 
-        void stop() {
+        void stop(CleanupBudget budget) {
             // This one guarded signal uses su directly, never the managed executor.
             // A PID/group is killed only after revalidating its captured start time.
             String check = "s=$(cat /proc/" + pid + "/stat 2>/dev/null) || exit 0; "
@@ -286,7 +295,7 @@ final class RootShell {
                 signaler = new ProcessBuilder("su", "-c", check).redirectErrorStream(true)
                         .redirectOutput(new java.io.File("/dev/null")).start();
                 signaler.getOutputStream().close();
-                if (!signaler.waitFor(2, TimeUnit.SECONDS)) signaler.destroyForcibly();
+                while (signaler.isAlive()) budget.pause(20);
             } catch (Exception ignored) { }
             finally { if (signaler != null) signaler.destroy(); }
         }
@@ -332,7 +341,11 @@ final class RootShell {
         long deadline = System.nanoTime() + Math.max(1, timeoutMs) * 1000000L;
         try {
             int exit = waitFor(process, timeoutMs, cancellation);
-            while ((tout.isAlive() || writer.isAlive()) && System.nanoTime() - deadline < 0) { cancellation.check(); tout.join(20); }
+            while ((tout.isAlive() || writer.isAlive()) && System.nanoTime() - deadline < 0) {
+                cancellation.check();
+                if (cancellation instanceof CleanupBudget) ((CleanupBudget)cancellation).pause(20);
+                else tout.join(20);
+            }
             if (tout.isAlive() || writer.isAlive()) { process.failure = "root 输出或输入通道等待超时。"; process.destroy(); exit = -1; }
             if (inputError.get() != null && stdin != null && stdin.length > 0) { process.failure = "root 写入输入数据失败。"; exit = 125; }
             if (process.failure.length() > 0 && exit == 0) exit = 125;
@@ -353,7 +366,8 @@ final class RootShell {
                     process.destroy();
                     return -1;
                 }
-                Thread.sleep(30);
+                if (cancellation instanceof CleanupBudget) ((CleanupBudget)cancellation).pause(30);
+                else Thread.sleep(30);
             }
         }
     }

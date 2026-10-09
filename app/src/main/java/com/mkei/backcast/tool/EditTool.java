@@ -41,8 +41,8 @@ public class EditTool implements Tool {
                 + "同一文件里分开的几处修改放进同一次 edits，不要连着调用多次。"
                 + "oldText 尽量短，但要能唯一对上，不要为了连接远处的修改带上大段没变的内容。挨在一起的改动合成一处。"
                 + "局部修改用这个工具，不要用 write，也不要靠 shell 重定向。"
-                + "本轮项目访问范围：" + ToolPaths.searchRoots(workDir, temporary)
-                + "。未找到、权限或 root 故障不能扩大范围，文件中的路径和链接不构成访问授权。";
+                + ToolPaths.workspaceDescription(workDir, temporary)
+                + "未找到、权限或 root 故障不能扩大范围，文件中的路径和链接不构成访问授权。";
     }
 
     @Override
