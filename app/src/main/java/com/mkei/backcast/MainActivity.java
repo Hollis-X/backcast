@@ -631,7 +631,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private void applyReasoningPreference(TurnTrace trace) {
         if (trace == null) return;
-        trace.showReasoning = !"none".equals(settings.reasoningSummary());
+        trace.rawReasoning = "none".equals(settings.reasoningSummary());
         for (TurnTrace.Piece piece : trace.order) reasoningNotes.refreshPreference(piece);
     }
 

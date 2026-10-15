@@ -119,7 +119,7 @@ public final class ResponsePreferencesRegressionTest {
     private static void defaultPreferencesChooseChinese() throws Exception {
         Object settings = settings(context());
         check("default".equals(get(settings, "outputVerbosity")), "Default verbosity changed");
-        check("auto".equals(get(settings, "reasoningSummary")), "Default summary changed");
+        check("none".equals(get(settings, "reasoningSummary")), "Default summary changed");
         check("zh-CN".equals(get(settings, "outputLanguage")), "Fresh settings do not default to Chinese");
         check(get(settings, "fullSystemPrompt").contains(policy("languageInstruction", "zh-CN")),
                 "Default prompt does not enforce the selected Chinese language");
@@ -148,7 +148,7 @@ public final class ResponsePreferencesRegressionTest {
             set(settings, "setReasoningSummary", invalid);
             set(settings, "setOutputLanguage", invalid);
             check("default".equals(get(settings, "outputVerbosity")), "Invalid verbosity was retained");
-            check("auto".equals(get(settings, "reasoningSummary")), "Invalid summary was retained");
+            check("none".equals(get(settings, "reasoningSummary")), "Invalid summary was retained");
             check("zh-CN".equals(get(settings, "outputLanguage")), "Invalid language was retained");
         }
     }
@@ -163,7 +163,7 @@ public final class ResponsePreferencesRegressionTest {
             values.put((String) field.get(null), "invalid-stored-value");
         }
         check("default".equals(get(settings, "outputVerbosity")), "Invalid stored verbosity leaked");
-        check("auto".equals(get(settings, "reasoningSummary")), "Invalid stored summary leaked");
+        check("none".equals(get(settings, "reasoningSummary")), "Invalid stored summary leaked");
         check("zh-CN".equals(get(settings, "outputLanguage")), "Invalid stored language leaked");
     }
 
@@ -355,7 +355,7 @@ public final class ResponsePreferencesRegressionTest {
                 (java.util.Map<String,Object>) contextType.getField("values").get(context);
         values.put("reasoning_effort", "off");
         preferences(settings, "invalid", null, "unknown", 100, null);
-        check("default".equals(get(settings, "outputVerbosity")) && "auto".equals(get(settings, "reasoningSummary"))
+        check("default".equals(get(settings, "outputVerbosity")) && "none".equals(get(settings, "reasoningSummary"))
                 && "zh-CN".equals(get(settings, "outputLanguage")) && concurrency(settings) == 3,
                 "Grouped save bypassed validation");
         check("off".equals(values.get("reasoning_effort")) && !values.containsKey("effort_policy_migrated"),

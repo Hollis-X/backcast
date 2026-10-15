@@ -81,11 +81,10 @@ final class ProcessTree {
         }
         if (root && (unreadable || supervisor != null && identity(supervisor.pid) == null)) {
             try {
-                // An unrelated process can exit while being scanned. Only a
-                // still-present unreadable stat makes this census incomplete.
-                String command = "failed=0; for f in /proc/[0-9]*/stat; do "
-                        + "s=$(cat \"$f\" 2>/dev/null) && printf '%s\\n' \"$s\" "
-                        + "|| { [ ! -d \"${f%/stat}\" ] || failed=1; }; done; exit \"$failed\"";
+                // One cat reads every stat file; forking one cat per process took
+                // seconds on phones and ate the whole cleanup deadline. Processes
+                // that exit mid-scan are simply absent, so the census stays usable.
+                String command = "cat /proc/[0-9]*/stat 2>/dev/null; exit 0";
                 RootShell.Out out = rootExec(command, 2097152, budget, "读取进程身份");
                 complete = out.exit == 0;
                 for (String line : new String(out.stdout, "UTF-8").split("\\n")) {

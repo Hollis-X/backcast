@@ -464,7 +464,7 @@ public class Settings {
     }
 
     public String reasoningSummary() {
-        return ResponsePreferences.normalizeSummary(prefs.getString(KEY_REASONING_SUMMARY, "auto"));
+        return ResponsePreferences.normalizeSummary(prefs.getString(KEY_REASONING_SUMMARY, "none"));
     }
 
     public String outputLanguage() {

@@ -29,7 +29,8 @@ public class TurnTrace {
     private boolean roundOpen;
     public long elapsedMs;
     public long thinkMs;
-    public boolean showReasoning = true;
+    /** 推理摘要为“无”时，不调用模型总结，直接显示原始思考文字。 */
+    public boolean rawReasoning;
     /** The current stage survives a failed request's preview rollback. */
     public String phase = "model";
     /**
@@ -70,7 +71,7 @@ public class TurnTrace {
             int priority = 0;
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.think != null ? trace.showReasoning && !piece.sealed
+                if (piece.think != null ? !piece.sealed
                         : piece.step != null && !piece.step.done) pending = true;
                 if (piece.step != null && !piece.step.done) {
                     Step step = piece.step;
@@ -90,7 +91,7 @@ public class TurnTrace {
         public boolean hasActivity() {
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.step != null || trace.showReasoning && piece.think != null) return true;
+                if (piece.step != null || piece.think != null) return true;
             }
             return false;
         }
@@ -100,7 +101,7 @@ public class TurnTrace {
     public String activityCaption(int from, int to) {
         int thinks = 0, tools = 0;
         for (int i = Math.max(0, from); i < Math.min(to, order.size()); i++) {
-            if (showReasoning && order.get(i).think != null) thinks++;
+            if (order.get(i).think != null) thinks++;
             if (order.get(i).step != null) tools++;
         }
         if (thinks == 0 && tools == 0) return "";

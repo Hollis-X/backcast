@@ -12,7 +12,7 @@ import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** One chronological level. Raw reasoning never enters an Android text layout. */
+/** One chronological level. Reasoning shows its summary, or the original text when summaries are off. */
 public final class WorkTimeline extends LinearLayout {
     public interface Actions {
         void summarize(TurnTrace.Piece piece, boolean retry);
@@ -35,7 +35,7 @@ public final class WorkTimeline extends LinearLayout {
         List<TurnTrace.Piece> visible = new ArrayList<TurnTrace.Piece>();
         for (int i = start; i < end; i++) {
             TurnTrace.Piece piece = range.trace.order.get(i);
-            if (range.trace.showReasoning || piece.think == null) visible.add(piece);
+            visible.add(piece);
         }
         int count = visible.size();
         boolean reset = rows.size() > count;
@@ -50,7 +50,7 @@ public final class WorkTimeline extends LinearLayout {
         for (int i = 0; i < rows.size(); i++) {
             Row row = rows.get(i);
             row.line.setVisibility(i == rows.size() - 1 ? INVISIBLE : VISIBLE);
-            row.bind(live);
+            row.bind(live, range.trace.rawReasoning);
         }
     }
 
@@ -62,6 +62,7 @@ public final class WorkTimeline extends LinearLayout {
         final View line;
         String renderedSummary = null;
         String renderedArgs = null, renderedResult = null;
+        int renderedThink = -1;
 
         Row(final TurnTrace.Piece piece) {
             this.piece = piece;
@@ -115,7 +116,7 @@ public final class WorkTimeline extends LinearLayout {
             }
         }
 
-        void bind(boolean live) {
+        void bind(boolean live, boolean raw) {
             boolean thinking = piece.think != null;
             boolean active = thinking ? live && !piece.sealed
                     : live && !piece.step.done;
@@ -124,7 +125,13 @@ public final class WorkTimeline extends LinearLayout {
             marker.setText(thinking ? (piece.sealed ? "\u2713" : "\u2022")
                     : piece.step.done ? (failed(piece.step) ? "!" : "\u2713") : "\u2022");
             marker.setTextColor(!thinking && failed(piece.step) ? 0xFFB44438 : MUTED);
+            if (thinking && raw) {
+                bindRaw(active);
+                return;
+            }
             if (thinking) {
+                renderedThink = -1;
+                brief.setMaxLines(3);
                 if (piece.sealed) actions.summarize(piece, false);
                 title.setText(piece.sealed ? "推理摘要" : "正在思考");
                 String caption = active ? "思考中" : piece.sealed ? "思考结束" : "思考未完成";
@@ -167,7 +174,32 @@ public final class WorkTimeline extends LinearLayout {
                         + (step.done && step.result.length() > 0 ? "\n" + ReasoningSummary.clip(step.result, 180) : ""));
             }
         }
+
+        private void bindRaw(boolean active) {
+            title.setText(piece.sealed ? "思考" : "正在思考");
+            String caption = active ? "思考中" : piece.sealed ? "思考结束" : "思考未完成";
+            if (piece.thinkMs > 0) caption += " · " + ((piece.thinkMs + 999) / 1000) + "s";
+            state.setText(caption);
+            retry.setVisibility(GONE);
+            notes.setVisibility(GONE);
+            int size = piece.think.length();
+            brief.setMaxLines(Integer.MAX_VALUE);
+            brief.setVisibility(size == 0 ? GONE : VISIBLE);
+            if (renderedThink != size) {
+                renderedThink = size;
+                String text = piece.think.toString().trim();
+                if (text.length() > RAW_LIMIT) {
+                    int from = text.length() - RAW_LIMIT;
+                    if (Character.isLowSurrogate(text.charAt(from))) from++;
+                    text = "…" + text.substring(from);
+                }
+                brief.setText(text);
+            }
+        }
     }
+
+    /** 原始思考只取末尾一段，避免超长文本拖慢排版。 */
+    private static final int RAW_LIMIT = 4000;
 
     public static String toolState(TurnTrace.Step step, boolean live) {
         return step.done ? (failed(step) ? "失败" : "完成")

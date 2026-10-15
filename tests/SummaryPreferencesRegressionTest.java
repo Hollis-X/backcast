@@ -74,8 +74,9 @@ public final class SummaryPreferencesRegressionTest {
                 "None mode still constructs a summary request");
     }
 
-    private static void hiddenReasoningPreservesToolsAndRawText() {
+    private static void rawReasoningKeepsOriginalTextAndChronology() {
         TurnTrace trace = new TurnTrace();
+        check(!trace.rawReasoning, "Raw reasoning must be opt-in per trace");
         trace.appendThink("original reasoning");
         trace.sealThink();
         TurnTrace.Range thought = new TurnTrace.Range(trace, 0);
@@ -83,15 +84,13 @@ public final class SummaryPreferencesRegressionTest {
         trace.addStep("read_1", "read", "{}");
         TurnTrace.Range mixed = new TurnTrace.Range(trace, 0);
         mixed.end = trace.order.size();
-        trace.showReasoning = false;
-        check(!thought.hasDetail() && thought.caption().length() == 0,
-                "None mode leaves a visible reasoning detail row");
-        check(mixed.hasDetail() && mixed.caption().contains("工具") && !mixed.caption().contains("思考"),
-                "None mode hides tools or exposes a reasoning caption");
+        trace.rawReasoning = true;
+        check(thought.hasDetail() && thought.caption().contains("思考"),
+                "None mode must keep the reasoning row so the original text can be shown");
+        check(mixed.hasDetail() && mixed.caption().contains("工具") && mixed.caption().contains("思考"),
+                "None mode dropped tools or the reasoning caption");
         check("original reasoning".contentEquals(trace.order.get(0).think) && trace.order.size() == 2,
                 "UI preferences removed the original reasoning or chronology");
-        trace.showReasoning = true;
-        check(thought.hasDetail() && thought.caption().contains("思考"), "Reasoning cannot be shown again");
     }
 
     private static Object get(Object object, String name) throws Exception {
@@ -250,7 +249,7 @@ public final class SummaryPreferencesRegressionTest {
         File build = compileFixtures(args[0]);
         try {
             for (String name : new String[]{"modesChangePromptAndLimits", "languageReachesSummaryRequest",
-                    "noneProducesNoSummaryRequest", "hiddenReasoningPreservesToolsAndRawText", "notesNoneDoesNotSend",
+                    "noneProducesNoSummaryRequest", "rawReasoningKeepsOriginalTextAndChronology", "notesNoneDoesNotSend",
                     "preferenceChangeClearsOldSummaryAndError", "asyncResultCannotRestoreHiddenSummary", "cacheSeparatesModeAndLanguage"}) {
                 SummaryPreferencesRegressionTest.class.getDeclaredMethod(name).invoke(null);
                 passed++;

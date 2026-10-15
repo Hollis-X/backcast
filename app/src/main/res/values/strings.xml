@@ -195,13 +195,13 @@
         <item>自动</item>
         <item>简洁</item>
         <item>详细</item>
-        <item>无</item>
+        <item>无（显示原始思考）</item>
     </string-array>
     <string-array name="reasoning_summary_descriptions">
         <item>根据任务内容生成适量的推理摘要</item>
         <item>用一句话概括当前思路</item>
         <item>提供更完整的思路与验证摘要</item>
-        <item>不生成或显示推理摘要；仍保留工具调用和最终回复</item>
+        <item>不生成摘要，直接显示模型的原始思考内容</item>
     </string-array>
     <string-array name="output_language_labels">
         <item>简体中文</item>
