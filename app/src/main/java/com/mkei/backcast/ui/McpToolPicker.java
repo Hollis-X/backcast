@@ -1,7 +1,6 @@
 package com.mkei.backcast.ui;
 
 import android.content.Context;
-import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -12,7 +11,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import com.mkei.backcast.ChatStore;
-import com.mkei.backcast.McpConfigActivity;
 import com.mkei.backcast.RunHub;
 import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.mcp.McpCatalog;
@@ -63,10 +61,8 @@ public final class McpToolPicker {
     public void append(List<SlashMenuPopup.Item> items, String prefix) {
         final long owner = host.context();
         final int mine = generation;
-        if (catalog == null) {
-            items.add(new SlashMenuPopup.Item("正在读取 MCP 工具列表…", "", null));
-            return;
-        }
+        // 还没读到或没有 MCP 服务时不占位，菜单只显示指令。
+        if (catalog == null) return;
         List<McpCatalog.Server> servers = catalog;
         String query = prefix.toLowerCase(Locale.ROOT);
         if (query.equals("mcp")) query = "";
@@ -91,11 +87,6 @@ public final class McpToolPicker {
 
         }
         if (omitted > 0) items.add(new SlashMenuPopup.Item("还有 " + omitted + " 个匹配工具", "继续输入工具名或服务名筛选", null));
-        if (servers.isEmpty() && (query.length() == 0 || matches("mcp", query)))
-            items.add(new SlashMenuPopup.Item("配置 MCP 服务", "尚无已启用服务", () -> {
-                if (!current(mine, owner)) return;
-                host.hideMenu(); context.startActivity(new Intent(context, McpConfigActivity.class));
-            }));
     }
 
     private static boolean matches(String value, String query) {

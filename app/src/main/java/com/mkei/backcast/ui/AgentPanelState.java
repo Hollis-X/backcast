@@ -6,14 +6,17 @@ import com.mkei.backcast.agent.SubAgentManager;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** Reading and refresh state shared by the task list and its detail view. */
 public final class AgentPanelState {
-    public static final int TASK = 0, ACTIVITY = 1;
+    public static final int TASK = 0, ACTIVITY = 1, RESULT = 2, MESSAGES = 3;
     public static final int HISTORY_PAGE_SIZE = 40, RESULT_PAGE_SIZE = 8000;
     public String selectedId = "";
     public int tab = TASK, historyEnd = -1, resultOffset;
@@ -62,17 +65,85 @@ public final class AgentPanelState {
         return SubAgentManager.RUNNING.equals(status) || SubAgentManager.QUEUED.equals(status)
                 || SubAgentManager.WAITING.equals(status);
     }
+    private static final Comparator<SubAgentManager.Record> BY_ACTIVITY = new Comparator<SubAgentManager.Record>() {
+        @Override public int compare(SubAgentManager.Record a, SubAgentManager.Record b) {
+            if (active(a.status) != active(b.status)) return active(a.status) ? -1 : 1;
+            if (a.lastActivityAt != b.lastActivityAt) return a.lastActivityAt > b.lastActivityAt ? -1 : 1;
+            return a.id.compareTo(b.id);
+        }
+    };
+
     public static List<SubAgentManager.Record> ordered(List<SubAgentManager.Record> source) {
         List<SubAgentManager.Record> rows = new ArrayList<SubAgentManager.Record>();
         for (SubAgentManager.Record row : source) if (!SubAgentManager.ROOT.equals(row.id)) rows.add(row);
-        Collections.sort(rows, new Comparator<SubAgentManager.Record>() {
-            @Override public int compare(SubAgentManager.Record a, SubAgentManager.Record b) {
-                if (active(a.status) != active(b.status)) return active(a.status) ? -1 : 1;
-                if (a.lastActivityAt != b.lastActivityAt) return a.lastActivityAt > b.lastActivityAt ? -1 : 1;
-                return a.id.compareTo(b.id);
-            }
-        });
+        Collections.sort(rows, BY_ACTIVITY);
         return rows;
+    }
+
+    /** One row of the agent tree: the agent and how deep it sits below main. */
+    public static final class Node {
+        public final SubAgentManager.Record record;
+        public final int depth;
+        Node(SubAgentManager.Record record, int depth) { this.record = record; this.depth = depth; }
+    }
+
+    /** Depth-first tree under main; within one parent, running agents first, then the most recent. */
+    public static List<Node> tree(List<SubAgentManager.Record> source) {
+        Map<String, List<SubAgentManager.Record>> children = new HashMap<String, List<SubAgentManager.Record>>();
+        Map<String, SubAgentManager.Record> known = new HashMap<String, SubAgentManager.Record>();
+        for (SubAgentManager.Record row : source) if (!SubAgentManager.ROOT.equals(row.id)) known.put(row.id, row);
+        List<SubAgentManager.Record> roots = new ArrayList<SubAgentManager.Record>();
+        for (SubAgentManager.Record row : known.values()) {
+            if (SubAgentManager.ROOT.equals(row.parentId) || !known.containsKey(row.parentId)) { roots.add(row); continue; }
+            List<SubAgentManager.Record> list = children.get(row.parentId);
+            if (list == null) { list = new ArrayList<SubAgentManager.Record>(); children.put(row.parentId, list); }
+            list.add(row);
+        }
+        Collections.sort(roots, BY_ACTIVITY);
+        List<Node> out = new ArrayList<Node>();
+        HashSet<String> seen = new HashSet<String>();
+        for (SubAgentManager.Record root : roots) walk(root, 0, children, out, seen);
+        return out;
+    }
+
+    private static void walk(SubAgentManager.Record row, int depth, Map<String, List<SubAgentManager.Record>> children,
+            List<Node> out, HashSet<String> seen) {
+        if (!seen.add(row.id) || depth > 8) return;
+        out.add(new Node(row, depth));
+        List<SubAgentManager.Record> list = children.get(row.id);
+        if (list == null) return;
+        Collections.sort(list, BY_ACTIVITY);
+        for (SubAgentManager.Record child : list) walk(child, depth + 1, children, out, seen);
+    }
+
+    /** id to readable path, so messages can say who talked to whom. */
+    public static Map<String, String> names(List<SubAgentManager.Record> source) {
+        Map<String, String> names = new HashMap<String, String>();
+        names.put(SubAgentManager.ROOT, "主会话");
+        for (SubAgentManager.Record row : source) names.put(row.id, row.path.length() > 0 ? row.path : row.name);
+        return names;
+    }
+
+    /** Messages and task assignments this agent sent or received, oldest first: {who, text}. */
+    public static List<String[]> conversation(SubAgentManager.Record record, Map<String, String> names) {
+        List<String[]> rows = new ArrayList<String[]>();
+        for (int i = 0; i < record.events.length(); i++) {
+            JSONObject event = record.events.optJSONObject(i);
+            if (event == null) continue;
+            String kind = event.optString("kind");
+            if (!"message".equals(kind) && !"task".equals(kind)) continue;
+            String from = event.optString("from"), to = event.optString("to");
+            String text = event.optString("text");
+            if (text.length() == 0) continue;
+            String who = label(names, from) + " → " + label(names, to) + ("task".equals(kind) ? "（任务）" : "");
+            rows.add(new String[] { who, text });
+        }
+        return rows;
+    }
+
+    private static String label(Map<String, String> names, String id) {
+        String name = names.get(id);
+        return name == null || name.length() == 0 ? id : name;
     }
     public static final class Entry {
         public final String role, text, fullText;
@@ -137,7 +208,7 @@ public final class AgentPanelState {
                     for (int i = 0; i < messages.length(); i++) {
                         JSONObject message = messages.getJSONObject(i);
                         if (text.length() > 0) text.append("\n\n");
-                        text.append(message.optString("from")).append(":\n").append(message.optString("text"));
+                        text.append(message.optString("fromPath", message.optString("from"))).append(":\n").append(message.optString("text"));
                     }
                     return text.toString();
                 }

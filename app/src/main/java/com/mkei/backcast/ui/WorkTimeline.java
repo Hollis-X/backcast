@@ -35,6 +35,8 @@ public final class WorkTimeline extends LinearLayout {
         List<TurnTrace.Piece> visible = new ArrayList<TurnTrace.Piece>();
         for (int i = start; i < end; i++) {
             TurnTrace.Piece piece = range.trace.order.get(i);
+            // 计划画在会话里的卡片上，时间线里不再出现。
+            if (piece.step != null && TurnTrace.PLAN.equals(piece.step.name)) continue;
             visible.add(piece);
         }
         int count = visible.size();
@@ -166,12 +168,13 @@ public final class WorkTimeline extends LinearLayout {
             }
             retry.setVisibility(GONE);
             TurnTrace.Step step = piece.step;
+            brief.setMaxLines(3);
             title.setText(toolTitle(step));
-            state.setText(toolState(step, live));
+            state.setText(withDelta(toolState(step, live), step.done ? com.mkei.backcast.agent.LineDelta.parse(step.result) : null));
             if (renderedArgs != step.args || renderedResult != step.result) {
                 renderedArgs = step.args; renderedResult = step.result;
                 brief.setText(ReasoningSummary.clip(command(step), 160)
-                        + (step.done && step.result.length() > 0 ? "\n" + ReasoningSummary.clip(step.result, 180) : ""));
+                        + (step.done && step.result.length() > 0 ? "\n" + ReasoningSummary.clip(com.mkei.backcast.agent.LineDelta.strip(step.result), 180) : ""));
             }
         }
 
@@ -201,6 +204,25 @@ public final class WorkTimeline extends LinearLayout {
     /** 原始思考只取末尾一段，避免超长文本拖慢排版。 */
     private static final int RAW_LIMIT = 4000;
 
+    /** 在文字后面接上绿色 +增 红色 -删，带浅色底。delta 为 null 时原样返回。 */
+    public static CharSequence withDelta(CharSequence text, int[] delta) {
+        if (delta == null) return text;
+        android.text.SpannableStringBuilder out = new android.text.SpannableStringBuilder(text);
+        if (out.length() > 0) out.append("  ");
+        appendChip(out, " +" + delta[0] + " ", 0xFF1E7B3C, 0xFFDDF3E4);
+        appendChip(out, " -" + delta[1] + " ", 0xFFC0392B, 0xFFFBE0DD);
+        return out;
+    }
+
+    private static void appendChip(android.text.SpannableStringBuilder out, String chip, int ink, int fill) {
+        int start = out.length();
+        out.append(chip);
+        int flags = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE;
+        out.setSpan(new android.text.style.ForegroundColorSpan(ink), start, out.length(), flags);
+        out.setSpan(new android.text.style.BackgroundColorSpan(fill), start, out.length(), flags);
+        out.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, out.length(), flags);
+    }
+
     public static String toolState(TurnTrace.Step step, boolean live) {
         return step.done ? (failed(step) ? "失败" : "完成")
                 : live ? TurnTrace.stepPhaseCaption(step) : "未完成";
@@ -223,6 +245,8 @@ public final class WorkTimeline extends LinearLayout {
     }
 
     public static String toolTitle(TurnTrace.Step step) {
+        if (TurnTrace.PLAN.equals(step.name)) return "任务计划";
+        if (TurnTrace.ASK.equals(step.name)) return "询问用户";
         if ("shell".equals(step.name)) return "执行命令";
         if ("read".equals(step.name)) return "读取文件";
         if ("edit".equals(step.name)) return "编辑文件";

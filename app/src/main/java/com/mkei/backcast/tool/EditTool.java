@@ -136,11 +136,12 @@ public class EditTool extends AbortableTool {
         if (probe.directory) {
             return "错误：这是目录：" + file.getAbsolutePath();
         }
+        int[] delta;
         synchronized (ToolPaths.lock(file)) {
             if (epoch != mine) {
                 return "已停止。";
             }
-            byte[] previous;
+                        byte[] previous;
             try {
                 previous = ToolPaths.readBytes(file, MAX_LOAD, useRoot, cancellation);
             } catch (IllegalArgumentException e) {
@@ -154,6 +155,7 @@ public class EditTool extends AbortableTool {
             if (outcome.error != null) {
                 return "错误：" + outcome.error;
             }
+            delta = com.mkei.backcast.agent.LineDelta.count(raw, outcome.content);
             if (epoch != mine) {
                 return "已停止。";
             }
@@ -165,7 +167,7 @@ public class EditTool extends AbortableTool {
                 return "错误：" + e.getMessage();
             }
         }
-        return "已替换 " + edits.size() + " 处：" + path;
+        return "已替换 " + edits.size() + " 处：" + path + "\n" + com.mkei.backcast.agent.LineDelta.mark(delta);
     }
 
     /**

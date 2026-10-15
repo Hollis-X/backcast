@@ -65,7 +65,7 @@ public final class McpConfigActivity extends AppCompatActivity {
         setContentView(page);
         setSupportActionBar(toolbar);
         if (id == null) {
-            text("连接 MCP 服务后，主会话和子任务都可调用服务提供的工具。点击服务查看配置和工具。", 14);
+            text("连接 MCP 服务后，主会话和子代理都可调用服务提供的工具。点击服务查看配置和工具。", 14);
             button("添加服务", view -> open(UUID.randomUUID().toString()));
             rows = new LinearLayout(this);
             rows.setOrientation(LinearLayout.VERTICAL);

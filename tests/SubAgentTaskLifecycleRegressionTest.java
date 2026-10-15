@@ -229,6 +229,8 @@ public final class SubAgentTaskLifecycleRegressionTest {
         for (Message stored : durable) rawRows.add(new Message(stored.role, stored.content));
         restarted.root.loadHistory("restored system", rawRows);
         restarted.root.submit("resume collection", 1, restarted.root.generation(), 2, null);
+        // the second chunk reaches the parent through the wake that follows its turn
+        for (int i = 0; i < 3 && restarted.manager.shouldWakeRoot(); i++) restarted.root.resumeForChildEvents(1L, -1);
         int appearances = 0, notes = 0;
         for (Message stored : durable) if (Message.isCoordination(stored.content)) {
             notes++; stored.restoreCoordinationIds();
@@ -443,16 +445,14 @@ public final class SubAgentTaskLifecycleRegressionTest {
     static void archivedResultIndexIsBoundedAndNeverConfirmsEvidence() throws Exception {
         Fixture fixture = new Fixture(); String id = fixture.spawn(false); fixture.settled();
         for (int i = 1; i < 27; i++) { fixture.manager.send("main", id, "archived task " + i, "task"); fixture.settled(); }
-        ToolRegistry tools = new ToolRegistry(); SubAgentTools.register(tools, fixture.manager, "main");
-        JSONObject first = new JSONObject(tools.get("read_agent_result").run(new JSONObject().put("target", id).put("list", true)));
-        JSONObject second = new JSONObject(tools.get("read_agent_result").run(new JSONObject().put("target", id).put("list", true)
-                .put("cursor", first.getInt("nextCursor"))));
+        JSONObject first = fixture.manager.resultIndex("main", id, 0);
+        JSONObject second = fixture.manager.resultIndex("main", id, first.getInt("nextCursor"));
         check(first.getJSONArray("results").length() == 20 && second.getJSONArray("results").length() == 7
                 && second.isNull("nextCursor") && first.getInt("totalResults") == 27, "Archived result index did not paginate all old identities");
         check(fixture.manager.hasUncollectedResults() && fixture.manager.find("main").deliveredResults.length() == 0
                 && fixture.manager.find("main").acknowledgedResults.length() == 0, "Listing result identities confirmed unseen evidence");
         String archived = first.getJSONArray("results").getJSONObject(0).getString("resultId");
-        check(new JSONObject(tools.get("read_agent_result").run(new JSONObject().put("target", id).put("result_id", archived)))
+        check(fixture.manager.readResult("main", id, archived, 0, 8000)
                 .getString("result").contains("first assignment"), "Compacted context cannot discover and re-read an older result");
     }
     static void trustedRestartDoesNotRunCancelledPeerQueues() throws Exception {

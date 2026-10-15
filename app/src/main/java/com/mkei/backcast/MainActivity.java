@@ -62,6 +62,7 @@ import com.mkei.backcast.ui.SweepText;
 import com.mkei.backcast.ui.TranscriptScrollView;
 import com.mkei.backcast.ui.TurnTrace;
 import com.mkei.backcast.ui.WorkTimeline;
+import com.mkei.backcast.ui.PlanCard;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -82,7 +83,7 @@ import java.util.concurrent.Executors;
  * 排版原则：助手回复是白底纯文本，不加气泡；只有用户消息用淡紫气泡。
  * 思考与工具输出默认收起成一行小字，点开才展开。
  */
-public class MainActivity extends AppCompatActivity implements ApprovalGate {
+public class MainActivity extends AppCompatActivity implements ApprovalGate, com.mkei.backcast.agent.UserQuestions {
 
     /** 用户气泡最大宽度占屏宽比例。 */
     private static final float BUBBLE_MAX_RATIO = 0.82f;
@@ -318,6 +319,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         setContentView(R.layout.activity_main);
 
         configureSystemBars();
+        RunHub.get(this).setQuestions(this);
 
         scroll = (TranscriptScrollView) findViewById(R.id.scroll);
         stream = (LinearLayout) findViewById(R.id.stream);
@@ -665,6 +667,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     @Override
     protected void onDestroy() {
         activityDestroyed = true;
+        if (RunHub.get(this).questionsAre(this)) RunHub.get(this).setQuestions(null);
         resetSlashContext();
         resetSheetDetails();
         cancelApprovals();
@@ -702,6 +705,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             return;
         }
         super.onBackPressed();
+    }
+
+    @Override
+    public void show(final com.mkei.backcast.agent.QuestionRequest request) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (activityDestroyed || isFinishing()) { request.cancel(); return; }
+                com.mkei.backcast.ui.QuestionDialog.show(MainActivity.this, request);
+            }
+        });
     }
 
     @Override
@@ -2500,6 +2513,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         stop.setVisibility(busy ? View.VISIBLE : View.GONE);
         if (!busy) {
             tintSend(prompt.getText().toString().trim().length() > 0);
+            if (stream != null) PlanCard.settleAll(stream);
         }
         syncSlashPopup(prompt.getText().toString());
     }
@@ -3682,6 +3696,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
     private void refreshAllFolds(Flow flow) {
         if (flow == null) return;
+        syncPlanCard(flow);
         refreshFoldResults(flow.rows);
         for (int i = 0; i < flow.box.getChildCount(); i++) {
             View child = flow.box.getChildAt(i);
@@ -3709,6 +3724,30 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         return flow.body;
     }
 
+    /**
+     * 本轮有计划时，在这一轮的末尾放一张卡片，跟着计划更新；它始终排在这一轮最后，
+     * 新的正文或工具出现后挪到它们下面。
+     */
+    private void syncPlanCard(Flow flow) {
+        TurnTrace trace = traceOf(flow.rows);
+        String plan = trace == null ? null : trace.latestPlan();
+        PlanCard card = null;
+        for (int i = 0; i < flow.box.getChildCount(); i++)
+            if (flow.box.getChildAt(i) instanceof PlanCard) { card = (PlanCard) flow.box.getChildAt(i); break; }
+        if (plan == null) {
+            if (card != null) flow.box.removeView(card);
+            return;
+        }
+        if (card == null) {
+            card = new PlanCard(this);
+            flow.box.addView(card, PlanCard.layout(this));
+        } else if (flow.box.indexOfChild(card) != flow.box.getChildCount() - 1) {
+            flow.box.removeView(card);
+            flow.box.addView(card, PlanCard.layout(this));
+        }
+        card.bind(plan, trace == currentTrace && loop != null && loop.busy());
+    }
+
     private void refreshFoldResults(LinearLayout rows) {
         if (rows == null || rows.getChildCount() == 0 || !(rows.getTag() instanceof TurnTrace.Range)) return;
         TurnTrace.Range range = (TurnTrace.Range) rows.getTag();
@@ -3716,8 +3755,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View first = rows.getChildAt(0);
         TextView caption = first instanceof LinearLayout
                 ? (TextView) ((LinearLayout) first).getChildAt(0) : (TextView) first;
-        String next = range.caption();
-        if (!next.contentEquals(caption.getText())) caption.setText(next);
+        CharSequence next = WorkTimeline.withDelta(range.caption(), range.trace.lineDelta(range.start, range.end));
+        if (!next.toString().contentEquals(caption.getText())) caption.setText(next);
         rows.setVisibility(range.hasDetail() ? View.VISIBLE : View.GONE);
     }
 

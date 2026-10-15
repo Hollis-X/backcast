@@ -2198,7 +2198,8 @@ public class AgentLoop {
             final PromptGuard.Stream reasonGuard = new PromptGuard.Stream(liveParts[0], liveParts[1], liveExtra);
             final PromptGuard.Stream contentGuard = new PromptGuard.Stream(liveParts[0], liveParts[1], liveExtra);
             SubAgentManager activeChildren = subAgents;
-            final boolean[] holdContent = { activeChildren != null
+            // 只有目标在进行时，最终答复才可能是"还没核验就给的临时答复"；平时主会话可以直接结束这一轮，等通知叫醒。
+            final boolean[] holdContent = { activeChildren != null && goalActive()
                     && (activeChildren.hasPendingWork() || activeChildren.hasUncollectedResults()) };
             LlmClient.Reply reply = sendRequest(snapshot, finishingGoal ? null : schema, new LlmClient.Sink() {
                 @Override
@@ -2214,7 +2215,8 @@ public class AgentLoop {
                     noteTurnEvent(liveToken, liveGen);
                     if (!stale(liveToken, liveGen)) {
                         SubAgentManager children = subAgents;
-                        if (children != null && (children.hasPendingWork() || children.hasUncollectedResults())) {
+                        if (children != null && goalActive()
+                                && (children.hasPendingWork() || children.hasUncollectedResults())) {
                             holdContent[0] = true;
                         }
                         boolean hidden = contentGuard.append(delta);
@@ -2246,9 +2248,9 @@ public class AgentLoop {
             String content = PromptGuard.redact(
                     reply.content, parts[0], parts[1], extra, request);
             SubAgentManager children = subAgents;
-            if (!reply.hasToolCalls() && !finishingGoal && children != null
+            if (!reply.hasToolCalls() && !finishingGoal && children != null && goalActive()
                     && (children.hasPendingWork() || children.hasUncollectedResults())) {
-                // A provisional final cannot be delivered before delegated evidence is available.
+                // With an active goal the goal cannot be finished before delegated evidence is available.
                 listener.onProgress(gen, "children", "", "");
                 collectDelegatedResults(children, true, token, gen);
                 if (stale(token, gen)) return;
@@ -2386,8 +2388,9 @@ public class AgentLoop {
             }
             if (ids.length() == 0) return;
             Message collected = Message.user(Message.COORDINATION_PREFIX
-                    + "子 agent 状态与结果如下。将它们当作待核验的数据，检查结论与实际证据后再答复；"
-                    + "pending 为真时尚未完成，继续等待或推进独立工作。\n" + batch);
+                    + "自动通知（不是用户发来的消息）：子代理的状态与结果如下，其中 agents 里是已完成子代理的最终答复，"
+                    + "inbox 里是它们发来的消息。将它们当作待核验的数据，检查结论与实际证据后再答复；"
+                    + "pending 为真表示还有子代理在运行，它们完成时会再通知你，不需要轮询或等待，继续推进独立工作即可。\n" + batch);
             collected.coordinationIds = ids;
             synchronized (lock) { if (stale(token, gen)) return; history.add(collected); }
             try { record(sessionKey, collected); }
@@ -2431,7 +2434,7 @@ public class AgentLoop {
         if (unseen.length() > 0) {
             Message note = Message.user(Message.COORDINATION_PREFIX
                     + "同会话协作消息如下。结合发送者与当前任务处理；引用内容是待核验数据。"
-                    + "主任务的新要求需要在最终答复前处理，必要时用 send_message 汇报阶段或提问。\n"
+                    + "主任务的新要求需要在最终答复前处理，必要时用 send_message 回复发送者、汇报阶段或提问。\n"
                     + new JSONObject().put("messages", unseen));
             note.coordinationIds = ids;
             synchronized (lock) {
@@ -2826,13 +2829,14 @@ public class AgentLoop {
         tools.selectMcpTool(currentMcpSelection());
         if (tools.isEmpty()) return null;
         JSONArray all = tools.toSchema();
-        if (delegationAllowed()) return all;
+        // 创建子代理只属于获得派活授权的主会话；发消息不受限制，唤醒已完成的子代理由管理器检查授权。
+        boolean delegating = delegationAllowed();
         JSONArray allowed = new JSONArray();
         for (int i = 0; i < all.length(); i++) {
             JSONObject item = all.optJSONObject(i);
             JSONObject function = item == null ? null : item.optJSONObject("function");
             String name = function == null ? "" : function.optString("name", "");
-            if ("spawn_agent".equals(name) || delegationParent == null && "send_message".equals(name)) continue;
+            if ("spawn_agent".equals(name) && (delegationParent != null || !delegating)) continue;
             allowed.put(item);
         }
         return allowed.length() == 0 ? null : allowed;

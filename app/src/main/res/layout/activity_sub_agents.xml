@@ -29,6 +29,9 @@
         <TextView android:id="@+id/agent_panel_result_tab" android:layout_width="0dp" android:layout_weight="1"
             android:layout_height="match_parent" android:gravity="center" android:textSize="14sp"
             android:text="@string/agent_panel_result_tab" android:textColor="@color/text_primary" />
+        <TextView android:id="@+id/agent_panel_message_tab" android:layout_width="0dp" android:layout_weight="1"
+            android:layout_height="match_parent" android:gravity="center" android:textSize="14sp"
+            android:text="@string/agent_panel_messages_tab" android:textColor="@color/text_primary" />
     </LinearLayout>
     <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/divider" />
     <LinearLayout android:id="@+id/agent_panel_pages" android:layout_width="match_parent" android:layout_height="48dp"

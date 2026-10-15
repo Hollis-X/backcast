@@ -253,45 +253,6 @@ public final class SubAgentCommunicationRegressionTest {
         check(mail.length() == 1 && mail.getJSONObject(0).getString("id").equals("two"), "Acknowledgement consumed or restored the wrong message");
     }
 
-    private static void childWaitDoesNotWakeItselfByYieldingItsSlot() throws Exception {
-        final Fixture f = new Fixture(); f.holdTool = true;
-        final AtomicLong waitedAt = new AtomicLong(), observed = new AtomicLong();
-        f.script = new Script() {
-            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
-                    List<Message> messages) throws Exception {
-                if ("held-descendant".equals(task.name))
-                    return turn == 1 ? call("probe", new JSONObject()) : text("descendant finished");
-                if (turn == 1) return call("spawn_agent", new JSONObject().put("name", "held-descendant")
-                        .put("task", "hold the probe until released").put("fork", false));
-                if (turn == 2) {
-                    await(f.toolStarted);
-                    String child = "";
-                    for (Message message : messages) if (Message.TOOL.equals(message.role))
-                        child = new JSONObject(message.content).optString("id", child);
-                    check(child.length() > 0, "Nested spawn result disappeared");
-                    long cursor = f.manager.waitForUpdate(task.id, child, 0, -1).getLong("cursor");
-                    observed.set(cursor); waitedAt.set(System.nanoTime());
-                    return call("wait_agent", new JSONObject().put("target", child).put("cursor", cursor)
-                            .put("timeout_ms", 150));
-                }
-                if (turn == 3) {
-                    long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitedAt.get());
-                    JSONObject result = new JSONObject(messages.get(messages.size() - 1).content);
-                    check(waitedMs >= 100 && result.getLong("cursor") == observed.get()
-                            && result.getBoolean("pending"), "Child wait woke on its own waiting/model phase");
-                    f.toolRelease.countDown();
-                }
-                return text("nested result verified");
-            }
-        };
-        try {
-            f.spawn("waiting-parent", "delegate one task and wait for real progress", false);
-            f.settle();
-            check(waitedAt.get() > 0 && f.requests.get() >= 5, "Nested wait did not execute real child requests");
-        } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
-    }
-
-
     private static void checkpointedLiveMessageIsNotInjectedTwiceAfterRestart() throws Exception {
         Store store = new Store(); SubAgentManager.Record saved = new SubAgentManager.Record();
         saved.id = "agent_saved_live"; saved.parentId = "main"; saved.name = "recovered";
@@ -342,38 +303,6 @@ public final class SubAgentCommunicationRegressionTest {
             f.manager.send("main", id, "inspect the new objective", "task"); f.settle();
             check(f.requests.get() == 2 && f.manager.find(id).error.length() == 0,
                     "Reusable child did not run exactly the new task after cancellation");
-        } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
-    }
-
-    private static void cancelledNestedWaitKeepsItsFailedStateAcrossRecovery() throws Exception {
-        final Fixture f = new Fixture(); f.holdTool = true;
-        f.script = new Script() {
-            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
-                    List<Message> messages) throws Exception {
-                if ("held-descendant".equals(task.name))
-                    return turn == 1 ? call("probe", new JSONObject()) : text("descendant completed");
-                if (turn == 1) return call("spawn_agent", new JSONObject().put("name", "held-descendant")
-                        .put("task", "wait at the probe").put("fork", false));
-                if (turn == 2) return call("wait_agent", new JSONObject().put("timeout_ms", 5000));
-                return text("parent completed");
-            }
-        };
-        String id = f.spawn("waiting-parent", "delegate and wait", false);
-        try {
-            await(f.toolStarted);
-            long deadline = System.currentTimeMillis() + 3000;
-            while (!SubAgentManager.WAITING.equals(f.manager.find(id).status) && System.currentTimeMillis() < deadline)
-                Thread.yield();
-            check(SubAgentManager.WAITING.equals(f.manager.find(id).status), "Nested parent never yielded its execution slot");
-            f.manager.cancelAll();
-            f.manager.awaitSettled(5000, new LlmClient.RequestValidity() {
-                @Override public boolean isCurrent() { return true; }
-            });
-            check(!f.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(f.manager.find(id).status),
-                    "Cancelled waiting parent was changed back to running during slot reacquisition");
-            Fixture recovered = new Fixture(f.store);
-            check(!recovered.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(recovered.manager.find(id).status),
-                    "Cancelled nested wait became a permanently queued task after restart");
         } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
     }
 
@@ -489,9 +418,9 @@ public final class SubAgentCommunicationRegressionTest {
                 "delegatedMetadataSurvivesRecoveryWithoutLeakingToApi", "liveParentMessageArrivesBeforeTheNextToolRequest",
                 "twoChildModelRequestsActuallyOverlap", "peerMessageAndProgressWakeTheParentWhileWorkIsRunning",
                 "cursorWaitDoesNotSpinOnTheSameRunningState", "acknowledgedMailboxIsExactAndRestorable",
-                "childWaitDoesNotWakeItselfByYieldingItsSlot",
+                
                 "checkpointedLiveMessageIsNotInjectedTwiceAfterRestart", "objectiveChangeDropsOldLiveInstructionsBeforeChildReuse",
-                "cancelledNestedWaitKeepsItsFailedStateAcrossRecovery", "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
+                "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
                 "userReusedChildReportsLifecycleOutsideManagerLock", "restoredQueuesRemainDormantUntilExplicitResume",
                 "closingChildKeepsLiveWorkUntilItsToolCleanupFinishes"};
         int failed = 0;

@@ -433,13 +433,20 @@ public class Settings {
                 + "only fork=true copies the effective conversation history. "
                 + "The parent must collect the children's evidence, review and verify their results, "
                 + "and take responsibility for the final answer and goal status. "
+                + "Every child has a readable name and path such as /main/parser. Main and children can "
+                + "send_message to each other, and children can message their peers, by name or path. Messages "
+                + "to a running agent arrive before its next model request; a message to a finished agent resumes "
+                + "it with that message as its next task, keeping its context. "
+                + "Children run in the background. When a child finishes you automatically receive a notification "
+                + "with its final answer, even if your turn has already ended; do not poll or wait for it. After "
+                + "dispatching, keep doing independent work, or end your turn and say what is running. "
                 + "Children must execute their assigned work with real tools and use send_message to report "
-                + "their current stage, evidence, blockers and questions to main. Messages to busy children "
-                + "arrive before their next model request. The parent should use list_agents and wait_agent "
-                + "with its returned cursor to monitor real progress and exchange instructions. "
+                + "evidence, blockers and questions to main or to the peer that needs them. "
+                + "Only main creates children; a child that needs more help must ask main instead of spawning. "
+                + "Use list_agents to see all children. "
                 + "A child's refusal or failed task is a failure, never a successful deliverable. "
-                + "Wait for required children to finish, collect their results, verify them and then give "
-                + "one final summary. Keep the parent working on independent integration work while children run. "
+                + "Review and verify each child's result before you rely on it, and give one final summary "
+                + "once the required children have reported. "
                 + "Do not mark the goal complete while required child work or review remains unfinished. ";
         if (AGENT_ULTRA.equals(mode)) {
             return policy + "Proactively identify independent subtasks and delegate them in parallel when doing so "
@@ -456,7 +463,23 @@ public class Settings {
     /** 每轮真正发给模型的：静态指令 + 现拼的环境事实。 */
     public String fullSystemPrompt() {
         return systemPrompt() + ENV_SEPARATOR + environmentContext()
-                + "\n\n" + responseInstructions();
+                + "\n\n" + responseInstructions() + "\n\n" + workflowInstructions();
+    }
+
+    /** 不依赖用户可编辑的提示词，每轮都附上：怎么拆任务、怎么展示进度。 */
+    static String workflowInstructions() {
+        return "Task planning: for a task that needs three or more steps, call update_plan first with the full list of "
+                + "small steps (first one in_progress), then call it again after finishing each step to mark it completed "
+                + "and start the next. Keep exactly one step in_progress and always send the complete list. "
+                + "Do not use it for simple questions or work that takes one or two steps. "
+                + "Asking the user: call ask_user_question only when you are blocked on a decision that is genuinely "
+                + "the user's to make and the request, the files or a sensible default cannot settle it. That includes "
+                + "the moment you catch yourself weighing two or more reasonable approaches against each other, or "
+                + "reversing a conclusion because the request is ambiguous, when the right choice depends on the user's "
+                + "preference: stop deliberating, put the open question and two to four concrete options (your recommendation "
+                + "first, labelled with （推荐） at the end) into one ask_user_question call, and continue with the answer. "
+                + "Do not ask about things you can verify yourself, trivial choices, or permission for work the user "
+                + "already requested.";
     }
 
     public String outputVerbosity() {

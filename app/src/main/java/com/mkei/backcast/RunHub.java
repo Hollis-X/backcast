@@ -9,9 +9,11 @@ import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.ToolRegistry;
 import com.mkei.backcast.agent.SubAgentManager;
+import com.mkei.backcast.tool.AskUserTool;
 import com.mkei.backcast.tool.EditTool;
 import com.mkei.backcast.tool.GoalTool;
 import com.mkei.backcast.tool.GetGoalTool;
+import com.mkei.backcast.tool.PlanTool;
 import com.mkei.backcast.tool.ReadTool;
 import com.mkei.backcast.tool.FindFilesTool;
 import com.mkei.backcast.tool.ShellTool;
@@ -49,6 +51,8 @@ public final class RunHub {
     private final ChatStore store;
     private final Settings settings;
     private final Map<Long, AgentLoop> loops = new HashMap<Long, AgentLoop>();
+    /** 当前能向用户展示选择题的界面；没有界面时 ask_user_question 直接让模型自己决定。 */
+    private volatile com.mkei.backcast.agent.UserQuestions questions;
     private final Map<AgentLoop, TemporaryWorkspace> temporary = new ConcurrentHashMap<AgentLoop, TemporaryWorkspace>();
     private final Map<AgentLoop, SubAgentManager> children = new ConcurrentHashMap<AgentLoop, SubAgentManager>();
     private final Map<AgentLoop, SQLiteSubAgentStore> childStores = new ConcurrentHashMap<AgentLoop, SQLiteSubAgentStore>();
@@ -519,13 +523,13 @@ public final class RunHub {
             final boolean childRestartOnly;
             try { childRestartOnly = store.subAgentUserRestartOnly(sid); }
             catch (RuntimeException failure) {
-                collaborationFailure(sid, "子任务恢复权限损坏，原记录已保留", failure);
+                collaborationFailure(sid, "子代理恢复权限损坏，原记录已保留", failure);
                 continue;
             }
             if (!childRestartOnly && !parentRunning && Goal.isClosed(savedRun.status)) continue;
             try { prepareSession(sid); }
             catch (RuntimeException failure) {
-                collaborationFailure(sid, "子任务会话恢复失败，原记录已保留", failure);
+                collaborationFailure(sid, "子代理会话恢复失败，原记录已保留", failure);
                 continue;
             }
             synchronized (this) {
@@ -545,12 +549,12 @@ public final class RunHub {
                         } else if (parentRunning) loop.resume(sid, 0);
                         else {
                             if (manager != null) {
-                                loop.armRecoveredChildEvents();
                                 manager.resumePending();
+                                loop.armRecoveredChildEvents();
                                 wakeForChildEvents(loop);
                             }
                         }
-                    } catch (Exception failure) { collaborationFailure(sid, "子任务恢复失败", failure); }
+                    } catch (Exception failure) { collaborationFailure(sid, "子代理恢复失败", failure); }
                 }
             }).start();
         }
@@ -634,6 +638,10 @@ public final class RunHub {
         }
         next.register(new GoalTool(loop));
         next.register(new GetGoalTool(loop));
+        next.register(new PlanTool());
+        next.register(new AskUserTool(new java.util.function.Supplier<com.mkei.backcast.agent.UserQuestions>() {
+            @Override public com.mkei.backcast.agent.UserQuestions get() { return questions; }
+        }));
         SubAgentManager manager = manager(loop);
         manager.setMaxParallel(settings.agentConcurrency());
         loop.setSubAgents(manager);
@@ -657,7 +665,7 @@ public final class RunHub {
                 @Override public AgentLoop create(final SubAgentManager.Record task, AgentLoop.Listener listener,
                         final SubAgentManager manager) throws Exception {
                     JSONObject snapshot = task.forkConfig;
-                    if (snapshot == null || snapshot.length() == 0) throw new IllegalStateException("子任务缺少父 agent 运行配置快照。");
+                    if (snapshot == null || snapshot.length() == 0) throw new IllegalStateException("子代理缺少父 agent 运行配置快照。");
                     JSONObject toolSnapshot = snapshot.getJSONObject("tools");
                     List<String> roots = new ArrayList<String>();
                     JSONArray directories = toolSnapshot.getJSONArray("roots");
@@ -733,6 +741,10 @@ public final class RunHub {
         return ApprovalGate.ACCESS_STRICT.equals(access) ? 2 : ApprovalGate.ACCESS_GUARDED.equals(access) ? 1 : 0;
     }
 
+    public void setQuestions(com.mkei.backcast.agent.UserQuestions screen) { questions = screen; }
+
+    public boolean questionsAre(com.mkei.backcast.agent.UserQuestions screen) { return questions == screen; }
+
     private void wakeForChildEvents(final AgentLoop parent) {
         final SubAgentManager manager = children.get(parent);
         if (manager == null || parent.sessionKey() < 0 || parent.busy() || !manager.shouldWakeRoot()) return;
@@ -742,7 +754,7 @@ public final class RunHub {
                 boolean resumed = false;
                 try { resumed = parent.resumeForChildEvents(parent.sessionKey(), -1); }
                 catch (RuntimeException failure) {
-                    collaborationFailure(parent.sessionKey(), "子任务消息唤醒失败", failure);
+                    collaborationFailure(parent.sessionKey(), "子代理消息唤醒失败", failure);
                 } finally {
                     childWakes.remove(parent);
                     // A durable event may arrive between the worker's last drain

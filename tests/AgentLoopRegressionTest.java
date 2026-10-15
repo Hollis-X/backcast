@@ -1047,6 +1047,39 @@ public final class AgentLoopRegressionTest {
         check(!loop.busy(), "Stalled goal kept running");
         check(Goal.ACTIVE.equals(loop.goalStatus()), "Stalled goal was killed instead of stopped");
     }
+    /** Waiting on slow children returns the same pending status again and again; that is waiting, not spinning. */
+    private static void repeatedPendingWaitsDoNotStopTheRun() throws Exception {
+        SystemClock.set(100000);
+        final JSONArray calls = new JSONArray();
+        calls.put(new JSONObject().put("id", "w1").put("type", "function")
+                .put("function", new JSONObject().put("name", "list_agents").put("arguments", "{\"cursor\":7}")));
+        final int[] served = new int[1];
+        LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
+            @Override public Reply send(List<Message> messages, JSONArray tools, Sink sink) {
+                served[0]++;
+                SystemClock.advance(50L);
+                Reply reply = new Reply();
+                if (served[0] <= 8) { reply.content = "waiting"; reply.toolCalls = calls; }
+                else { reply.content = "all children finished"; if (sink != null) sink.onContent(reply.content); }
+                return reply;
+            }
+        };
+        ToolRegistry registry = new ToolRegistry();
+        registry.register(new Tool() {
+            @Override public String name() { return "list_agents"; }
+            @Override public String description() { return "fixture"; }
+            @Override public JSONObject parameters() { return new JSONObject(); }
+            @Override public String run(JSONObject args) { return "{\"pending\":true,\"cursor\":7}"; }
+            @Override public void abort() { }
+        });
+        AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet());
+        loop.bindSession(1);
+        loop.reset("system");
+        loop.submit("wait for the slow children", 1, loop.generation(), 1, null);
+        check(served[0] == 9 && !loop.busy(), "Identical pending status checks stopped the run after " + served[0] + " requests");
+        List<Message> history = loop.historySnapshot();
+        check("all children finished".equals(history.get(history.size() - 1).content), "Run did not reach the final answer after checking");
+    }
     private static void goalWithoutToolCallsStopsAfterRepeats() throws Exception {
         SystemClock.set(100000);
         final int[] served = new int[1];
@@ -1554,7 +1587,7 @@ public final class AgentLoopRegressionTest {
                 "restoredChildSettlementAfterPlainAssistantKeepsLedger",
                 "completedOrdinaryChatDoesNotRestoreContinuationLedger",
                 "disclosureIsRefusedBeforeCompaction",
-                "repeatedToolResultsStopTheGoal", "goalWithoutToolCallsStopsAfterRepeats",
+                "repeatedToolResultsStopTheGoal", "repeatedPendingWaitsDoNotStopTheRun", "goalWithoutToolCallsStopsAfterRepeats",
                 "goalWithoutBudgetRunsUntilTheModelFinishes", "budgetLimitGivesOneWrapUpThenStops",
                 "interleavedSummariesDoNotFalselyStall", "rewrittenObjectiveIsInjectedOnce",
                 "newGoalStartsAFreshLedger", "newReadOnlyEvidenceContinuesBeyondTwelveRounds",
