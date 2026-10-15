@@ -45,7 +45,10 @@ android {
     }
 
     testOptions {
+        unitTests.isIncludeAndroidResources = true
         unitTests.all {
+            it.environment("BACKCAST_SCREENSHOTS", System.getenv("BACKCAST_SCREENSHOTS") ?: "")
+            it.maxHeapSize = "1g"
             it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
         }
     }

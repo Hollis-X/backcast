@@ -290,7 +290,13 @@ public final class McpConfigActivity extends AppCompatActivity {
         view.setInputType(type);
         view.setSingleLine(true);
         view.setText(value);
-        content.addView(view, new LinearLayout.LayoutParams(-1, -2));
+        view.setBackgroundResource(R.drawable.bg_input);
+        view.setTextColor(0xFF0D0D0D);
+        view.setPadding(dp(12), dp(12), dp(12), dp(12));
+        view.setMinHeight(dp(48));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(4);
+        content.addView(view, lp);
         return view;
     }
 
@@ -298,8 +304,13 @@ public final class McpConfigActivity extends AppCompatActivity {
         Button button = new Button(this);
         button.setText(title);
         button.setAllCaps(false);
+        button.setTextColor(0xFFFFFFFF);
+        button.setBackgroundResource(R.drawable.bg_button_primary);
+        button.setStateListAnimator(null);
         button.setOnClickListener(listener);
-        content.addView(button, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(50));
+        lp.topMargin = dp(8);
+        content.addView(button, lp);
         return button;
     }
 

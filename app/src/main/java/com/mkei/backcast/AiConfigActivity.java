@@ -210,6 +210,10 @@ public class AiConfigActivity extends AppCompatActivity {
             choice.setPadding(8, 8, 8, 8); choice.setOnClickListener(v -> { model.setText(name); syncChecks(); });
             row.addView(choice, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
             Button remove = new Button(this); remove.setText(R.string.action_remove_saved_model);
+            remove.setAllCaps(false); remove.setTextColor(getResources().getColor(R.color.text_primary));
+            remove.setBackgroundResource(R.drawable.bg_button_secondary); remove.setStateListAnimator(null);
+            int h40 = Math.round(40 * getResources().getDisplayMetrics().density);
+            remove.setMinHeight(h40); remove.setMinimumHeight(h40);
             remove.setOnClickListener(v -> {
                 previewModels.remove(name); if (name.equals(model.getText().toString().trim())) model.setText("");
                 renderModels(previewModels);
