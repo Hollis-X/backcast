@@ -148,7 +148,7 @@ public final class SettingsChoiceRegressionTest {
                 + "void saveUserPreferences(String v,String s,String l,int c,String p){preferences.put(\"verbosity\",v);"
                 + "preferences.put(\"summary\",s);preferences.put(\"language\",l);"
                 + "preferences.put(\"concurrency\",c);preferences.put(\"prompt\",p);writes++;}boolean useRoot(){return false;}"
-                + "String effectiveReasoningEffort(){Object e=preferences.get(\"effort\");return e==null?\"low\":e.toString();}"
+                + "String reasoningEffort(){Object e=preferences.get(\"effort\");return e==null?\"low\":e.toString();}"
                 + "String environmentContext(boolean r,String m,int c){return r+\"/\"+m+\"/\"+c;}}"
                 + "Resources resources=new Resources(); TextView description=new TextView(),envContext=new TextView(),agentStatus=new TextView();"
                 + "Settings settings=new Settings();int finishes,lastStatus;Object[] lastStatusArgs;void finish(){finishes++;}"
@@ -175,7 +175,7 @@ public final class SettingsChoiceRegressionTest {
         Element layout=xml(root.resolve("app/src/main/res/layout/activity_user_preferences.xml"));
         String layoutSource=Files.readString(root.resolve("app/src/main/res/layout/activity_user_preferences.xml"));
         String activitySource=Files.readString(root.resolve("app/src/main/java/com/mkei/backcast/UserPreferencesActivity.java"));
-        check(!layoutSource.contains("reasoning_effort") && !activitySource.contains("reasoningEffort"),"Response preferences still contain an independently owned effort draft");
+        check(!layoutSource.contains("reasoning_effort") && !activitySource.contains("setReasoningEffort"),"Response preferences still contain an independently owned effort draft");
         pass("response preferences do not duplicate the main effort selector");
         Element row=xml(root.resolve("app/src/main/res/layout/settings_choice_item.xml"));
         Class<?> activityType=loader.loadClass("UserPreferencesActivity"), spinnerType=loader.loadClass("UserPreferencesActivity$Spinner"),

@@ -970,7 +970,7 @@ public final class AgentLoopRegressionTest {
                 throw new AssertionError("Completed recovered child should not be restarted");
             }
         }, new SubAgentManager.Store() {
-            @Override public List<SubAgentManager.Record> load() { return children; }
+            @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(children); }
             @Override public void save(SubAgentManager.Record record) { }
         });
         manager.attachRoot(loop); loop.setSubAgents(manager);

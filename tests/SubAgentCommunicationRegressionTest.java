@@ -28,11 +28,11 @@ public final class SubAgentCommunicationRegressionTest {
         final Map<String, SubAgentManager.Record> records = new LinkedHashMap<String, SubAgentManager.Record>();
         @Override public synchronized List<SubAgentManager.Record> load() throws Exception {
             List<SubAgentManager.Record> copy = new ArrayList<SubAgentManager.Record>();
-            for (SubAgentManager.Record record : records.values()) copy.add(SubAgentManager.Record.fromJson(record.toJson()));
+            for (SubAgentManager.Record record : records.values()) copy.add(RecordFixtures.fromJson(record.toJson()));
             return copy;
         }
         @Override public synchronized void save(SubAgentManager.Record record) throws Exception {
-            records.put(record.id, SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString())));
+            records.put(record.id, RecordFixtures.fromJson(new JSONObject(record.toJson().toString())));
         }
     }
     private static final class Fixture implements SubAgentManager.Factory {
@@ -291,17 +291,6 @@ public final class SubAgentCommunicationRegressionTest {
         } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
     }
 
-    private static void legacyRefusalResultIsMigratedToFailure() throws Exception {
-        JSONObject legacy = new JSONObject().put("id", "agent_legacy").put("status", "idle")
-                .put("result", PromptGuard.REFUSAL).put("error", "");
-        SubAgentManager.Record restored = SubAgentManager.Record.fromJson(legacy);
-        check(SubAgentManager.FAILED.equals(restored.status) && SubAgentManager.FAILED.equals(restored.phase)
-                && PromptGuard.REFUSAL.equals(restored.error) && restored.result.length() == 0,
-                "Previously refused child result was still reported as successful idle work");
-        SubAgentManager.Record second = SubAgentManager.Record.fromJson(restored.toJson());
-        check(second.revision == restored.revision && second.error.equals(restored.error),
-                "Legacy refusal migration repeated on normal checkpoint copies");
-    }
 
     private static void checkpointedLiveMessageIsNotInjectedTwiceAfterRestart() throws Exception {
         Store store = new Store(); SubAgentManager.Record saved = new SubAgentManager.Record();
@@ -500,7 +489,7 @@ public final class SubAgentCommunicationRegressionTest {
                 "delegatedMetadataSurvivesRecoveryWithoutLeakingToApi", "liveParentMessageArrivesBeforeTheNextToolRequest",
                 "twoChildModelRequestsActuallyOverlap", "peerMessageAndProgressWakeTheParentWhileWorkIsRunning",
                 "cursorWaitDoesNotSpinOnTheSameRunningState", "acknowledgedMailboxIsExactAndRestorable",
-                "childWaitDoesNotWakeItselfByYieldingItsSlot", "legacyRefusalResultIsMigratedToFailure",
+                "childWaitDoesNotWakeItselfByYieldingItsSlot",
                 "checkpointedLiveMessageIsNotInjectedTwiceAfterRestart", "objectiveChangeDropsOldLiveInstructionsBeforeChildReuse",
                 "cancelledNestedWaitKeepsItsFailedStateAcrossRecovery", "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
                 "userReusedChildReportsLifecycleOutsideManagerLock", "restoredQueuesRemainDormantUntilExplicitResume",

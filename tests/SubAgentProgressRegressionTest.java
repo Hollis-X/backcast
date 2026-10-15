@@ -32,12 +32,12 @@ public final class SubAgentProgressRegressionTest {
         final Map<String, SubAgentManager.Record> records = new LinkedHashMap<String, SubAgentManager.Record>();
         @Override public synchronized List<SubAgentManager.Record> load() throws Exception {
             List<SubAgentManager.Record> result = new ArrayList<SubAgentManager.Record>();
-            for (SubAgentManager.Record record : records.values()) result.add(SubAgentManager.Record.fromJson(record.toJson())); return result;
+            for (SubAgentManager.Record record : records.values()) result.add(RecordFixtures.fromJson(record.toJson())); return result;
         }
         @Override public synchronized void save(SubAgentManager.Record record) throws Exception {
-            records.put(record.id, SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString())));
+            records.put(record.id, RecordFixtures.fromJson(new JSONObject(record.toJson().toString())));
         }
-        synchronized SubAgentManager.Record find(String id) throws Exception { return SubAgentManager.Record.fromJson(records.get(id).toJson()); }
+        synchronized SubAgentManager.Record find(String id) throws Exception { return RecordFixtures.fromJson(records.get(id).toJson()); }
     }
 
     private static final class Fixture implements SubAgentManager.Factory {
@@ -170,11 +170,11 @@ public final class SubAgentProgressRegressionTest {
     private static void legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips() throws Exception {
         JSONObject old = new JSONObject().put("id", "legacy").put("parentId", "main").put("status", "idle").put("phase", "completed")
                 .put("retryAttempt", 3).put("retryReason", "old retry text");
-        SubAgentManager.Record record = SubAgentManager.Record.fromJson(old);
+        SubAgentManager.Record record = RecordFixtures.fromJson(old);
         check(record.phase.equals("completed") && !record.toJson().has("retryAttempt") && !record.toJson().has("retryReason"),
                 "Legacy retry metadata escaped into the current runtime record");
         record.phase = "tool"; record.activeTool = "read"; record.progress = "Inspecting task evidence";
-        SubAgentManager.Record restored = SubAgentManager.Record.fromJson(record.toJson());
+        SubAgentManager.Record restored = RecordFixtures.fromJson(record.toJson());
         check(restored.phase.equals("tool") && restored.activeTool.equals("read") && restored.progress.equals(record.progress),
                 "Live task progress disappeared from saved record copies");
     }

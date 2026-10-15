@@ -74,7 +74,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
         }
     }
     static SubAgentManager.Record copy(SubAgentManager.Record record) throws Exception {
-        return SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString()));
+        return RecordFixtures.fromJson(new JSONObject(record.toJson().toString()));
     }
     static LlmClient.Reply text(String content) { LlmClient.Reply reply = new LlmClient.Reply(); reply.content = content; return reply; }
     static void check(boolean condition, String reason) { if (!condition) throw new AssertionError(reason); }
@@ -385,23 +385,6 @@ public final class SubAgentTaskLifecycleRegressionTest {
         fixture.spawn(false); fixture.settled();
         check(fixture.manager.list("main", 0).getJSONArray("agents").getJSONObject(0).getString("result").equals("scope preserved"), "Scope fixture failed");
     }
-    static void legacyQueuedAssignmentsKeepDistinctIdentitiesAndOutcomes() throws Exception {
-        Store store = new Store();
-        JSONObject legacy = new JSONObject().put("id", "legacy_worker").put("parentId", "main").put("name", "legacy")
-                .put("task", "completed old work").put("status", SubAgentManager.QUEUED).put("result", "old verified evidence")
-                .put("sessionId", 2).put("pending", new JSONArray()
-                        .put(new JSONObject().put("from", "main").put("text", "queued first"))
-                        .put(new JSONObject().put("from", "main").put("text", "queued second")));
-        store.save(SubAgentManager.Record.fromJson(legacy)); Fixture fixture = new Fixture(store);
-        SubAgentManager.Record migrated = fixture.manager.find("legacy_worker");
-        check(migrated.tasks.length() == 3 && !migrated.pending.getJSONObject(0).getString("taskId")
-                .equals(migrated.pending.getJSONObject(1).getString("taskId")), "Legacy queue assigned every message to the same task");
-        fixture.manager.resumePending(); fixture.settled(); SubAgentManager.Record completed = fixture.manager.find("legacy_worker");
-        check(completed.results.length() == 3 && completed.results.getJSONObject(0).getString("content").equals("old verified evidence")
-                && completed.results.getJSONObject(1).getString("content").contains("queued first")
-                && completed.results.getJSONObject(2).getString("content").contains("queued second"), "Legacy reuse overwrote or skipped an outcome");
-        check(!completed.results.getJSONObject(1).getString("taskId").equals(completed.results.getJSONObject(2).getString("taskId")), "Legacy outcomes share task identity");
-    }
     static void trustedTaskAfterGlobalStopRunsOnlyTheSelectedChild() throws Exception {
         Fixture fixture = new Fixture(); fixture.root.setSubAgents(fixture.manager);
         fixture.root.submit("parent initial task", 1, fixture.root.generation(), 1, null);
@@ -446,7 +429,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
         check(fixture.manager.find(id).results.length() == 2 && fixture.manager.find(id).result.equals("new selected result"), "Completed cleanup blocked explicit reuse");
     }
     static void oversizedErrorCannotStarveResultDelivery() throws Exception {
-        Store store = new Store(); SubAgentManager.Record failed = SubAgentManager.Record.fromJson(new JSONObject()
+        Store store = new Store(); SubAgentManager.Record failed = RecordFixtures.fromJson(new JSONObject()
                 .put("id", "oversized_error").put("parentId", "main").put("task", "failed task").put("status", "failed")
                 .put("error", repeat(80000)).put("sessionId", 2));
         store.save(failed); Fixture fixture = new Fixture(store);
@@ -504,7 +487,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
         Store store = new Store(); StringBuilder text = new StringBuilder(), error = new StringBuilder();
         for (int i = 0; i < 10000; i++) text.append('\u0001');
         for (int i = 0; i < 2000; i++) error.append('\u0002');
-        SubAgentManager.Record record = SubAgentManager.Record.fromJson(new JSONObject().put("id", "encoded_result")
+        SubAgentManager.Record record = RecordFixtures.fromJson(new JSONObject().put("id", "encoded_result")
                 .put("parentId", "main").put("task", "encoded evidence").put("status", "failed")
                 .put("result", text.toString()).put("error", error.toString()).put("sessionId", 2));
         store.save(record); Fixture fixture = new Fixture(store); StringBuilder received = new StringBuilder(); int pieces = 0;
@@ -578,8 +561,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
                 "goalCompletionRequiresAllStableResultChunks", "forkKeepsAllPairedHistoryAndDeepCopies",
                 "forkDuringRetargetUsesOriginalRequestAndCompleteBoundary",
                 "settlementTimeoutDoesNotTriggerAnotherModelRequest", "stoppedAndFailedMainAreNotRevivedByChildEvents",
-                "completedGoalRejectsLateChildReportWake", "validIdleParentConsumesEventsWithoutAnotherHumanTask", "nestedDispatchKeepsCapturedHumanPathScope",
-                "legacyQueuedAssignmentsKeepDistinctIdentitiesAndOutcomes", "trustedTaskAfterGlobalStopRunsOnlyTheSelectedChild",
+                "completedGoalRejectsLateChildReportWake", "validIdleParentConsumesEventsWithoutAnotherHumanTask", "nestedDispatchKeepsCapturedHumanPathScope", "trustedTaskAfterGlobalStopRunsOnlyTheSelectedChild",
                 "trustedRestartWaitsForSelectedCleanup", "oversizedErrorCannotStarveResultDelivery",
                 "archivedResultIndexIsBoundedAndNeverConfirmsEvidence", "trustedRestartDoesNotRunCancelledPeerQueues",
                 "escapedMailboxCannotBePermanentlySkipped", "encodedResultChunkAdaptsWithoutLosingControlCharacters",

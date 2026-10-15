@@ -59,7 +59,7 @@ public final class RunHubRecoveryTest {
                 + "public String apiKey() {legacyRead();return key; } public String model() {legacyRead();return selectedModel; }"
                 + "private void legacyRead(){if(failLegacyProfileReads)throw new AssertionError(\"Client configuration used independent credential reads\");}"
                 + "public AiProfile activeAiProfile(){return new AiProfile(provider,provider,url,key,selectedModel,java.util.Collections.singletonList(selectedModel));}public java.util.List<AiProfile> aiProfiles(){return java.util.Collections.singletonList(activeAiProfile());}"
-                + "public String reasoningEffort() {return effort;}public String effectiveReasoningEffort(){return effort;}"
+                + "public String reasoningEffort() {return effort;}"
                 + "public String agentMode(){return mode;}public int agentConcurrency(){return concurrency;}"
                 + "public String outputVerbosity() { return \"default\"; } public String outputLanguage() { return \"zh-CN\"; }"
                 + "public String responseInstructions() { return \"language fixture\"; } public boolean useRoot() { return root; }"
@@ -151,8 +151,7 @@ public final class RunHubRecoveryTest {
                 + "public AgentLoop createChild(String id,long sid,AgentLoop.Listener listener)throws Exception{"
                 + "Record r=new Record();r.id=id;r.sessionId=sid;r.forkConfig=((ContextFactory)factory).capture(parent);return createTaskChild(r,listener);}public AgentLoop createTaskChild(Record r,AgentLoop.Listener listener)throws Exception{AgentLoop l=factory.create(r,listener,this);l.bindSession(r.sessionId);loops.add(l);return l;} }");
         add(files, "com.mkei.backcast.SQLiteSubAgentStore", "public class SQLiteSubAgentStore implements com.mkei.backcast.agent.SubAgentManager.Store {"
-                + "public static void migrateLegacySessions(ChatStore s,java.io.File d){}"
-                + "public java.io.File directory;public String owner;public long sessionId;public int binds,removes;public SQLiteSubAgentStore(ChatStore store,long sid,java.io.File d){directory=d;sessionId=sid;owner=sid<0?\"draft-fixture\":\"session-\"+sid;}"
+                + "public String owner;public long sessionId;public int binds,removes;public SQLiteSubAgentStore(ChatStore store,long sid){sessionId=sid;owner=sid<0?\"draft-fixture\":\"session-\"+sid;}"
                 + "public void bindSession(long sid){sessionId=sid;owner=\"session-\"+sid;binds++;}public void remove(){removes++;} }");
         add(files, "com.mkei.backcast.agent.ToolRegistry", "public class ToolRegistry { public java.util.List<String> names=new java.util.ArrayList<String>();public java.util.List<Object> tools=new java.util.ArrayList<Object>(); public void register(Object tool) { names.add(tool.getClass().getSimpleName());tools.add(tool); } }");
         for (String name : Arrays.asList("EditTool", "GoalTool", "GetGoalTool", "ReadTool", "FindFilesTool", "ShellTool", "WriteTool", "TemporaryTool", "ToolkitTool")) {
@@ -478,16 +477,14 @@ public final class RunHubRecoveryTest {
                 "Parallel initialization created a second loop or replaced its listener");
     }
 
-    private static void managersUsePrivateSessionPathsAndFollowDraftAdoption() throws Exception {
+    private static void managersUseTheirSessionCheckpointAndFollowDraftAdoption() throws Exception {
         Object hub=freshHub(),first=bind(hub,21L,listener()),second=bind(hub,22L,listener());
         Object manager=children(hub,first),other=children(hub,second);
         check(manager!=other && field(manager,"parent")==first,"Two root sessions shared child manager ownership");
-        java.io.File directory=(java.io.File)field(field(manager,"store"),"directory");
-        java.io.File appFiles=(java.io.File)call(field(hub,"app"),"getFilesDir",new Class[0]);
-        check(directory.equals(new java.io.File(appFiles,"sub-agents/session-21")),"Child persistence escaped the app's private session path");
+        check("session-21".equals(field(field(manager,"store"),"owner")),"Child persistence used another session's checkpoint");
         Object draft=call(hub,"freshDraft",new Class[]{listenerType},listener()),draftManager=children(hub,draft);
         Object checkpoint=field(draftManager,"store");
-        check(((String)field(checkpoint,"owner")).startsWith("draft-") && field(checkpoint,"directory")==null,"A draft used another session's child checkpoint");
+        check(((String)field(checkpoint,"owner")).startsWith("draft-"),"A draft used another session's child checkpoint");
         call(hub,"adopt",new Class[]{loopType,long.class},draft,23L);
         check(children(hub,draft)==draftManager && (Long)call(draft,"sessionKey",new Class[0])==23L
                 && "session-23".equals(field(checkpoint,"owner"))
@@ -869,7 +866,7 @@ public final class RunHubRecoveryTest {
                 loopType = loader.loadClass("com.mkei.backcast.agent.AgentLoop");
                 listenerType = loader.loadClass("com.mkei.backcast.agent.AgentLoop$Listener");
                 storeType = loader.loadClass("com.mkei.backcast.ChatStore");
-                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUsePrivateSessionPathsAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "toolkitOnlyWorkOwnsForegroundService", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder", "queuedChildUsesCapturedParentConfigAfterGlobalSettingsChange", "childEventsWakeIdleParentOnceAndRespectBusyAndStoppedGuards", "restoredCapturedModelRequiresMatchingPrivateCredentials", "childOnlyRecoveryResumesQueuesWithoutResendingIdleParent","durableChildStopOutranksStaleParentRunningRow","explicitChildRestartRecoveryKeepsClosedParentAndOldQueuesIdle"};
+                String[] tests = {"activeListenerSurvives", "idleListenerSurvives", "newRecoveryIsQuiet", "switchedSessionsKeepOwnership", "registeredToolsMatchCurrentSet", "budgetWrapStateSurvivesRecovery", "durationCheckpointsAreRestoredAfterHistoryExactlyOnce", "heartbeatPersistsDurationWithoutRestartingForegroundService", "preparedSessionPreservesCurrentListenerAndLoadsOnce", "sessionPreparationReleasesHubDuringDatabaseRead", "sessionPreparationReleasesHubDuringFullRestore", "concurrentBindingUsesOneRestoredSession", "managersUseTheirSessionCheckpointAndFollowDraftAdoption", "realChildFactoryInheritsGateConfigContextAndOwnTemporaryLedger", "modeAndConcurrencyChangesRetargetTheExistingManager", "accessChangesAndDroppingRootCloseOwnedChildren", "toolkitUiSessionsUseOwnRunnerAndOwnerThreadCleanup", "toolkitOnlyWorkOwnsForegroundService", "embeddedToolsUseAppAssetsAndDeviceRuntime", "childOnlyWorkOwnsForegroundServiceWhileParentRemainsIdle", "multipleRootsRetargetParentChildAndIndependentUiTools", "modelDiagnosticsUseTheConversationRecorder", "queuedChildUsesCapturedParentConfigAfterGlobalSettingsChange", "childEventsWakeIdleParentOnceAndRespectBusyAndStoppedGuards", "restoredCapturedModelRequiresMatchingPrivateCredentials", "childOnlyRecoveryResumesQueuesWithoutResendingIdleParent","durableChildStopOutranksStaleParentRunningRow","explicitChildRestartRecoveryKeepsClosedParentAndOldQueuesIdle"};
                 int failures = 0;
                 for (String name : tests) {
                     try {

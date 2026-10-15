@@ -322,7 +322,7 @@ public final class AiModelPickerUiRegressionTest {
                 static class Settings{static final String EFFORT_OFF="off",EFFORT_LOW="low",EFFORT_MEDIUM="medium",EFFORT_HIGH="high",EFFORT_XHIGH="xhigh",EFFORT_MAX="max",EFFORT_ULTRA="ultra";
                     static class AiProfile{final String id,name,baseUrl,apiKey,model;final List<String> modelList;AiProfile(String i,String n,String u,String k,String m,List<String> list){id=i;name=n;baseUrl=u;apiKey=k;model=m;modelList=list;}}
                     List<AiProfile> profiles=new ArrayList<AiProfile>();String active="deepseek",effort="high";int selections;
-                    String effectiveReasoningEffort(){return effort;}void setReasoningEffort(String e){effort=e;}
+                    String reasoningEffort(){return effort;}void setReasoningEffort(String e){effort=e;}
                     List<AiProfile> aiProfiles(){return profiles;}String activeProviderId(){return active;}AiProfile activeAiProfile(){for(AiProfile p:profiles)if(p.id.equals(active))return p;throw new AssertionError(active);}
                     String model(){return activeAiProfile().model;}void selectAiModel(String id,String model){for(int n=0;n<profiles.size();n++){AiProfile p=profiles.get(n);if(p.id.equals(id)){profiles.set(n,new AiProfile(p.id,p.name,p.baseUrl,p.apiKey,model,p.modelList));active=id;selections++;return;}}throw new AssertionError(id);}}
                 Settings settings=new Settings();static class RunHub{ModelPickerFixture owner;static RunHub get(ModelPickerFixture v){RunHub h=new RunHub();h.owner=v;return h;}void retargetIfNeeded(){owner.retargets++;}}

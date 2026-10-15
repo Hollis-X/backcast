@@ -73,8 +73,6 @@ public final class RunHub {
     private AgentLoop draft;
     private String applied = "";
     private boolean recovered;
-    private final Object legacyMigrationLock = new Object();
-    private boolean legacyMigrationChecked;
 
     private static final class ChildOwner {
         final AgentLoop root;
@@ -453,7 +451,7 @@ public final class RunHub {
         }
         Settings.AiProfile profile = settings.activeAiProfile();
         String sig = profile.id + "\n" + profile.baseUrl + "\n" + profile.apiKey + "\n" + profile.model
-                + "\n" + settings.effectiveReasoningEffort() + "\n" + settings.useRoot()
+                + "\n" + settings.reasoningEffort() + "\n" + settings.useRoot()
                 + "\n" + settings.workDir() + "\n" + settings.authorizedWorkDirs() + "\n" + settings.outputVerbosity()
                 + "\n" + settings.outputLanguage() + "\n" + settings.agentMode()
                 + "\n" + settings.agentConcurrency();
@@ -505,12 +503,6 @@ public final class RunHub {
     /** 进程被系统拉起来之后，把没跑完的会话接上。只做一次。 */
     public void recover() {
         List<Long> ids;
-        synchronized (legacyMigrationLock) {
-            if (!legacyMigrationChecked) {
-                SQLiteSubAgentStore.migrateLegacySessions(store, app.getFilesDir());
-                legacyMigrationChecked = true;
-            }
-        }
         synchronized (this) {
             if (recovered || !settings.isConfigured()) {
                 return;
@@ -570,7 +562,7 @@ public final class RunHub {
         loop.setDurability(durability);
         loop.setContextBudget(AgentLoop.DEFAULT_CONTEXT_LIMIT, settings.compactRatio());
         loop.setAccessLevel(settings.accessLevel());
-        loop.setAutomaticDelegation(Settings.EFFORT_ULTRA.equals(settings.effectiveReasoningEffort()));
+        loop.setAutomaticDelegation(Settings.EFFORT_ULTRA.equals(settings.reasoningEffort()));
     }
 
     /** 换到另一个会话时，旧循环继续跑，只是不再往这个界面上画。 */
@@ -599,7 +591,7 @@ public final class RunHub {
         Settings.AiProfile profile = settings.activeAiProfile();
         LlmClient.Config config = new LlmClient.Config(
                 profile.baseUrl, profile.apiKey, profile.model,
-                settings.effectiveReasoningEffort());
+                settings.reasoningEffort());
         config.providerId = profile.id;
         config.verbosity = settings.outputVerbosity();
         config.responseInstructions = settings.responseInstructions();
@@ -649,16 +641,11 @@ public final class RunHub {
         return next;
     }
 
-    private java.io.File childDirectory(long sessionId) {
-        return new java.io.File(app.getFilesDir(), "sub-agents/session-" + sessionId);
-    }
-
     private SubAgentManager manager(final AgentLoop parent) {
         SubAgentManager known = children.get(parent);
         if (known != null) return known;
         try {
-            final SQLiteSubAgentStore checkpoint = new SQLiteSubAgentStore(store, parent.sessionKey(),
-                    parent.sessionKey() < 0 ? null : childDirectory(parent.sessionKey()));
+            final SQLiteSubAgentStore checkpoint = new SQLiteSubAgentStore(store, parent.sessionKey());
             SubAgentManager created = new SubAgentManager(settings.agentConcurrency(), new SubAgentManager.ContextFactory() {
                 @Override public JSONObject capture(AgentLoop source) throws Exception {
                     JSONObject snapshot = source.captureChildContext();
@@ -670,11 +657,7 @@ public final class RunHub {
                 @Override public AgentLoop create(final SubAgentManager.Record task, AgentLoop.Listener listener,
                         final SubAgentManager manager) throws Exception {
                     JSONObject snapshot = task.forkConfig;
-                    if (snapshot == null || snapshot.length() == 0) {
-                        // Legacy checkpoints never captured their source config.
-                        // Use the restored parent, never unrelated current settings.
-                        snapshot = capture(parent);
-                    }
+                    if (snapshot == null || snapshot.length() == 0) throw new IllegalStateException("子任务缺少父 agent 运行配置快照。");
                     JSONObject toolSnapshot = snapshot.getJSONObject("tools");
                     List<String> roots = new ArrayList<String>();
                     JSONArray directories = toolSnapshot.getJSONArray("roots");

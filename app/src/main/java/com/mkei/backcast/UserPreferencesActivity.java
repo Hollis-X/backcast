@@ -96,7 +96,7 @@ public class UserPreferencesActivity extends AppCompatActivity {
     }
 
     private void refreshAgentPreview(Settings settings) {
-        String effort = settings.effectiveReasoningEffort();
+        String effort = settings.reasoningEffort();
         String mode = Settings.EFFORT_ULTRA.equals(effort) ? Settings.AGENT_ULTRA : Settings.AGENT_MANUAL;
         int concurrency = Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES));
         if (agentStatus != null) agentStatus.setText(getString(Settings.AGENT_ULTRA.equals(mode)

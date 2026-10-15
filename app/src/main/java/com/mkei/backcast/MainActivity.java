@@ -1772,7 +1772,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setMinHeight(dp(48));
         row.setPadding(dp(12), 0, dp(12), 0);
-        if (effort.equals(settings.effectiveReasoningEffort())) {
+        if (effort.equals(settings.reasoningEffort())) {
             row.setSelected(true);
             Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, 0xFF3C3C43, dp(20));
         }
@@ -2133,7 +2133,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
             if (!settings.isConfigured()) {
                 modelChip.setText(R.string.status_no_model);
             } else {
-                String effort = effortLabel(settings.effectiveReasoningEffort());
+                String effort = effortLabel(settings.reasoningEffort());
                 String name = activeModelLabel();
                 modelChip.setText(effort.length() == 0 ? name : name + "  " + effort);
             }

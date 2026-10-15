@@ -144,7 +144,7 @@ public final class WorkspaceRegressionTest {
             }
             check(before.equals(values(context)),"Invalid directory mutation changed preferences");pass("relative, empty, newline and NUL directory inputs are rejected before persistence");
 
-            values(context).put("base_url","https://fixture");values(context).put("api_key","secret");values(context).put("model","model");values(context).put("output_language","en");
+            values(context).put("ai_profile_custom_url","https://fixture");values(context).put("ai_profile_custom_key","secret");values(context).put("ai_profile_custom_model","model");values(context).put("output_language","en");
             call(settings,"addAuthorizedWorkDir","/projects/extra");call(settings,"setPrimaryWorkDir","/projects/extra");
             Object active=call(settings,"activeAiProfile");
             check(active.getClass().getField("baseUrl").get(active).equals("https://fixture")&&active.getClass().getField("apiKey").get(active).equals("secret")

@@ -281,7 +281,7 @@ public final class SubAgentLoopIntegrationTest {
         record.name = "restored"; record.task = "resume evidence"; record.status = SubAgentManager.QUEUED; record.sessionId = 90L;
         record.pending.put(new JSONObject().put("from", "main").put("text", "resume evidence")); saved.add(record);
         final Fixture f = new Fixture(new SubAgentManager.Store() {
-            @Override public List<SubAgentManager.Record> load() { return saved; }
+            @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(saved); }
             @Override public void save(SubAgentManager.Record task) { }
         });
         List<Message> parentHistory = new ArrayList<Message>(); parentHistory.add(Message.user("resume the requested work"));
@@ -411,7 +411,7 @@ public final class SubAgentLoopIntegrationTest {
             } else { task.status = SubAgentManager.IDLE; task.result = "child_verified_result"; }
             saved.add(task);
             final Fixture f = new Fixture(new SubAgentManager.Store() {
-                @Override public List<SubAgentManager.Record> load() { return saved; }
+                @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(saved); }
                 @Override public void save(SubAgentManager.Record record) { }
             });
             List<Message> history = new ArrayList<Message>(); history.add(Message.user("finish delegated work"));
@@ -437,7 +437,7 @@ public final class SubAgentLoopIntegrationTest {
         task.name = "strict"; task.task = "requires approved write"; task.status = SubAgentManager.QUEUED; task.sessionId = 80L;
         task.pending.put(new JSONObject().put("from", "main").put("text", task.task)); saved.add(task);
         final Fixture f = new Fixture(new SubAgentManager.Store() {
-            @Override public List<SubAgentManager.Record> load() { return saved; }
+            @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(saved); }
             @Override public void save(SubAgentManager.Record record) { }
         });
         f.childAttemptsWrite = true; f.manager.setMaxParallel(3); Thread.sleep(50L);

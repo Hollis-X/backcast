@@ -278,7 +278,7 @@ public final class ResponsePreferencesRegressionTest {
         java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
         for(String key:new String[]{"agent_mode","agent_concurrency","reasoning_effort"}) values.put(key,"invalid");
         check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3
-                && "low".equals(get(settings,"effectiveReasoningEffort")),"Malformed persisted settings escaped validation");
+                && "low".equals(get(settings,"reasoningEffort")),"Malformed persisted settings escaped validation");
     }
     private static void maxAndUltraRemainSeparateWhilePreservingLanguage() throws Exception {
         Object settings=settings(context());
@@ -286,7 +286,7 @@ public final class ResponsePreferencesRegressionTest {
         for(String effort:new String[]{"off","xhigh","max","ultra","max","xhigh","low"}) {
             set(settings,"setReasoningEffort",effort);
             check(effort.equals(get(settings,"reasoningEffort")),"Selected effort was changed");
-            check(effort.equals(get(settings,"effectiveReasoningEffort")),"Selected effort was mapped to another value");
+            check(effort.equals(get(settings,"reasoningEffort")),"Selected effort was mapped to another value");
             check(("ultra".equals(effort)?"ultra":"manual").equals(get(settings,"agentMode")),"Max inherited automatic delegation");
             check("ja".equals(get(settings,"outputLanguage")) && get(settings,"fullSystemPrompt")
                     .contains(policy("languageInstruction","ja")),"Mode switch changed the output language");
@@ -305,22 +305,6 @@ public final class ResponsePreferencesRegressionTest {
                 && get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Manual inherited automatic delegation");
         set(settings,"setReasoningEffort","off");
         check(get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Off effort bypassed explicit-user policy");
-    }
-    @SuppressWarnings("unchecked")
-    private static void legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection() throws Exception {
-        Object context=context();
-        java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
-        values.put("agent_mode","ultra");values.put("reasoning_effort","off");
-        Object settings=settings(context);
-        check("ultra".equals(get(settings,"effectiveReasoningEffort")),"Legacy ultra did not migrate");
-        set(settings,"setReasoningEffort","max");
-        check("max".equals(get(settings(context),"effectiveReasoningEffort"))
-                && "manual".equals(get(settings(context),"agentMode")),"Legacy ultra resurrected after selecting max");
-        Object second=context();
-        values=(java.util.Map<String,Object>)contextType.getField("values").get(second);
-        values.put("agent_mode","ultra");
-        set(settings(second),"setReasoningEffort","high");
-        check("high".equals(get(settings(second),"effectiveReasoningEffort")),"Explicit effort was overwritten before first migration");
     }
     private static void unsavedModePreviewDoesNotPersistOrAlterPrompt() throws Exception {
         Object settings=settings(context());String raw=get(settings,"systemPrompt");
@@ -361,7 +345,7 @@ public final class ResponsePreferencesRegressionTest {
         preferences(settings, "medium", "detailed", "en", 2, "My preference draft");
         for (String key : before.keySet()) check(before.get(key).equals(stored.get(key)), "Preference save changed another group: " + key);
         check("medium".equals(get(settings, "outputVerbosity")) && "detailed".equals(get(settings, "reasoningSummary"))
-                && "en".equals(get(settings, "outputLanguage")) && "max".equals(get(settings, "effectiveReasoningEffort"))
+                && "en".equals(get(settings, "outputLanguage")) && "max".equals(get(settings, "reasoningEffort"))
                 && concurrency(settings) == 2 && "My preference draft".equals(get(settings, "systemPrompt")), "Preference group did not save every field");
     }
 
@@ -369,18 +353,17 @@ public final class ResponsePreferencesRegressionTest {
         Object context = context(), settings = settings(context);
         @SuppressWarnings("unchecked") java.util.Map<String,Object> values =
                 (java.util.Map<String,Object>) contextType.getField("values").get(context);
-        values.put("agent_mode", "ultra"); values.put("reasoning_effort", "off");
+        values.put("reasoning_effort", "off");
         preferences(settings, "invalid", null, "unknown", 100, null);
         check("default".equals(get(settings, "outputVerbosity")) && "auto".equals(get(settings, "reasoningSummary"))
                 && "zh-CN".equals(get(settings, "outputLanguage")) && concurrency(settings) == 3,
                 "Grouped save bypassed validation");
         check("off".equals(values.get("reasoning_effort")) && !values.containsKey("effort_policy_migrated"),
                 "Response preference save wrote the independently owned effort or migration marker");
-        check("ultra".equals(get(settings(context), "effectiveReasoningEffort")), "Response preference save suppressed legacy ultra migration");
         for (String effort : new String[]{"off", "low", "xhigh", "max", "ultra"}) {
             set(settings, "setReasoningEffort", effort);
             preferences(settings, "high", "none", "en", 2, "Saved independently");
-            check(effort.equals(get(settings(context), "effectiveReasoningEffort")),
+            check(effort.equals(get(settings(context), "reasoningEffort")),
                     "Response preference save changed the current effort: " + effort);
         }
     }
@@ -415,24 +398,6 @@ public final class ResponsePreferencesRegressionTest {
                 .newInstance(id, url, key, model, models);
         settingsType.getMethod("saveAiProfiles", List.class, String.class)
                 .invoke(settings, Arrays.asList(profile), get(settings, "activeProviderId"));
-    }
-    @SuppressWarnings("unchecked")
-    private static void oldAiConfigurationMigratesOnceWithoutLosingProfilesOrModelLists() throws Exception {
-        String[] urls={"https://api.deepseek.com/v1", "https://api.openai.com/v1/chat/completions", "https://api.x.ai/v1",
-                "https://gateway.example/v1", "https://api.openai.com.evil.example/v1", ""};
-        String[] expected={"deepseek","openai","grok","custom","custom","custom"};
-        for(int i=0;i<urls.length;i++) {
-            Object context=context(); java.util.Map<String,Object> values=(java.util.Map<String,Object>)contextType.getField("values").get(context);
-            values.put("base_url",urls[i]); values.put("api_key","legacy-key"); values.put("model","legacy-model");
-            values.put("model_list","legacy-model\nother-model"); Object settings=settings(context);
-            check(expected[i].equals(get(settings,"activeProviderId"))&&urls[i].equals(activeText(settings,"baseUrl"))
-                            &&"legacy-key".equals(activeText(settings,"apiKey"))&&"legacy-model".equals(activeText(settings,"model"))
-                            &&Arrays.asList("legacy-model","other-model").equals(activeModels(settings)),
-                    "Legacy AI migration lost a field or trusted a lookalike host");
-            check(urls[i].equals(values.get("base_url"))&&"legacy-key".equals(values.get("api_key")),"Migration destroyed the original saved configuration");
-            activate(settings,"grok"); values.put("base_url","https://api.openai.com/v1");
-            check("grok".equals(get(settings(context),"activeProviderId")),"Legacy data replaced an already migrated provider selection");
-        }
     }
     @SuppressWarnings("unchecked")
     private static void providersKeepSeparateCredentialsAndImmutableOfficialDefaults() throws Exception {
@@ -496,11 +461,9 @@ public final class ResponsePreferencesRegressionTest {
                     "languageRulesCoverAllVisibleTextAndConflictingPrompts", "childDefaultsAndEveryChoicePersist",
                     "invalidChildAndEffortValuesReturnDefaults", "malformedStoredChildSettingsReturnDefaults",
                     "maxAndUltraRemainSeparateWhilePreservingLanguage", "childPoliciesRequireEvidenceReviewAndSelectiveDelegation",
-                    "legacyUltraMigratesOnceAndNeverOverridesANewMaxSelection",
                     "unsavedModePreviewDoesNotPersistOrAlterPrompt", "groupedAiSavePreservesPreferencesPermissionsAndWorkspace",
                     "groupedPreferenceSavePreservesLatestAiAndToolSettings",
                     "groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra",
-                    "oldAiConfigurationMigratesOnceWithoutLosingProfilesOrModelLists",
                     "providersKeepSeparateCredentialsAndImmutableOfficialDefaults",
                     "modelSelectionActivatesOnlyItsProviderAndKeepsProfilesIndependent",
                     "independentSettingsWritesAndPartialDraftCommitDoNotClobberProviders"}) run(name);

@@ -110,10 +110,6 @@ public final class SubAgentManager {
             if (task.acknowledgedChildren == null) task.acknowledgedChildren = new JSONObject();
             task.deliveredInbox = json.optJSONArray("deliveredInbox");
             if (task.deliveredInbox == null) task.deliveredInbox = new JSONArray();
-            if (IDLE.equals(task.status) && task.error.length() == 0 && PromptGuard.REFUSAL.equals(task.result)) {
-                task.status = FAILED; task.phase = FAILED; task.activeTool = "";
-                task.error = PromptGuard.REFUSAL; task.result = ""; task.revision++;
-            }
             task.currentTaskId = json.optString("currentTaskId", "");
             task.tasks = array(json, "tasks"); task.results = array(json, "results"); task.events = array(json, "events");
             task.forkHistory = array(json, "forkHistory"); task.forkConfig = object(json, "forkConfig");
@@ -121,35 +117,6 @@ public final class SubAgentManager {
             task.acknowledgedResults = object(json, "acknowledgedResults");
             task.rootWakeAllowed = json.optBoolean("rootWakeAllowed", false);
             task.userRestartOnly = json.optBoolean("userRestartOnly", false);
-            // Preserve the one legacy outcome without fabricating unavailable earlier attempts.
-            if (!ROOT.equals(task.id) && task.tasks.length() == 0
-                    && (task.task.length() > 0 || task.pending.length() > 0 || task.inFlight.length() > 0)) {
-                task.currentTaskId = "task_" + task.id + "_legacy";
-                JSONObject attempt = new JSONObject().put("taskId", task.currentTaskId).put("request", task.task)
-                        .put("status", task.status).put("phase", task.phase).put("progress", task.progress)
-                        .put("partial", "").put("error", task.error).put("createdAt", task.lastActivityAt);
-                task.tasks.put(attempt);
-                for (int i = 0; i < task.pending.length(); i++) {
-                    JSONObject pending = task.pending.getJSONObject(i);
-                    // A queued legacy message is its own assignment, never another outcome for the in-flight task.
-                    boolean firstUnstarted = i == 0 && task.inFlight.length() == 0
-                            && task.result.length() == 0 && task.error.length() == 0;
-                    String pendingId = firstUnstarted ? task.currentTaskId : "task_" + task.id + "_legacy_pending_" + i;
-                    pending.put("kind", "task").put("taskId", pendingId);
-                    if (firstUnstarted) attempt.put("request", pending.optString("text", task.task)).put("status", QUEUED).put("phase", QUEUED);
-                    else task.tasks.put(new JSONObject().put("taskId", pendingId).put("request", pending.optString("text", ""))
-                            .put("status", QUEUED).put("phase", QUEUED).put("progress", "").put("partial", "")
-                            .put("error", "").put("createdAt", task.lastActivityAt));
-                }
-                if (task.result.length() > 0 || task.error.length() > 0) {
-                    String resultId = "result_" + task.id + "_legacy";
-                    attempt.put("resultId", resultId);
-                    task.results.put(new JSONObject().put("resultId", resultId).put("taskId", task.currentTaskId)
-                            .put("status", task.error.length() == 0 ? "completed" : task.status)
-                            .put("content", task.result).put("error", task.error).put("partial", "")
-                            .put("createdAt", task.lastActivityAt));
-                }
-            }
             return task;
         }
 

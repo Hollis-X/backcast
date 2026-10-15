@@ -82,7 +82,7 @@ public final class SubAgentRegressionTest {
 
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
     private static SubAgentManager.Record copy(SubAgentManager.Record record) throws Exception {
-        return SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString()));
+        return RecordFixtures.fromJson(new JSONObject(record.toJson().toString()));
     }
     private static LlmClient.Reply text(String text) { LlmClient.Reply reply = new LlmClient.Reply(); reply.content = text; return reply; }
     private static String lastUser(List<Message> history) {

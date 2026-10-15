@@ -43,6 +43,7 @@ javac -proc:none -encoding UTF-8 -source 8 -target 8 -Xlint:-options -cp "$json"
     "$root"/tests/RootExecutionRegressionTest.java \
     "$root"/tests/TaskWorkspaceRegressionTest.java \
     "$root"/tests/ShellGuardRegressionTest.java \
+    "$root"/tests/support/RecordFixtures.java \
     "$root"/tests/SubAgentRegressionTest.java \
     "$root"/tests/SubAgentLoopIntegrationTest.java \
     "$root"/tests/SubAgentCommunicationRegressionTest.java \

@@ -104,51 +104,13 @@ public class ChatStore extends SQLiteOpenHelper {
         createSubAgentRecords(db);
     }
 
+    /** Older schemas are not migrated: the stores are rebuilt empty. */
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        if (oldVersion < 2) {
-            db.execSQL("ALTER TABLE messages ADD COLUMN elapsed_ms INTEGER DEFAULT 0");
-        }
-        if (oldVersion < 3) {
-            db.execSQL("ALTER TABLE messages ADD COLUMN think_ms INTEGER DEFAULT 0");
-        }
-        if (oldVersion < 4) {
-            createRuns(db);
-        }
-        if (oldVersion >= 4 && oldVersion < 5) {
-            db.execSQL("ALTER TABLE runs ADD COLUMN turn_at INTEGER NOT NULL DEFAULT 0");
-            db.execSQL("ALTER TABLE runs ADD COLUMN turn_wall INTEGER NOT NULL DEFAULT 0");
-            db.execSQL("ALTER TABLE runs ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0");
-        }
-        if (oldVersion < 6) {
-            createContext(db);
-        }
-        if (oldVersion < 7) {
-            db.execSQL("ALTER TABLE messages ADD COLUMN display_parts TEXT");
-        }
-        if (oldVersion < 8) {
-            db.execSQL("ALTER TABLE messages ADD COLUMN work_dir TEXT");
-        }
-        if (oldVersion >= 4 && oldVersion < 9) {
-            db.execSQL("ALTER TABLE runs ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0");
-            db.execSQL("ALTER TABLE runs ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0");
-        }
-        if (oldVersion >= 4 && oldVersion < 10) {
-            db.execSQL("ALTER TABLE runs ADD COLUMN budget_wrap_finished INTEGER");
-        }
-        if (oldVersion < 11) createRequestEvents(db);
-        if (oldVersion == 11) db.execSQL("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''");
-        if (oldVersion < 12) createDiagnosticErrors(db);
-        if (oldVersion >= 4 && oldVersion < 13) {
-            db.execSQL("ALTER TABLE runs ADD COLUMN turn_elapsed_ms INTEGER");
-            db.execSQL("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER");
-        }
-        if (oldVersion < 14) db.execSQL("ALTER TABLE messages ADD COLUMN mcp_selection TEXT NOT NULL DEFAULT ''");
-        if (oldVersion < 15) {
-            createCompactionEvents(db);
-            restoreLatestCompactionEvents(db);
-        }
-        if (oldVersion < 16) createSubAgentRecords(db);
+        for (String table : new String[]{"sessions", "messages", "runs", "context_windows", "reasoning_notes",
+                "request_events", "diagnostic_errors", "compaction_events", "sub_agent_stores", "sub_agent_records"})
+            db.execSQL("DROP TABLE IF EXISTS " + table);
+        onCreate(db);
     }
 
     private static void createSubAgentRecords(SQLiteDatabase db) {
@@ -266,30 +228,6 @@ public class ChatStore extends SQLiteOpenHelper {
     }
 
     public synchronized void saveSubAgentRecord(String owner, JSONObject record) {
-        List<JSONObject> records = new ArrayList<JSONObject>(); records.add(record);
-        importSubAgentRecords(owner, records);
-    }
-
-    /** Old checkpoints predate root wake permission; require independent durable work evidence. */
-    public synchronized boolean legacyChildWakeAllowed(long sessionId) {
-        Run run = readRun(sessionId);
-        if (com.mkei.backcast.agent.Goal.isClosed(run.status)
-                || "failed".equals(run.status) || "error".equals(run.status)) return false;
-        if (!run.running && !(com.mkei.backcast.agent.Goal.ACTIVE.equals(run.status)
-                && run.goal != null && run.goal.trim().length() > 0)) return false;
-        Cursor latest = getReadableDatabase().query("request_events", new String[]{"outcome"},
-                "session_id=? AND purpose=?", new String[]{String.valueOf(sessionId), "model"},
-                null, null, "id DESC", "1");
-        try { return !latest.moveToFirst() || "success".equals(latest.getString(0)); }
-        finally { latest.close(); }
-    }
-
-    /** All legacy records commit together; callers delete files only after this returns. */
-    public synchronized void importSubAgentRecords(String owner, List<JSONObject> records) {
-        importSubAgentRecords(owner, records, false);
-    }
-
-    public synchronized void importSubAgentRecords(String owner, List<JSONObject> records, boolean reconcileLegacyStop) {
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -302,16 +240,7 @@ public class ChatStore extends SQLiteOpenHelper {
                 if (!savedState.moveToFirst() || savedState.getInt(0) != 0)
                     throw new IllegalStateException("无法建立子 agent 数据库所有权。");
             } finally { savedState.close(); }
-            boolean stoppedRootImported = false;
-            for (JSONObject record : records) {
-                boolean imported = writeSubAgentRecord(db, owner, record);
-                if (imported && "main".equals(record.optString("id")) && record.optBoolean("managerCancelled"))
-                    stoppedRootImported = true;
-            }
-            if (reconcileLegacyStop && stoppedRootImported && owner.matches("session-[0-9]+")) {
-                ContentValues stopped = new ContentValues(); stopped.put("running", 0);
-                db.update("runs", stopped, "session_id=?", new String[]{owner.substring(8)});
-            }
+            writeSubAgentRecord(db, owner, record);
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
@@ -327,20 +256,19 @@ public class ChatStore extends SQLiteOpenHelper {
         } finally { state.close(); }
     }
 
-    private static boolean writeSubAgentRecord(SQLiteDatabase db, String owner, JSONObject record) {
+    private static void writeSubAgentRecord(SQLiteDatabase db, String owner, JSONObject record) {
         try {
             String id = record.getString("id"); long revision = record.getLong("revision");
             if (!id.matches("[A-Za-z0-9_-]{1,80}") || revision < 0)
                 throw new IllegalArgumentException("子 agent 编号或版本不合法。");
             Cursor old = db.query("sub_agent_records", new String[]{"revision"}, "owner=? AND agent_id=?",
                     new String[]{owner, id}, null, null, null);
-            try { if (old.moveToFirst() && old.getLong(0) >= revision) return false; }
+            try { if (old.moveToFirst() && old.getLong(0) >= revision) return; }
             finally { old.close(); }
             ContentValues values = new ContentValues(); values.put("owner", owner); values.put("agent_id", id);
             values.put("revision", Long.valueOf(revision)); values.put("record_json", record.toString());
             if (db.insertWithOnConflict("sub_agent_records", null, values, SQLiteDatabase.CONFLICT_REPLACE) < 0)
                 throw new IllegalStateException("无法保存子 agent 数据库记录。");
-            return true;
         } catch (org.json.JSONException invalid) { throw new IllegalArgumentException("子 agent 数据库记录不完整。", invalid); }
     }
 
@@ -381,28 +309,6 @@ public class ChatStore extends SQLiteOpenHelper {
                 + "through_id INTEGER NOT NULL,UNIQUE(session_id,through_id))");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_compaction_events_session "
                 + "ON compaction_events(session_id,through_id)");
-    }
-
-    /** Older builds retained only the latest checkpoint, so infer only that boundary. */
-    private static void restoreLatestCompactionEvents(SQLiteDatabase db) {
-        Cursor c = db.query("context_windows", new String[]{"session_id", "through_id", "window"},
-                null, null, null, null, null);
-        try {
-            while (c.moveToNext()) {
-                try {
-                    JSONArray window = new JSONArray(c.getString(2));
-                    for (int i = 0; i < window.length(); i++) {
-                        JSONObject item = window.optJSONObject(i);
-                        if (item != null && Compactor.isSummary(new Message(item.optString("role"), item.optString("content")))) {
-                            saveCompactionEvent(db, c.getLong(0), c.getLong(1));
-                            break;
-                        }
-                    }
-                } catch (org.json.JSONException invalidCheckpoint) {
-                    // Keep the original checkpoint intact; context recovery reports corruption.
-                }
-            }
-        } finally { c.close(); }
     }
 
     private static void saveCompactionEvent(SQLiteDatabase db, long sessionId, long through) {
