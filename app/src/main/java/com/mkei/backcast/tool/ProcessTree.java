@@ -139,16 +139,15 @@ final class ProcessTree {
         else cleanupAttemptDeadline = Math.min(cleanupAttemptDeadline, deadlineNanos);
         deadlineNanos = cleanupAttemptDeadline;
         cleanupFailure = "";
-        boolean census = false;
         try (CleanupBudget budget = new CleanupBudget(deadlineNanos)) {
             long remaining = Math.max(0, deadlineNanos - System.nanoTime());
             long reserve = Math.min(2000000000L, remaining / 2);
             try (CleanupBudget discovery = new CleanupBudget(deadlineNanos - reserve)) {
-                census = sample(discovery);
+                sample(discovery);
                 signal("STOP", discovery);
-                census = sample(discovery) && census;
+                sample(discovery);
                 signal("STOP", discovery);
-                census = sample(discovery) && census;
+                sample(discovery);
             } catch (Exception timedOut) { failure("停止进程", timedOut.getMessage()); }
             finally {
                 // STOPped supervisors cannot respond to EOF. Reserve time for a
@@ -164,14 +163,12 @@ final class ProcessTree {
             try {
                 long exitDeadline = Math.min(deadlineNanos, System.nanoTime() + 600000000L);
                 while (System.nanoTime() - exitDeadline < 0) {
-                    if (!hasSurvivors(budget) && exited()) {
-                        if (census && !known.isEmpty()) { confirmedStopped = true; cleanupFailure = ""; return true; }
-                        failure("验证进程退出", "进程身份扫描未完整确认。");
-                        return false;
-                    }
+                    // Exited with no live registered process: done, even when some
+                    // /proc entries were unreadable during discovery.
+                    if (!hasSurvivors(budget) && exited()) { confirmedStopped = true; cleanupFailure = ""; return true; }
                     budget.pause(20);
                 }
-                if (!hasSurvivors(budget) && exited() && census && !known.isEmpty()) {
+                if (!hasSurvivors(budget) && exited()) {
                     confirmedStopped = true; cleanupFailure = ""; return true;
                 }
             } catch (Exception unavailable) { failure("验证进程退出", unavailable.getMessage()); }

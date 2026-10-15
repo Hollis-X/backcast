@@ -1552,23 +1552,24 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
 
         final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundResource(R.drawable.bg_popup);
-        card.setPadding(dp(12), dp(12), dp(12), dp(12));
+        card.setPadding(dp(8), dp(8), dp(8), dp(8));
         ScrollView menu = new ScrollView(this);
         menu.setBackgroundResource(R.drawable.bg_popup);
+        menu.setClipToOutline(true);
         menu.setFillViewport(true);
         menu.addView(card);
         modelPopup = new PopupWindow(menu, dp(280), ViewGroup.LayoutParams.WRAP_CONTENT, true);
         modelPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         modelPopup.setOutsideTouchable(true);
+        modelPopup.setElevation(dp(12));
         showIntelligencePage(card);
         card.startAnimation(AnimationUtils.loadAnimation(this, R.anim.popup_in));
     }
 
     private void showIntelligencePage(final LinearLayout card) {
         card.removeAllViews();
-        TextView title = popupText(getString(R.string.popup_intelligence), 14, R.color.text_secondary);
-        title.setPadding(dp(12), dp(6), dp(12), dp(8));
+        TextView title = popupText(getString(R.string.popup_intelligence), 13, R.color.text_secondary);
+        title.setPadding(dp(12), dp(4), dp(12), dp(4));
         card.addView(title, wrapParams());
         addEffortOption(card, "关闭思考", Settings.EFFORT_OFF);
         addEffortOption(card, "低", Settings.EFFORT_LOW);
@@ -1580,17 +1581,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         View divider = new View(this);
         divider.setBackgroundColor(0xFFE8E8E8);
         LinearLayout.LayoutParams separator = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
-        separator.setMargins(dp(12), dp(8), dp(12), dp(8));
+        separator.setMargins(dp(12), dp(4), dp(12), dp(4));
         card.addView(divider, separator);
         LinearLayout model = new LinearLayout(this);
         model.setTag("model-menu-entry");
         model.setOrientation(LinearLayout.HORIZONTAL);
         model.setGravity(Gravity.CENTER_VERTICAL);
         model.setPadding(dp(12), dp(8), dp(12), dp(8));
-        model.setMinimumHeight(dp(64));
+        model.setMinimumHeight(dp(52));
         LinearLayout labels = new LinearLayout(this);
         labels.setOrientation(LinearLayout.VERTICAL);
-        labels.addView(popupText(getString(R.string.popup_model), 17, R.color.text_primary), wrapParams());
+        labels.addView(popupText(getString(R.string.popup_model), 15, R.color.text_primary), wrapParams());
         TextView current = popupText(activeModelLabel(), 13, R.color.text_secondary);
         current.setMaxLines(2);
         current.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -1635,7 +1636,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         int[] location = new int[2];
         anchor.getLocationOnScreen(location);
         int left = Math.max(dp(8), Math.min(location[0], screenWidth - width - dp(8)));
-        int top = Math.max(dp(8), Math.min(location[1] - height - dp(8), screenHeight - height - dp(8)));
+        int top = Math.max(dp(8), Math.min(location[1] - height - dp(20), screenHeight - height - dp(8)));
         if (modelPopup.isShowing()) modelPopup.update(left, top, width, height);
         else {
             modelPopup.setWidth(width);
@@ -1768,12 +1769,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
     }
 
     private void addEffortOption(LinearLayout card, String label, final String effort) {
-        final TextView row = popupText(label, 17, R.color.text_primary);
+        final TextView row = popupText(label, 15, R.color.text_primary);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinHeight(dp(48));
+        row.setMinHeight(dp(42));
         row.setPadding(dp(12), 0, dp(12), 0);
         if (effort.equals(settings.reasoningEffort())) {
             row.setSelected(true);
+            row.setBackgroundResource(R.drawable.bg_popup_selected);
             Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, 0xFF3C3C43, dp(20));
         }
         row.setOnClickListener(new View.OnClickListener() {
