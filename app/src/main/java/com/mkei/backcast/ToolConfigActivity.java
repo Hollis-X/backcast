@@ -88,11 +88,11 @@ public final class ToolConfigActivity extends AppCompatActivity {
         batchProgressContainer = findViewById(R.id.tool_batch_progress_container);
         batchProgress = (ProgressBar) findViewById(R.id.tool_batch_progress);
         batchProgressText = (TextView) findViewById(R.id.tool_batch_progress_text);
-        Icons.left(install, Icons.FOLDER, 0xFFFFFFFF, dp(18));
-        Icons.left(remove, Icons.STOP, 0xFF8E8E93, dp(18));
-        Icons.left(probe, Icons.PLAY, 0xFF8E8E93, dp(18));
-        Icons.left(cancel, Icons.STOP, 0xFF8E8E93, dp(18));
-        Icons.left(batchProbe, Icons.PLAY, 0xFF8E8E93, dp(18));
+        Icons.leftCentered(install, Icons.FOLDER, 0xFFFFFFFF, dp(18));
+        Icons.leftCentered(remove, Icons.STOP, 0xFF3C3C43, dp(18));
+        Icons.leftCentered(probe, Icons.PLAY, 0xFF3C3C43, dp(18));
+        Icons.leftCentered(cancel, Icons.STOP, 0xFF3C3C43, dp(18));
+        Icons.leftCentered(batchProbe, Icons.PLAY, 0xFF3C3C43, dp(18));
         useRoot.setChecked(settings.useRoot());
         useRoot.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton button, boolean checked) { updateRoot(checked); }
