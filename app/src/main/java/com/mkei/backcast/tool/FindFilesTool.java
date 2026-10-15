@@ -1,6 +1,5 @@
 package com.mkei.backcast.tool;
 
-import com.mkei.backcast.agent.Tool;
 import java.io.File;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -15,13 +14,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** Filename lookup over the current turn's authorized roots, without reading any contents. */
-public final class FindFilesTool implements Tool {
+public final class FindFilesTool extends AbortableTool {
     private static final int MAX_ENTRIES = 20000, MAX_RESULTS = 100, MAX_OUTPUT = 48000;
     private static final long MAX_TIME = TimeUnit.SECONDS.toNanos(20);
     private final String workDir;
     private final boolean useRoot;
     private final TemporaryWorkspace temporary;
-    private volatile int epoch;
 
     public FindFilesTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir; this.useRoot = useRoot; this.temporary = temporary;
@@ -51,15 +49,9 @@ public final class FindFilesTool implements Tool {
         } catch (Exception failure) { return new JSONObject(); }
     }
 
-    @Override public void abort() { epoch++; }
-
     @Override public String run(JSONObject args) throws Exception {
         final int mine = epoch;
-        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
-            @Override public void check() throws Exception {
-                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
-            }
-        };
+        ToolchainInstaller.Cancellation cancellation = cancellationFor(mine);
         try {
             int limit = number(args, "limit", 40, MAX_RESULTS), depth = number(args, "max_depth", 16, 64);
             if (limit < 1 || depth < 0) return "错误：limit 或 max_depth 不合法。";

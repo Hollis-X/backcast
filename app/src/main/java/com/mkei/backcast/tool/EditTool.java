@@ -1,7 +1,5 @@
 package com.mkei.backcast.tool;
 
-import com.mkei.backcast.agent.Tool;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -12,14 +10,13 @@ import java.util.List;
 /**
  * 按原文替换一个文件里的若干处。对不上就不写盘。
  */
-public class EditTool implements Tool {
+public class EditTool extends AbortableTool {
 
     private static final int MAX_LOAD = 8 * 1024 * 1024;
 
     private final String workDir;
     private final boolean useRoot;
     private final TemporaryWorkspace temporary;
-    private volatile int epoch;
 
     public EditTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
@@ -89,18 +86,9 @@ public class EditTool implements Tool {
     }
 
     @Override
-    public void abort() {
-        epoch++;
-    }
-
-    @Override
     public String run(JSONObject args) throws Exception {
         final int mine = epoch;
-        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
-            @Override public void check() throws Exception {
-                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
-            }
-        };
+        ToolchainInstaller.Cancellation cancellation = cancellationFor(mine);
         String path = args.optString("path", "");
         if (path.length() == 0) {
             return "错误：path 为空。";

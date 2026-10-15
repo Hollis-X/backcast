@@ -253,7 +253,7 @@ public class AgentLoop {
      * 就是违反 budget_limited 的语义，直接停下等用户，而不是无限续跑。
      */
     private boolean budgetWrappedUp;
-    /** null 仅用于旧运行记录；新记录明确保存是否已发出预算最终答复。 */
+    /** null 表示还没有保存过收尾状态，恢复时按目标状态推断。 */
     private Boolean budgetWrapFinished = Boolean.FALSE;
     /**
      * 用户改写了目标正文，下一轮问模型前先把新目标注入一次。
@@ -2712,8 +2712,8 @@ public class AgentLoop {
         synchronized (lock) {
             if (!shouldContinue()) return;
             if (elapsedMs == null) {
-                // Legacy records have no accumulated fields. Recover only saved
-                // assistant work within this unfinished request, never its uptime.
+                // No duration checkpoint was saved. Recover only saved assistant
+                // work within this unfinished request, never its uptime.
                 elapsedMs = Long.valueOf(0L);
                 thinkMs = null;
                 for (int i = history.size() - 1; i >= 0; i--) {

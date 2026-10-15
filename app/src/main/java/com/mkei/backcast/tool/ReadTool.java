@@ -1,7 +1,5 @@
 package com.mkei.backcast.tool;
 
-import com.mkei.backcast.agent.Tool;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -12,7 +10,7 @@ import java.util.Locale;
 /**
  * 读文本文件。超限时截断并告诉模型下一页的 offset，不整篇拒绝。
  */
-public class ReadTool implements Tool {
+public class ReadTool extends AbortableTool {
 
     static final int MAX_LINES = 2000;
     static final int MAX_BYTES = 50 * 1024;
@@ -22,7 +20,6 @@ public class ReadTool implements Tool {
     private final String workDir;
     private final boolean useRoot;
     private final TemporaryWorkspace temporary;
-    private volatile int epoch;
 
     public ReadTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
@@ -81,18 +78,9 @@ public class ReadTool implements Tool {
     }
 
     @Override
-    public void abort() {
-        epoch++;
-    }
-
-    @Override
     public String run(JSONObject args) throws Exception {
         final int mine = epoch;
-        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
-            @Override public void check() throws Exception {
-                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
-            }
-        };
+        ToolchainInstaller.Cancellation cancellation = cancellationFor(mine);
         String path = args.optString("path", "");
         if (path.length() == 0) {
             return "错误：path 为空。";

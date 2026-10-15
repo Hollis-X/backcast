@@ -60,7 +60,7 @@ public class ChatStore extends SQLiteOpenHelper {
         public String status = "";
         public long elapsedMs;
         public boolean running;
-        /** Null marks a legacy run without a duration checkpoint. */
+        /** Null when the run stopped before its first duration checkpoint. */
         public Long turnElapsedMs;
         /** Null means no first content event has been recorded in this turn. */
         public Long turnThinkMs;
@@ -68,7 +68,7 @@ public class ChatStore extends SQLiteOpenHelper {
         public long tokensUsed;
         /** 目标 token 预算，0 表示没设。 */
         public long tokenBudget;
-        /** Null for legacy runs whose budget wrap-up must be inferred. */
+        /** Null when no wrap-up decision was saved; restore infers it from the goal status. */
         public Boolean budgetWrapFinished;
     }
 
