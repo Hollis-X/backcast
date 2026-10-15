@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 用户消息：浅灰胶囊，正文不再套气泡。 -->
+<!-- 用户消息：浅蓝胶囊，和灰色代码块、白色顶栏区分开。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="#F2F2F4"/>
+    <solid android:color="@color/bubble_user"/>
     <corners android:radius="18dp"/>
 </shape>

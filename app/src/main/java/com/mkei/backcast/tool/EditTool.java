@@ -167,7 +167,7 @@ public class EditTool extends AbortableTool {
                 return "错误：" + e.getMessage();
             }
         }
-        return "已替换 " + edits.size() + " 处：" + path + "\n" + com.mkei.backcast.agent.LineDelta.mark(delta);
+        return "已修改 " + edits.size() + " 处：" + path + "\n" + com.mkei.backcast.agent.LineDelta.mark(delta);
     }
 
     /**

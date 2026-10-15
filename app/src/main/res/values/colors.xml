@@ -23,4 +23,6 @@
     <color name="field_stroke">#E2E2E6</color>
     <color name="accent_pressed">#2458C4</color>
     <color name="accent_disabled">#A8C0EE</color>
+    <!-- 用户气泡：带一点主题蓝，和代码块的灰区分。 -->
+    <color name="bubble_user">#EBF1FD</color>
 </resources>

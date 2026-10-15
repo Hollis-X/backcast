@@ -100,9 +100,9 @@ public final class Markdown {
         int start = out.length();
         out.append(body);
         out.append('\n');
-        // A ReplacementSpan is a single layout item; it cannot draw a multiline code block.
+        // A ReplacementSpan is a single layout item; a line background draws the multiline block instead.
         out.setSpan(new TypefaceSpan("monospace"), start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        out.setSpan(new BackgroundColorSpan(codeBg), start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        out.setSpan(new CodeBlockSpan(codeBg), start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         out.setSpan(new RelativeSizeSpan(0.92f), start, out.length(),
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return i;

@@ -81,7 +81,7 @@ public class PlanTimelineTest {
         trace.addStep("p1", TurnTrace.PLAN, plan("读代码", "completed", "改代码", "in_progress"));
         trace.addStep("e1", "edit", "{\"path\":\"a.txt\"}");
         for (TurnTrace.Step step : trace.steps) { step.started = true; step.done = true; }
-        trace.steps.get(1).result = "已替换 1 处：a.txt\n变更：+5 -2";
+        trace.steps.get(1).result = "已修改 1 处：a.txt\n变更：+5 -2";
         WorkTimeline view = timeline(context, trace);
         layout(view);
         assertEquals("only the edit row is in the timeline", 1, view.getChildCount());
@@ -129,7 +129,7 @@ public class PlanTimelineTest {
         trace.addStep("e", "edit", "{\"path\":\"SubAgentManager.java\"}");
         trace.addStep("w", "write", "{\"path\":\"PlanCard.java\"}");
         for (TurnTrace.Step step : trace.steps) { step.started = true; step.done = true; }
-        trace.steps.get(0).result = "已替换 3 处：SubAgentManager.java\n变更：+18 -7";
+        trace.steps.get(0).result = "已修改 3 处：SubAgentManager.java\n变更：+18 -7";
         trace.steps.get(1).result = "已写入 PlanCard.java\n变更：+120 -0";
         page.addView(timeline(context, trace));
         layout(page);

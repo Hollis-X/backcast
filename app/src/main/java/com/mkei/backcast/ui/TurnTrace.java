@@ -25,7 +25,8 @@ public class TurnTrace {
     /** {状态行, 清单文字}：✓ 已完成、● 进行中、○ 待做。参数还在流式生成、解析不了时给占位。 */
     public static String[] planView(String args) {
         try {
-            JSONArray items = new JSONObject(args).getJSONArray("items");
+            JSONArray items = com.mkei.backcast.tool.PlanTool.normalize(args);
+            if (items == null) throw new IllegalStateException();
             StringBuilder out = new StringBuilder();
             int done = 0;
             for (int i = 0; i < items.length(); i++) {

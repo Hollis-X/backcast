@@ -3588,9 +3588,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         ViewParent parent = header.getParent();
         if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.VISIBLE);
         else header.setVisibility(View.VISIBLE);
-        boolean live = trace == currentTrace && trace.elapsedMs <= 0;
-        String time = live ? "总耗时 " + seconds(ms) + "s"
-                : getString(R.string.worked, Integer.valueOf(seconds(ms)));
+        String time = getString(R.string.worked, Integer.valueOf(seconds(ms)));
         header.setText(time);
     }
 
@@ -3724,26 +3722,23 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         return flow.body;
     }
 
-    /**
-     * 本轮有计划时，在这一轮的末尾放一张卡片，跟着计划更新；它始终排在这一轮最后，
-     * 新的正文或工具出现后挪到它们下面。
-     */
+    /** 本轮有计划时，在“工作了”折叠行下面放一张卡片，跟着计划原地更新。 */
     private void syncPlanCard(Flow flow) {
         TurnTrace trace = traceOf(flow.rows);
         String plan = trace == null ? null : trace.latestPlan();
         PlanCard card = null;
         for (int i = 0; i < flow.box.getChildCount(); i++)
             if (flow.box.getChildAt(i) instanceof PlanCard) { card = (PlanCard) flow.box.getChildAt(i); break; }
+        // 参数还在流式生成、解析不了时先不画，免得出现空卡片。
+        if (plan != null && com.mkei.backcast.tool.PlanTool.normalize(plan) == null) plan = null;
         if (plan == null) {
             if (card != null) flow.box.removeView(card);
             return;
         }
         if (card == null) {
+            // 紧跟在“工作了”折叠行下面，之后正文和工具都排在它后面，不再挪动。
             card = new PlanCard(this);
-            flow.box.addView(card, PlanCard.layout(this));
-        } else if (flow.box.indexOfChild(card) != flow.box.getChildCount() - 1) {
-            flow.box.removeView(card);
-            flow.box.addView(card, PlanCard.layout(this));
+            flow.box.addView(card, flow.box.indexOfChild(flow.rows) + 1, PlanCard.layout(this));
         }
         card.bind(plan, trace == currentTrace && loop != null && loop.busy());
     }

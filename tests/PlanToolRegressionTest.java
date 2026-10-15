@@ -22,7 +22,11 @@ public final class PlanToolRegressionTest {
         check(running.contains("共 3 步") && running.contains("已完成 1 步") && running.contains("进行中：改代码"), "Progress summary is wrong: " + running);
         check(tool.run(plan("a", "completed", "b", "completed")).contains("全部完成"), "A finished plan was not reported complete");
         check(tool.run(plan("a", "in_progress", "b", "in_progress")).startsWith("错误："), "Two active steps were accepted");
-        check(tool.run(plan("a", "doing")).startsWith("错误："), "An unknown status was accepted");
+        check(!tool.run(plan("a", "doing")).startsWith("错误："), "A common status synonym was rejected");
+        JSONObject codex = new JSONObject("{\"plan\":[{\"step\":\"写脚本\",\"status\":\"completed\"},{\"step\":\"运行\",\"status\":\"in_progress\"}]}");
+        check(tool.run(codex).contains("共 2 步") && tool.run(codex).contains("进行中：运行"), "plan/step shape was rejected: " + tool.run(codex));
+        check(PlanTool.normalize(codex.toString()).getJSONObject(0).getString("content").equals("写脚本"), "normalize lost step text");
+        check(PlanTool.normalize("{\"plan\":[{\"ste") == null, "partial arguments should not parse");
         check(tool.run(plan("", "pending")).startsWith("错误："), "An empty step was accepted");
         check(tool.run(new JSONObject()).startsWith("错误：") && tool.run(new JSONObject().put("items", new JSONArray())).startsWith("错误："),
                 "A missing or empty list was accepted");
@@ -50,7 +54,7 @@ public final class PlanToolRegressionTest {
         // Line deltas from edit/write results are summed for the folded row
         TurnTrace edits = new TurnTrace();
         edits.addStep("e1", "edit", "{}"); edits.addStep("w1", "write", "{}"); edits.addStep("s1", "shell", "{}");
-        edits.steps.get(0).done = true; edits.steps.get(0).result = "已替换 1 处：a.txt\n变更：+3 -1";
+        edits.steps.get(0).done = true; edits.steps.get(0).result = "已修改 1 处：a.txt\n变更：+3 -1";
         edits.steps.get(1).done = true; edits.steps.get(1).result = "已写入 b.txt\n变更：+9 -0";
         edits.steps.get(2).done = true; edits.steps.get(2).result = "exit=0\n变更：+100 -100 is just output";
         int[] total = edits.lineDelta(0, edits.order.size());

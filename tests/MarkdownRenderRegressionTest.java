@@ -109,8 +109,8 @@ public final class MarkdownRenderRegressionTest {
             frames.frame();
             check(parsed.get() == 2 && applied.size() == 1 && applied.get(0).toString().equals("完成\n第一行();\n  第二行();"),
                     "Every token was rendered separately or the final reply lost code indentation/newlines");
-            check(span(applied.get(0), "TypefaceSpan") && span(applied.get(0), "BackgroundColorSpan")
-                    && !span(applied.get(0), "CodeSpan"), "A multiline code block is still a single unbreakable replacement");
+            check(span(applied.get(0), "TypefaceSpan") && span(applied.get(0), "CodeBlockSpan")
+                    && !span(applied.get(0), "CodeSpan"), "A multiline code block is not one block with a line background");
         } finally { release.countDown(); queue.close(); worker.shutdownNow(); }
         pass("updatesCoalesceAndOnlyTheFinalVersionCanApply");
     }
@@ -193,6 +193,8 @@ public final class MarkdownRenderRegressionTest {
                 + "public String toString(){return text.toString();}}"));
         sources.add(new Source("android.text.style.ReplacementSpan", "package android.text.style;import android.graphics.*;public abstract class ReplacementSpan{"
                 + "public abstract int getSize(Paint p,CharSequence s,int a,int b,Paint.FontMetricsInt fm);public abstract void draw(Canvas c,CharSequence s,int a,int b,float x,int t,int y,int z,Paint p);}"));
+        // The real block span draws on Android only; the parser just has to attach it to the whole block.
+        sources.add(new Source("com.mkei.backcast.ui.CodeBlockSpan", "package com.mkei.backcast.ui;public final class CodeBlockSpan{public final int fill;public CodeBlockSpan(int fill){this.fill=fill;}}"));
         for (String name : Arrays.asList("StyleSpan", "RelativeSizeSpan", "TypefaceSpan", "BackgroundColorSpan")) {
             String type = name.equals("TypefaceSpan") ? "String" : name.equals("RelativeSizeSpan") ? "float" : "int";
             sources.add(new Source("android.text.style." + name, "package android.text.style;public class " + name + "{public final " + type + " value;public " + name + "(" + type + " v){value=v;}}"));

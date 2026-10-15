@@ -27,7 +27,12 @@ public final class PlanCard extends LinearLayout {
         setOrientation(VERTICAL);
         setContentDescription("plan");
         setBackgroundResource(R.drawable.bg_plan_card);
-        setElevation(px(3));
+        // 很轻的阴影：只在卡片底边透一点灰，不压过边框。
+        setElevation(px(1.5f));
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            setOutlineAmbientShadowColor(0x14000000);
+            setOutlineSpotShadowColor(0x1F000000);
+        }
         setPadding(px(16), px(12), px(16), px(12));
         header = new TextView(context);
         header.setTextSize(13);
@@ -44,7 +49,7 @@ public final class PlanCard extends LinearLayout {
         float density = context.getResources().getDisplayMetrics().density;
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         int gap = Math.round(6 * density);
-        lp.setMargins(Math.round(2 * density), gap, Math.round(2 * density), Math.round(10 * density));
+        lp.setMargins(Math.round(1 * density), Math.round(2 * density), Math.round(1 * density), gap + Math.round(4 * density));
         return lp;
     }
 
@@ -52,8 +57,8 @@ public final class PlanCard extends LinearLayout {
     public void bind(String args, boolean live) {
         if (args != null && args.equals(rendered) && live == renderedLive) return;
         JSONArray items;
-        try { items = new JSONObject(args).getJSONArray("items"); }
-        catch (Exception partial) { return; }
+        items = com.mkei.backcast.tool.PlanTool.normalize(args);
+        if (items == null) return;
         rendered = args; renderedLive = live;
         list.removeAllViews();
         int done = 0;

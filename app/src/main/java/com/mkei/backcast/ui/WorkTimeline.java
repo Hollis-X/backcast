@@ -208,7 +208,7 @@ public final class WorkTimeline extends LinearLayout {
     public static CharSequence withDelta(CharSequence text, int[] delta) {
         if (delta == null) return text;
         android.text.SpannableStringBuilder out = new android.text.SpannableStringBuilder(text);
-        if (out.length() > 0) out.append("  ");
+        if (out.length() > 0) out.append(" ");
         appendChip(out, " +" + delta[0] + " ", 0xFF1E7B3C, 0xFFDDF3E4);
         appendChip(out, " -" + delta[1] + " ", 0xFFC0392B, 0xFFFBE0DD);
         return out;
@@ -216,11 +216,8 @@ public final class WorkTimeline extends LinearLayout {
 
     private static void appendChip(android.text.SpannableStringBuilder out, String chip, int ink, int fill) {
         int start = out.length();
-        out.append(chip);
-        int flags = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE;
-        out.setSpan(new android.text.style.ForegroundColorSpan(ink), start, out.length(), flags);
-        out.setSpan(new android.text.style.BackgroundColorSpan(fill), start, out.length(), flags);
-        out.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, out.length(), flags);
+        out.append(chip.trim());
+        out.setSpan(new ChipSpan(ink, fill), start, out.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     public static String toolState(TurnTrace.Step step, boolean live) {
@@ -249,7 +246,7 @@ public final class WorkTimeline extends LinearLayout {
         if (TurnTrace.ASK.equals(step.name)) return "询问用户";
         if ("shell".equals(step.name)) return "执行命令";
         if ("read".equals(step.name)) return "读取文件";
-        if ("edit".equals(step.name)) return "编辑文件";
+        if ("edit".equals(step.name)) return "修改文件";
         if ("write".equals(step.name)) return "写入文件";
         if ("update_goal".equals(step.name)) return "更新目标";
         return step.name;

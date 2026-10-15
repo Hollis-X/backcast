@@ -34,8 +34,49 @@ public final class PlanTool implements Tool {
         } catch (Exception invalid) { throw new IllegalStateException(invalid); }
     }
 
+    /**
+     * 把模型传来的清单统一成 [{content,status}]。模型常按别的工具的习惯传
+     * plan/step、todos/title 之类的名字，这里都认；解析不了返回 null。
+     */
+    public static JSONArray normalize(JSONObject args) {
+        if (args == null) return null;
+        JSONArray raw = null;
+        for (String key : new String[] { "items", "plan", "todos", "steps", "tasks" }) {
+            raw = args.optJSONArray(key);
+            if (raw != null) break;
+        }
+        if (raw == null) return null;
+        JSONArray out = new JSONArray();
+        try {
+            for (int i = 0; i < raw.length(); i++) {
+                Object one = raw.opt(i);
+                String content = "", status = "pending";
+                if (one instanceof JSONObject) {
+                    JSONObject o = (JSONObject) one;
+                    for (String key : new String[] { "content", "step", "title", "text", "task", "description" }) {
+                        content = o.optString(key, "").trim();
+                        if (content.length() > 0) break;
+                    }
+                    String s = o.optString("status", "pending").trim().toLowerCase(java.util.Locale.ROOT);
+                    status = "completed".equals(s) || "done".equals(s) || "complete".equals(s) ? "completed"
+                            : "in_progress".equals(s) || "in-progress".equals(s) || "doing".equals(s) || "active".equals(s)
+                            ? "in_progress" : "pending";
+                } else if (one instanceof String) {
+                    content = ((String) one).trim();
+                }
+                out.put(new JSONObject().put("content", content).put("status", status));
+            }
+        } catch (Exception invalid) { return null; }
+        return out;
+    }
+
+    /** 参数文本（可能还在流式生成）→ 统一清单；解析不了返回 null。 */
+    public static JSONArray normalize(String args) {
+        try { return normalize(new JSONObject(args)); } catch (Exception partial) { return null; }
+    }
+
     @Override public String run(JSONObject args) {
-        JSONArray items = args.optJSONArray("items");
+        JSONArray items = normalize(args);
         if (items == null || items.length() == 0 || items.length() > MAX_STEPS)
             return "错误：items 必须是 1 到 " + MAX_STEPS + " 项的清单。";
         int done = 0, doing = 0;

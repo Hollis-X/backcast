@@ -395,8 +395,8 @@ final class EditDiff {
 
     private static String sameError(String path, int total) {
         if (total == 1) {
-            return "没有改动 " + path + "。替换结果和原文一样。";
+            return "没有改动 " + path + "。修改结果和原文一样。";
         }
-        return "没有改动 " + path + "。这些替换的结果和原文一样。";
+        return "没有改动 " + path + "。这些修改的结果和原文一样。";
     }
 }
