@@ -53,7 +53,7 @@ public final class ToolPackageManagementRegressionTest {
         }
         ToolchainStore store(String name) { return new ToolchainStore(new File(root, name), this, "arm64-v8a", 30, ANDROID_RUNTIME, ToolchainFixtures.transport(this, manifest)); }
     }
-    private static String hash(byte[] data) throws Exception { return ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(data)); }
+    private static String hash(byte[] data) throws Exception { return com.mkei.backcast.agent.Text.hex(MessageDigest.getInstance("SHA-256").digest(data)); }
     private static void put(byte[] target, int offset, String value) throws Exception {
         byte[] data = value.getBytes("UTF-8"); System.arraycopy(data, 0, target, offset, data.length);
     }

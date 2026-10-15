@@ -323,13 +323,7 @@ public class LlmClient {
     }
 
     public static String credentialFingerprint(String credential) {
-        try {
-            byte[] bytes = java.security.MessageDigest.getInstance("SHA-256")
-                    .digest((credential == null ? "" : credential).getBytes("UTF-8"));
-            StringBuilder result = new StringBuilder();
-            for (byte value : bytes) result.append(String.format(java.util.Locale.US, "%02x", value & 255));
-            return result.toString();
-        } catch (Exception impossible) { throw new IllegalStateException("无法校验模型授权身份。", impossible); }
+        return Text.sha256Hex(credential == null ? "" : credential);
     }
 
     /** 断开正在进行的请求。用户点停止时调用。 */

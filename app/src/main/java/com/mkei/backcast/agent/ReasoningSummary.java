@@ -91,8 +91,6 @@ public final class ReasoningSummary {
     public static String clip(String text, int limit) {
         if (text == null) return "";
         if (text.length() <= limit) return text;
-        int end = limit;
-        if (end > 0 && Character.isHighSurrogate(text.charAt(end - 1))) end--;
-        return text.substring(0, end) + "...";
+        return Text.clip(text, limit) + "...";
     }
 }

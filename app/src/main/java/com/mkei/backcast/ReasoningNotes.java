@@ -4,7 +4,6 @@ import android.os.Handler;
 import android.os.Looper;
 import com.mkei.backcast.agent.*;
 import com.mkei.backcast.ui.TurnTrace;
-import java.security.MessageDigest;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -114,13 +113,7 @@ public final class ReasoningNotes {
         }
     }
 
-    private static String key(String source) throws Exception {
-        byte[] hash = MessageDigest.getInstance("SHA-256").digest(source.getBytes("UTF-8"));
-        StringBuilder out = new StringBuilder(64);
-        for (byte b : hash) {
-            out.append(Character.forDigit((b >> 4) & 15, 16));
-            out.append(Character.forDigit(b & 15, 16));
-        }
-        return out.toString();
+    private static String key(String source) {
+        return Text.sha256Hex(source);
     }
 }

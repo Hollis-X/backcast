@@ -460,7 +460,7 @@ public final class SubAgentManager {
             Slot slot = requireOwner(owner); JSONObject task = currentTaskLocked(slot.task);
             if (task == null || !slot.executing) throw new IllegalStateException("当前没有运行中的任务。");
             if ("progress".equals(kind)) {
-                slot.task.progress = clipped(text, 600); task.put("progress", text);
+                slot.task.progress = Text.clip(text, 600); task.put("progress", text);
                 if (phase != null && phase.length() > 0) { slot.task.phase = phase; task.put("phase", phase); }
             } else task.put(kind, text);
             eventLocked(slot.task, kind, text, owner, slot.task.parentId); lock.notifyAll();
@@ -772,7 +772,7 @@ public final class SubAgentManager {
                     if (taskId.equals(task.optString("taskId"))) { request = task.optString("request"); break; }
                 }
                 rows.put(new JSONObject().put("taskId", taskId).put("resultId", result.getString("resultId"))
-                        .put("status", result.optString("status")).put("request", clipped(request, 160))
+                        .put("status", result.optString("status")).put("request", Text.clip(request, 160))
                         .put("contentLength", result.optString("content").length()).put("partialLength", partialStream(result).length())
                         .put("errorLength", result.optString("error").length()).put("createdAt", result.optLong("createdAt")));
             }
@@ -807,7 +807,7 @@ public final class SubAgentManager {
         return new JSONObject().put("id", agentId).put("taskId", result.getString("taskId"))
                 .put("resultId", result.getString("resultId")).put("status", result.optString("status"))
                 .put("stream", partialPart ? "partial" : "content")
-                .put("result", partialPart ? "" : text.substring(local, endLocal)).put("error", clipped(result.optString("error"), 2000))
+                .put("result", partialPart ? "" : text.substring(local, endLocal)).put("error", Text.clip(result.optString("error"), 2000))
                 .put("errorTruncated", result.optString("error").length() > 2000)
                 .put("partial", partialPart ? text.substring(local, endLocal) : "").put("offset", start).put("endOffset", end)
                 .put("totalLength", total).put("contentLength", content.length()).put("partialLength", partial.length())
@@ -1154,7 +1154,7 @@ public final class SubAgentManager {
         Record task = slot.task;
         if (phase.equals(task.phase) && tool.equals(task.activeTool) && summary == null) return;
         task.phase = phase; task.activeTool = tool;
-        if (summary != null) task.progress = clipped(summary, 600);
+        if (summary != null) task.progress = Text.clip(summary, 600);
         task.lastActivityAt = System.currentTimeMillis(); task.progressRevision++; task.revision++;
         try {
             JSONObject attempt = currentTaskLocked(task);
@@ -1235,15 +1235,15 @@ public final class SubAgentManager {
 
     private JSONObject view(Slot slot) throws Exception {
         Record task = slot.task;
-        return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", clipped(task.name, 256))
-                .put("task", clipped(task.task, 2000)).put("status", task.status)
+        return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", Text.clip(task.name, 256))
+                .put("task", Text.clip(task.task, 2000)).put("status", task.status)
                 .put("taskId", task.currentTaskId).put("taskCount", task.tasks.length()).put("resultCount", task.results.length())
                 .put("phase", task.phase).put("activeTool", task.activeTool).put("progress", task.progress)
                 .put("lastActivityAt", task.lastActivityAt).put("progressRevision", task.progressRevision)
-                .put("result", slot.executing || QUEUED.equals(task.status) ? "" : clipped(task.result, 8000))
+                .put("result", slot.executing || QUEUED.equals(task.status) ? "" : Text.clip(task.result, 8000))
                 .put("resultTruncated", !slot.executing && !QUEUED.equals(task.status) && task.result.length() > 8000)
                 .put("taskTruncated", task.task.length() > 2000)
-                .put("error", task.error.length() == 0 ? JSONObject.NULL : clipped(task.error, 2000))
+                .put("error", task.error.length() == 0 ? JSONObject.NULL : Text.clip(task.error, 2000))
                 .put("pendingMessages", task.pending.length() + task.inbox.length()).put("revision", task.revision).put("tokensUsed", task.tokensUsed);
     }
 
@@ -1286,16 +1286,10 @@ public final class SubAgentManager {
     }
 
     private static Record copy(Record task) throws Exception { return Record.fromJson(new JSONObject(task.toJson().toString())); }
-    private static String clipped(String text, int limit) {
-        if (text.length() <= limit) return text;
-        int end = limit;
-        if (end > 0 && Character.isHighSurrogate(text.charAt(end - 1)) && Character.isLowSurrogate(text.charAt(end))) end--;
-        return text.substring(0, end);
-    }
     private static JSONObject mailPreview(JSONObject original) throws Exception {
         JSONObject mail = new JSONObject(original.toString()); String text = mail.optString("text", "");
         mail.remove("usageLease");
-        return mail.put("text", clipped(text, 4000)).put("truncated", text.length() > 4000);
+        return mail.put("text", Text.clip(text, 4000)).put("truncated", text.length() > 4000);
     }
     private static JSONArray inboxPreview(JSONArray source) throws Exception {
         JSONArray preview = new JSONArray(); int chars = 0;

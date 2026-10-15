@@ -31,7 +31,7 @@ final class ToolchainFixtures {
         return artifact.put("chunk_sha256", chunks);
     }
 
-    static String sha(byte[] bytes) throws Exception { return ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+    static String sha(byte[] bytes) throws Exception { return com.mkei.backcast.agent.Text.hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
 
     /** The production downloader runs against a range-capable injected server, not an APK fallback. */
     static ToolchainDownloader.Transport transport(final EmbeddedToolchain.Assets files, final JSONObject manifest) {

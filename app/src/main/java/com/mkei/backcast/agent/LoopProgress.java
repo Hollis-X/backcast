@@ -1,6 +1,5 @@
 package com.mkei.backcast.agent;
 
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -226,11 +225,6 @@ final class LoopProgress {
     }
 
     private static String digest(String text) {
-        try {
-            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.getBytes("UTF-8"));
-            StringBuilder out = new StringBuilder();
-            for (byte item : hash) out.append(Integer.toHexString((item & 0xFF) | 0x100).substring(1));
-            return out.toString();
-        } catch (Exception unavailable) { throw new IllegalStateException(unavailable); }
+        return Text.sha256Hex(text);
     }
 }

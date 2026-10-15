@@ -71,12 +71,12 @@ public final class EmbeddedToolchainRegressionTest {
             MessageDigest digest = MessageDigest.getInstance("SHA-256"); InputStream stream = new FileInputStream(file);
             try { byte[] buffer = new byte[16384]; int read; while ((read = stream.read(buffer)) >= 0) digest.update(buffer, 0, read); }
             finally { stream.close(); }
-            check(entry.getString("sha256").equals(ToolchainInstaller.hex(digest.digest())), "Payload digest mismatch");
+            check(entry.getString("sha256").equals(com.mkei.backcast.agent.Text.hex(digest.digest())), "Payload digest mismatch");
             MessageDigest tarDigest = MessageDigest.getInstance("SHA-256"); long tarBytes = 0;
             stream = new GZIPInputStream(new FileInputStream(file));
             try { byte[] buffer = new byte[16384]; int read; while ((read = stream.read(buffer)) >= 0) { tarDigest.update(buffer, 0, read); tarBytes += read; } }
             finally { stream.close(); }
-            check(entry.getString("tar_sha256").equals(ToolchainInstaller.hex(tarDigest.digest())) && tarBytes == entry.getLong("tar_bytes"), "Uncompressed TAR digest or size mismatch");
+            check(entry.getString("tar_sha256").equals(com.mkei.backcast.agent.Text.hex(tarDigest.digest())) && tarBytes == entry.getLong("tar_bytes"), "Uncompressed TAR digest or size mismatch");
             byte[] all = bytes(file); JSONObject refreshed = ToolchainFixtures.pin(new JSONObject(entry.toString()), manifest.getString("version"), all);
             check(entry.getInt("prefix_bytes") == refreshed.getInt("prefix_bytes") && entry.getString("prefix_sha256").equals(refreshed.getString("prefix_sha256"))
                     && entry.getInt("chunk_bytes") == 4 * 1024 * 1024 && entry.getJSONArray("chunk_sha256").toString().equals(refreshed.getJSONArray("chunk_sha256").toString()), "Pinned prefix/block digests differ from released bytes");
@@ -304,8 +304,8 @@ public final class EmbeddedToolchainRegressionTest {
             output.write(new byte[512 - value.length]); output.write(new byte[1024]); tar = output.toByteArray();
             output = new ByteArrayOutputStream(); GZIPOutputStream zipped = new GZIPOutputStream(output); zipped.write(tar); zipped.close(); gzip = output.toByteArray();
             JSONObject artifact = ToolchainFixtures.pin(new JSONObject().put("file", "fixture.tar.gz")
-                    .put("bytes", gzip.length).put("sha256", ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(gzip)))
-                    .put("tar_bytes", tar.length).put("tar_sha256", ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(tar))), "fixture", gzip);
+                    .put("bytes", gzip.length).put("sha256", com.mkei.backcast.agent.Text.hex(MessageDigest.getInstance("SHA-256").digest(gzip)))
+                    .put("tar_bytes", tar.length).put("tar_sha256", com.mkei.backcast.agent.Text.hex(MessageDigest.getInstance("SHA-256").digest(tar))), "fixture", gzip);
             manifest = new JSONObject().put("version", "fixture").put("artifacts", new JSONArray()
                     .put(new JSONObject(artifact.toString()).put("abi", "any")).put(new JSONObject(artifact.toString()).put("abi", "arm64-v8a")));
         }

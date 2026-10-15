@@ -87,7 +87,7 @@ public final class EmbeddedInstallProgressRegressionTest {
     private static void put(byte[] target, int offset, String text) throws Exception {
         byte[] bytes = text.getBytes("UTF-8"); System.arraycopy(bytes, 0, target, offset, bytes.length);
     }
-    private static String hash(byte[] bytes) throws Exception { return ToolchainInstaller.hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
+    private static String hash(byte[] bytes) throws Exception { return com.mkei.backcast.agent.Text.hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
     private static void stagingGone(ToolchainStore store) {
         File[] files = store.root().listFiles();
         if (files != null) for (File file : files) check(!file.getName().startsWith(".embedded-"), "Installation staging leaked");
