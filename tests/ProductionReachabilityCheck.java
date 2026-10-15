@@ -362,7 +362,7 @@ public final class ProductionReachabilityCheck {
 
     private static XmlEntries xmlEntries(Path root) throws Exception {
         XmlEntries result = new XmlEntries();
-        String gradle = Files.readString(root.resolve("app/build.gradle"));
+        String gradle = Files.readString(root.resolve("app/build.gradle.kts"));
         Matcher namespace = Pattern.compile("(?m)^\\s*namespace\\s*[=]?\\s*['\"]([^'\"]+)['\"]").matcher(gradle);
         if (!namespace.find()) throw new AssertionError("Android namespace is required to resolve XML component names");
         String appNamespace = namespace.group(1);
