@@ -2454,6 +2454,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate {
         sealCurrentTurn();
         settleCompact();
         final int firstRow = stream.getChildCount();
+        // 用户自己发送就要看到这条和后面的回复；即使刚才翻上去看过历史，也回到底部继续跟随。
+        followLatest = true;
+        scrollActionToken++;
+        if (scroll != null) scroll.stopScroll();
         addUserBubble(request);
         if (asGoal) target.setGoal(text);
         turnUiToken = token;
