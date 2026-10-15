@@ -950,6 +950,13 @@ public class AgentLoop {
         }
     }
 
+    /** Stops the turn clock, the goal clock and its checkpoint writer. Caller holds {@code lock}. */
+    private void haltClocksLocked() {
+        pauseTurnClockLocked();
+        freezeClock();
+        stopClockCheckpointLocked();
+    }
+
     private void stopClockCheckpointLocked() {
         if (clockCheckpoint != null) {
             clockCheckpoint.interrupt();
@@ -967,9 +974,7 @@ public class AgentLoop {
                 return;
             }
             busy = false;
-            pauseTurnClockLocked();
-            freezeClock();
-            stopClockCheckpointLocked();
+            haltClocksLocked();
             if (resumeAfter && Goal.ACTIVE.equals(goalStatus) && sessionKey >= 0) {
                 follow = resumeUi;
                 sid = sessionKey;
@@ -1244,9 +1249,7 @@ public class AgentLoop {
         synchronized (lock) {
             generation++;
             cancelled = true;
-            pauseTurnClockLocked();
-            freezeClock();
-            stopClockCheckpointLocked();
+            haltClocksLocked();
             turnClockInitialized = false;
             turnAccumMs = 0;
             turnThinkMs = null;
@@ -1261,9 +1264,7 @@ public class AgentLoop {
         synchronized (lock) {
             generation++;
             cancelled = true;
-            pauseTurnClockLocked();
-            freezeClock();
-            stopClockCheckpointLocked();
+            haltClocksLocked();
             turnClockInitialized = false;
             turnAccumMs = 0;
             turnThinkMs = null;
@@ -1323,9 +1324,7 @@ public class AgentLoop {
             ownerToken = busyToken;
             gen = generation;
             cancelled = true;
-            pauseTurnClockLocked();
-            freezeClock();
-            stopClockCheckpointLocked();
+            haltClocksLocked();
             runToken++;
             resumeAfter = false;
             current = requestClient;
@@ -1440,9 +1439,7 @@ public class AgentLoop {
         synchronized (lock) {
             if (token != 0 && !stale(token, gen) && token == busyToken) {
                 childWakeSuspended = true;
-                pauseTurnClockLocked();
-                freezeClock();
-                stopClockCheckpointLocked();
+                haltClocksLocked();
             }
         }
         SubAgentManager children = subAgents;
@@ -1500,16 +1497,7 @@ public class AgentLoop {
                 if (gen != generation || runToken != seen) {
                     return;
                 }
-                token = ++runToken;
-                busyToken = token;
-                acceptedUi = uiToken;
-                cancelled = false;
-                refused = false;
-                busy = true;
-                childWakeSuspended = false;
-                pinTurnToolsLocked(token);
-                goalAccounting = goalActive() || budgetPromptDue();
-                resumeAfter = false;
+                token = claimRunLocked(uiToken);
                 armTurnClock();
                 startGoalClockLocked();
                 user.workDir = workspace;
@@ -1568,16 +1556,7 @@ public class AgentLoop {
                     return;
                 } else {
                     gen = generation;
-                    token = ++runToken;
-                    busyToken = token;
-                    acceptedUi = uiToken;
-                    cancelled = false;
-                    refused = false;
-                    busy = true;
-                    childWakeSuspended = false;
-                    pinTurnToolsLocked(token);
-                    goalAccounting = goalActive() || budgetPromptDue();
-                    resumeAfter = false;
+                    token = claimRunLocked(uiToken);
                     startGoalClockLocked();
                     if (shouldContinue()) {
                         if (!keepTurnClock()) armTurnClock();
@@ -1645,6 +1624,21 @@ public class AgentLoop {
             if (!stale(token, gen)) reportException(token, gen, error);
         } finally { endTurn(token, gen, sessionId); callToken.remove(); }
         return true;
+    }
+
+    /** Takes the busy slot for a human-started or resumed run and returns its token. Caller holds {@code lock}. */
+    private int claimRunLocked(int uiToken) {
+        int token = ++runToken;
+        busyToken = token;
+        acceptedUi = uiToken;
+        cancelled = false;
+        refused = false;
+        busy = true;
+        childWakeSuspended = false;
+        pinTurnToolsLocked(token);
+        goalAccounting = goalActive() || budgetPromptDue();
+        resumeAfter = false;
+        return token;
     }
 
     private void beginTemporaryTurn() {
@@ -1972,32 +1966,29 @@ public class AgentLoop {
      * 连续空续跑不走这里，那种情况标成 blocked。
      */
     private void stopForNoProgress(String reason, long sessionId, int gen, int token) {
-        synchronized (lock) {
-            if (stale(token, gen)) return;
-            resumeAfter = false;
-            childWakeSuspended = true;
-            pauseTurnClockLocked();
-            freezeClock();
-            stopClockCheckpointLocked();
-        }
-        SubAgentManager children = subAgents;
-        if (children != null) children.disarmRootWake();
+        if (!stopRun(token, gen)) return;
         listener.onError(gen, reason);
         saveRun(false, token, gen);
     }
 
-    private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
+    /**
+     * Ends the run's clocks and automatic wake-ups. A settings/goal handoff queued
+     * meanwhile must not restart it. False when the run is already stale.
+     */
+    private boolean stopRun(int token, int gen) {
         synchronized (lock) {
-            if (stale(token, gen)) return;
-            // A settings/goal handoff queued during the failed request must not restart it.
+            if (stale(token, gen)) return false;
             resumeAfter = false;
             childWakeSuspended = true;
-            pauseTurnClockLocked();
-            freezeClock();
-            stopClockCheckpointLocked();
+            haltClocksLocked();
         }
         SubAgentManager children = subAgents;
         if (children != null) children.disarmRootWake();
+        return true;
+    }
+
+    private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
+        if (!stopRun(token, gen)) return;
         synchronized (uiLock) {
             // Failed partial text/arguments are not committed history. A later
             // explicit resume must not replay them or need a fake retry event.
