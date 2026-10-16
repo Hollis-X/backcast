@@ -51,7 +51,7 @@
         android:focusable="true"
         android:visibility="gone"/>
 
-    <!-- 时间和信号那一条：先用乳白渐变，采到画面后再换成轻微模糊。 -->
+    <!-- 状态栏和顶栏下面的磨砂层：先用乳白渐变，采到画面后换成半透明模糊，底部淡出。 -->
     <ImageView
         android:id="@+id/status_frost"
         android:layout_width="match_parent"
@@ -72,8 +72,7 @@
         android:paddingLeft="16dp"
         android:paddingRight="16dp"
         android:paddingTop="12dp"
-        android:paddingBottom="8dp"
-        android:background="@drawable/bg_top_bar">
+        android:paddingBottom="8dp">
 
             <TextView
                 android:id="@+id/action_menu"

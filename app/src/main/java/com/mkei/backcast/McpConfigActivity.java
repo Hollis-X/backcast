@@ -54,7 +54,6 @@ public final class McpConfigActivity extends AppCompatActivity {
         Toolbar toolbar = new Toolbar(this);
         toolbar.setTitle(R.string.settings_mcp_title);
         toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, 0xFF0D0D0D, dp(22)));
-        toolbar.setNavigationOnClickListener(view -> finish());
         page.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(56)));
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
@@ -64,6 +63,8 @@ public final class McpConfigActivity extends AppCompatActivity {
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(page);
         setSupportActionBar(toolbar);
+        // 必须在 setSupportActionBar 之后设置：它会换掉导航键的点击处理，之前设的返回就失效了。
+        toolbar.setNavigationOnClickListener(view -> finish());
         if (id == null) {
             text("连接 MCP 服务后，主会话和子代理都可调用服务提供的工具。点击服务查看配置和工具。", 14);
             button("添加服务", view -> open(UUID.randomUUID().toString()));

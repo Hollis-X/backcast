@@ -171,6 +171,9 @@ public class Message {
             if (taskPaths != null) item.put("task_paths", taskPaths);
             if (USER.equals(role) && mcpSelection != null) item.put("mcp_selection", mcpSelection.toJson());
             if (workDir != null && !workDir.isEmpty()) item.put("work_dir", workDir);
+            // 界面用的耗时；子代理只存检查点，没有这两项会话页就显示不出「工作了」。
+            if (elapsedMs > 0) item.put("elapsed_ms", elapsedMs);
+            if (thinkMs > 0) item.put("think_ms", thinkMs);
             return item;
         } catch (Exception invalid) {
             throw new IllegalStateException("Invalid context checkpoint message", invalid);
@@ -196,6 +199,8 @@ public class Message {
             catch (Exception invalid) { throw new IllegalStateException("MCP 工具选择记录损坏", invalid); }
         }
         message.workDir = item.optString("work_dir", "");
+        message.elapsedMs = item.optLong("elapsed_ms", 0L);
+        message.thinkMs = item.optLong("think_ms", 0L);
         return message;
     }
 }

@@ -54,7 +54,8 @@ javac -proc:none -encoding UTF-8 -source 17 -target 17 -Xlint:-options -cp "$jso
     "$root"/tests/UiSnapshotRegressionTest.java \
     "$root"/tests/PlanToolRegressionTest.java \
     "$root"/tests/AskUserToolRegressionTest.java \
-    "$root"/tests/LineDeltaRegressionTest.java
+    "$root"/tests/LineDeltaRegressionTest.java \
+    "$root"/tests/LlmUrlRegressionTest.java
 compiled=$?
 if [ "$compiled" -ne 0 ]; then exit "$compiled"; fi
 
@@ -98,6 +99,7 @@ cls UiSnapshotRegressionTest
 cls PlanToolRegressionTest
 cls AskUserToolRegressionTest
 cls LineDeltaRegressionTest
+cls LlmUrlRegressionTest
 run SQLiteSubAgentStoreRegressionTest java -cp "$build:$json" "$root/tests/SQLiteSubAgentStoreRegressionTest.java" "$root"
 run ChatStorePagingRegressionTest java -cp "$build:$json" "$root/tests/ChatStorePagingRegressionTest.java" "$root"
 run McpRegressionTest java -cp "$build:$json" "$root/tests/McpRegressionTest.java" "$root"

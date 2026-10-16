@@ -97,6 +97,8 @@ public final class Markdown {
         if (body.length() == 0) {
             return i;
         }
+        // 代码块前后各留一段间隔，和正文段落间距一致，不贴着上一行字。
+        appendBreak(out);
         int start = out.length();
         out.append(body);
         out.append('\n');
@@ -105,6 +107,7 @@ public final class Markdown {
         out.setSpan(new CodeBlockSpan(codeBg), start, out.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         out.setSpan(new RelativeSizeSpan(0.92f), start, out.length(),
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        appendBreak(out);
         return i;
     }
 
@@ -270,7 +273,9 @@ public final class Markdown {
         if (n >= 2 && out.charAt(n - 2) == '\n') {
             return;
         }
+        // 空行只留一小段固定间隔：段落分得开，但不像整行空白那么大。
         out.append('\n');
+        out.setSpan(new GapSpan(), n, n + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     private static void trimTrailingBreaks(SpannableStringBuilder out) {

@@ -57,7 +57,7 @@ public class UserPreferencesActivity extends AppCompatActivity {
         bindChoices(agentConcurrency, R.array.agent_concurrency_labels, R.array.agent_concurrency_descriptions,
                 R.id.agent_concurrency_description, AGENT_CONCURRENCY_VALUES,
                 draft(state, "concurrency", Integer.toString(settings.agentConcurrency())));
-        systemPrompt.setText(draft(state, "prompt", settings.systemPrompt()));
+        systemPrompt.setText(draft(state, "prompt", settings.userPrompt()));
         refreshAgentPreview(settings);
         Button save = (Button) findViewById(R.id.save);
         save.setOnClickListener(new View.OnClickListener() {
@@ -101,7 +101,8 @@ public class UserPreferencesActivity extends AppCompatActivity {
         int concurrency = Integer.parseInt(selectedValue(agentConcurrency, AGENT_CONCURRENCY_VALUES));
         if (agentStatus != null) agentStatus.setText(getString(Settings.AGENT_ULTRA.equals(mode)
                 ? R.string.agent_status_ultra : R.string.agent_status_normal, Integer.valueOf(concurrency), effort));
-        if (envContext != null) envContext.setText(settings.environmentContext(settings.useRoot(), mode, concurrency));
+        if (envContext != null) envContext.setText(settings.systemPrompt().trim() + "\n\n---\n"
+                + settings.environmentContext(settings.useRoot(), mode, concurrency));
     }
 
     private void bindChoices(final Spinner spinner, int labels, int descriptions,

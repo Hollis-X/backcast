@@ -95,22 +95,21 @@ public class LlmClient {
             return b;
         }
 
-        /** 允许只填域名，自动补成 chat/completions。 */
+        /** 允许只填域名，自动补成 chat/completions；路径里已有版本段（/v1、/v4、/api/v3、/v1beta/openai）时不再补 /v1。 */
         static String normalize(String base) {
-            String b = root(base);
-            if (b.endsWith("/v1")) {
-                return b + "/chat/completions";
-            }
-            return b + "/v1/chat/completions";
+            return versioned(root(base)) + "/chat/completions";
         }
 
         /** 模型列表端点。 */
         public String modelsUrl() {
-            String b = root(baseUrl);
-            if (b.endsWith("/v1")) {
-                return b + "/models";
-            }
-            return b + "/v1/models";
+            return versioned(root(baseUrl)) + "/models";
+        }
+
+        private static String versioned(String root) {
+            int scheme = root.indexOf("://");
+            int path = root.indexOf('/', scheme < 0 ? 0 : scheme + 3);
+            String tail = path < 0 ? "" : root.substring(path).toLowerCase(java.util.Locale.ROOT);
+            return tail.matches(".*/v\\d+[a-z0-9]*(/.*)?") ? root : root + "/v1";
         }
     }
 

@@ -19,6 +19,9 @@
     <string name="more_new_chat">新建会话</string>
     <string name="more_work_dir">工作文件夹</string>
     <string name="dir_add">添加工作文件夹</string>
+    <string name="dir_pick">选择文件夹</string>
+    <string name="dir_type_path">手动输入路径</string>
+    <string name="dir_pick_unsupported">只能选择本机存储里的文件夹，请手动输入路径</string>
     <string name="more_settings">设置</string>
     <string name="earlier_messages">前 %1$d 条消息  ›</string>
     <string name="history_loading">加载中...</string>
@@ -31,19 +34,6 @@
     <string name="popup_intelligence">智能</string>
     <string name="popup_model_back">返回智能菜单</string>
     <string name="sub_agents_title">子代理</string>
-    <string name="sub_agents_queued">排队中</string>
-    <string name="sub_agents_running">运行中</string>
-    <string name="sub_agents_waiting">等待中</string>
-    <string name="sub_agents_idle">空闲</string>
-    <string name="sub_agents_failed">失败</string>
-    <string name="sub_agents_closed">已停止</string>
-    <string name="sub_agents_phase_model">请求模型</string>
-    <string name="sub_agents_phase_thinking">思考中</string>
-    <string name="sub_agents_phase_responding">输出中</string>
-    <string name="sub_agents_phase_tool">执行工具</string>
-    <string name="sub_agents_phase_reviewing">核验结果</string>
-    <string name="sub_agents_phase_compacting">压缩上下文</string>
-    <string name="sub_agents_phase_completed">本次任务已完成</string>
     <string name="toolkit_unsupported">当前设备不支持工具包</string>
     <string name="toolkit_loading">读取工具配置…</string>
     <string name="toolkit_storage">工具位置：%1$s\n设备 ABI：%2$s</string>
@@ -154,7 +144,7 @@
     <string name="toast_need_url_key">先填接口地址和密钥</string>
     <string name="fetching">拉取中…</string>
     <string name="label_ai_provider">AI 供应商</string>
-    <string name="ai_provider_help">DeepSeek、OpenAI、Grok 和自定义接口分别保存地址、密钥与常用模型。保存后使用当前选择；返回会放弃本页改动。模型权限以供应商返回的列表为准，也可以手填模型名称。当前使用 Chat Completions；请选择支持此接口及工具调用的模型。模型与思考强度支持因供应商而异。</string>
+    <string name="ai_provider_help">每个供应商分别保存地址、密钥和常用模型，保存后使用当前选中的。接口地址只填网址即可（如 https://api.deepseek.com），/v1 和 /chat/completions 会自动补上，写不写都可以。</string>
     <string name="action_add_saved_model">添加到常用模型</string>
     <string name="action_remove_saved_model">移除</string>
     <string name="toast_need_model">请填写有效的模型名称。</string>
@@ -224,15 +214,24 @@
         <item>过程回复、推理摘要和最终回复均使用德语；代码、路径和引用保留原文</item>
     </string-array>
     <string name="label_use_root">用 root 执行命令</string>
-    <string name="label_system_prompt">系统提示词</string>
-    <string name="label_env_context">环境（每轮自动附加，不用改）</string>
+    <string name="label_system_prompt">提示词</string>
+    <string name="hint_user_prompt">写给 AI 的个人偏好，例如：回答尽量简短；改代码前先说明思路</string>
+    <string name="user_prompt_note">每轮附在系统提示词和环境之后；与它们冲突时，以系统提示词和环境为准。</string>
+    <string name="label_env_context">系统提示词与环境（内置，不可修改）</string>
     <string name="action_save">保存</string>
     <string name="toast_saved">已保存</string>
     <string name="toast_need_config">请先配置接口地址、密钥和模型</string>
-    <string name="sub_agents_phase_generating">生成工具参数</string>
-    <string name="sub_agents_phase_tool_ready">参数已完成，准备执行</string>
-    <string name="sub_agents_phase_tool_review">AI 审查工具调用</string>
-    <string name="sub_agents_phase_tool_approval">等待用户确认</string>
-    <string name="sub_agents_phase_children">等待子代理</string>
-    <string name="sub_agents_phase_waiting">等待子代理进度</string>
+    <string name="usage_title">用量</string>
+    <string name="usage_context">上下文</string>
+    <string name="usage_window">上下文窗口</string>
+    <string name="usage_percent">已使用 %1$d%%</string>
+    <string name="usage_messages">消息</string>
+    <string name="usage_system_tools">系统工具</string>
+    <string name="usage_mcp_tools">MCP 工具</string>
+    <string name="usage_system_prompt">系统提示词与环境</string>
+    <string name="usage_user_prompt">提示词</string>
+    <string name="usage_compact_buffer">自动压缩预留</string>
+    <string name="usage_free">剩余空间</string>
+    <string name="usage_show_more">再显示 %1$d 项</string>
+    <string name="usage_note">各部分按字符估算；用到窗口的 90% 会自动压缩历史。</string>
 </resources>

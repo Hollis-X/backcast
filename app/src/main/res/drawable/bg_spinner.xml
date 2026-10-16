@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 下拉选择：圆角边框白底，右侧留出箭头空间。 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/field_bg"/>
-    <stroke android:width="1dp" android:color="@color/field_stroke"/>
-    <corners android:radius="12dp"/>
-</shape>
+<!-- 下拉选择：圆角边框白底，右侧画一个向下的箭头，一眼看出能展开。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <solid android:color="@color/field_bg"/>
+            <stroke android:width="1dp" android:color="@color/field_stroke"/>
+            <corners android:radius="12dp"/>
+        </shape>
+    </item>
+    <item android:width="18dp" android:height="18dp" android:gravity="end|center_vertical" android:end="14dp">
+        <bitmap android:src="@drawable/ic_ds_chevron_down_sm_regular_24" android:tint="@color/text_secondary"/>
+    </item>
+</layer-list>

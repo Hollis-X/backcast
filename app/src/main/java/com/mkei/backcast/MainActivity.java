@@ -47,6 +47,7 @@ import com.mkei.backcast.agent.Compactor;
 import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.Message;
+import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.TokenMeter;
 import com.mkei.backcast.ui.ContextMeter;
@@ -205,6 +206,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     /** 当前会话。-1 表示还没落库的新会话。 */
     private long sessionId = -1;
     private AgentLoop loop;
+    /** 子代理会话：同一个界面，只把内容换成某个子代理的历史，输入框发给它。 */
+    public static final String EXTRA_AGENT_ROOT = "agent_root", EXTRA_AGENT_ID = "agent_id";
+    private boolean childMode;
+    private long childRoot = -1;
+    private String childId = "";
+    private String childRendered = "";
+    private boolean childBusy, childSending;
+    private final Runnable childPoll = new Runnable() {
+        @Override public void run() { loadChild(); }
+    };
     /** 当前这一轮的「工作了」。点它展开下面的思考和命令，不另开一份。 */
     private TextView workHeader;
     private View turnChevron;
@@ -280,6 +291,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     /** 新发送的界面只接这一轮的时钟；重进会话时用 -1 接回运行中的轮次。 */
     private int turnUiToken = -1;
     private int sheetToken;
+    /** 面板正在收起（动画中，还没 GONE）。这时再打开要重新播弹出动画。 */
+    private boolean sheetClosing;
     private int tickToken;
     /** 停止或新发送时加一。旧回调对不上就丢掉，避免停了又把「工作了」拉回来。 */
     private int liveToken;
@@ -319,7 +332,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         setContentView(R.layout.activity_main);
 
         configureSystemBars();
-        RunHub.get(this).setQuestions(this);
+        childRoot = getIntent().getLongExtra(EXTRA_AGENT_ROOT, -1L);
+        String agent = getIntent().getStringExtra(EXTRA_AGENT_ID);
+        childId = agent == null ? "" : agent;
+        childMode = childRoot >= 0 && childId.length() > 0;
+        // 提问弹窗只归主会话页；子代理页不能把它抢走。
+        if (!childMode) RunHub.get(this).setQuestions(this);
 
         scroll = (TranscriptScrollView) findViewById(R.id.scroll);
         stream = (LinearLayout) findViewById(R.id.stream);
@@ -422,8 +440,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             contextMeter.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    toast(getString(R.string.context_used,
-                            compactK(lastContextUsed), compactK(contextLimit)));
+                    showUsageSheet();
                 }
             });
         }
@@ -455,6 +472,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         stop.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (childMode) { confirmStopChild(); return; }
                 liveToken++;
                 if (loop != null) {
                     if (loop.goalActive()) {
@@ -578,6 +596,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             @Override public void refreshMenu() { syncSlashPopup(prompt.getText().toString()); }
         });
         tintSend(false);
+        if (childMode) {
+            bindChildChrome();
+            return;
+        }
         if (chatStore.runningIds().size() > 0) {
             AgentService.start(this);
         }
@@ -608,6 +630,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         super.onResume();
         slashResumed = true;
         hideKeyboard();
+        if (childMode) {
+            loadChild();
+            return;
+        }
         if (mcpToolPicker != null) mcpToolPicker.reloadCatalog();
         updateStatus();
         if (!sessionOpening && settings != null && settings.isConfigured()) RunHub.get(this).retargetIfNeeded();
@@ -658,6 +684,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     @Override
     protected void onPause() {
         slashResumed = false;
+        if (stream != null) stream.removeCallbacks(childPoll);
         hideSlashPopup();
         if (mcpToolPicker != null) mcpToolPicker.cancelUi();
         hideKeyboard();
@@ -1004,7 +1031,6 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
         View panel = findViewById(R.id.sheet_panel);
         View overlay = findViewById(R.id.sheet_overlay);
-        View scrim = findViewById(R.id.sheet_scrim);
         if (body == null || panel == null || overlay == null) {
             return;
         }
@@ -1015,91 +1041,244 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         title.setText(R.string.more_work_dir);
         title.setTextSize(20);
         title.setTextColor(getResources().getColor(R.color.text_primary));
-        title.setPadding(0, 0, 0, dp(4));
         body.addView(title, fullWidth());
 
         TextView scope = new TextView(this);
         scope.setText(R.string.workspace_scope_note);
         scope.setTextSize(13);
         scope.setTextColor(getResources().getColor(R.color.text_secondary));
-        scope.setPadding(0, dp(4), 0, dp(12));
+        scope.setLineSpacing(dp(2), 1f);
+        scope.setPadding(0, dp(4), 0, dp(14));
         body.addView(scope, fullWidth());
-
-        body.addView(sheetRow(R.string.dir_add, Icons.PLUS, null, new Runnable() {
-            @Override
-            public void run() {
-                askWorkDir();
-            }
-        }), fullWidth());
 
         final List<String> dirs = settings.authorizedWorkDirs();
         String current = dirs.get(0);
+        LinearLayout authorized = dirGroup();
         for (int i = 0; i < dirs.size(); i++) {
-            final String dir = dirs.get(i);
-            body.addView(dirRow(dir, dir.equals(current), true), fullWidth());
+            if (i > 0) authorized.addView(groupDivider());
+            authorized.addView(dirRow(dirs.get(i), dirs.get(i).equals(current), true, dirs.size() > 1), fullWidth());
         }
+        authorized.addView(groupDivider());
+        authorized.addView(addDirRow(), fullWidth());
+        body.addView(authorized, fullWidth());
 
-        boolean historyHeading = false;
+        LinearLayout history = null;
         for (String candidate : settings.workDirs()) {
             if (dirs.contains(candidate)) continue;
-            if (!historyHeading) {
+            if (history == null) {
                 TextView heading = new TextView(this);
                 heading.setText(R.string.workspace_candidates);
-                heading.setTextSize(12);
+                heading.setTextSize(13);
                 heading.setTextColor(getResources().getColor(R.color.text_secondary));
-                heading.setPadding(0, dp(20), 0, dp(8));
+                heading.setPadding(dp(4), dp(20), 0, dp(8));
                 body.addView(heading, fullWidth());
-                historyHeading = true;
+                history = dirGroup();
+                body.addView(history, fullWidth());
+            } else {
+                history.addView(groupDivider());
             }
-            body.addView(dirRow(candidate, false, false), fullWidth());
+            history.addView(dirRow(candidate, false, false, false), fullWidth());
         }
 
         showSheet();
     }
 
-    /** All authorized roots remain active; the primary only selects the relative-path base. */
-    private View dirRow(final String dir, boolean current, final boolean authorized) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(0, dp(10), 0, dp(10));
+    /** 一组目录放在同一块浅灰圆角底上，组内用细线分隔。 */
+    private LinearLayout dirGroup() {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xFFF5F5F7);
+        bg.setCornerRadius(dp(14));
+        group.setBackground(bg);
+        return group;
+    }
 
-        TextView label = new TextView(this);
-        label.setText((authorized ? getString(current ? R.string.workspace_primary : R.string.workspace_additional) + "\n" : "") + dir);
-        label.setTextSize(15);
-        label.setTextColor(getResources().getColor(
-                current ? R.color.accent : R.color.text_primary));
-        row.addView(label, fullWidth());
-        LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        if (!current) actions.addView(workspaceAction(authorized ? R.string.workspace_set_primary : R.string.workspace_add_authorized, new Runnable() {
-            @Override public void run() {
-                if (authorized) settings.setPrimaryWorkDir(dir);
-                else settings.addAuthorizedWorkDir(dir);
-                applyWorkDir();
-            }
-        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        if (authorized) actions.addView(workspaceAction(R.string.workspace_remove, new Runnable() {
-            @Override public void run() {
-                if (!settings.removeAuthorizedWorkDir(dir)) { toast(getString(R.string.workspace_keep_one)); return; }
-                applyWorkDir();
-            }
-        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(actions, fullWidth());
+    private View groupDivider() {
+        View line = new View(this);
+        line.setBackgroundColor(0xFFE6E6EA);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
+        lp.leftMargin = dp(52);
+        line.setLayoutParams(lp);
+        return line;
+    }
+
+    /** 一行目录：文件夹图标、目录名（主目录带标签）、完整路径，右侧是操作。 */
+    private View dirRow(final String dir, boolean current, final boolean authorized, boolean removable) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), dp(12), dp(10), dp(12));
+        row.setMinimumHeight(dp(60));
+
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(Icons.tinted(this, Icons.FOLDER,
+                current ? getResources().getColor(R.color.accent) : 0xFF8E8E93, dp(22)));
+        row.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+        LinearLayout text = new LinearLayout(this);
+        text.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        textLp.leftMargin = dp(14);
+        textLp.rightMargin = dp(8);
+        TextView name = new TextView(this);
+        String trimmed = dir.endsWith("/") && dir.length() > 1 ? dir.substring(0, dir.length() - 1) : dir;
+        String leaf = trimmed.substring(trimmed.lastIndexOf('/') + 1);
+        name.setText(leaf.length() == 0 ? trimmed : leaf);
+        name.setTextSize(16);
+        name.setTextColor(getResources().getColor(R.color.text_primary));
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        text.addView(name);
+        // 第二行：主目录/附加目录标签在前，完整路径在后，路径太长从中间省略。
+        LinearLayout detail = new LinearLayout(this);
+        detail.setOrientation(LinearLayout.HORIZONTAL);
+        detail.setGravity(Gravity.CENTER_VERTICAL);
+        detail.setPadding(0, dp(3), 0, 0);
+        if (authorized) {
+            TextView badge = new TextView(this);
+            badge.setText(current ? R.string.workspace_primary : R.string.workspace_additional);
+            badge.setTextSize(11);
+            badge.setTextColor(current ? getResources().getColor(R.color.accent) : 0xFF6E6E76);
+            badge.setPadding(dp(6), dp(1), dp(6), dp(1));
+            android.graphics.drawable.GradientDrawable chip = new android.graphics.drawable.GradientDrawable();
+            chip.setColor(current ? 0xFFE3ECFD : 0xFFE9E9ED);
+            chip.setCornerRadius(dp(6));
+            badge.setBackground(chip);
+            LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            badgeLp.rightMargin = dp(6);
+            detail.addView(badge, badgeLp);
+        }
+        TextView path = new TextView(this);
+        path.setText(dir);
+        path.setTextSize(12);
+        path.setTextColor(getResources().getColor(R.color.text_secondary));
+        path.setSingleLine(true);
+        path.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        detail.addView(path, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        text.addView(detail, fullWidth());
+        row.addView(text, textLp);
+
+        if (!authorized) {
+            row.addView(pill(R.string.workspace_add_authorized, new Runnable() {
+                @Override public void run() {
+                    settings.addAuthorizedWorkDir(dir);
+                    applyWorkDir();
+                }
+            }));
+        } else if (!current || removable) {
+            // 已授权目录的操作收进「⋯」，行里只留目录信息，名字不会被按钮挤没。
+            final boolean canPrimary = !current, canRemove = removable;
+            final ImageView more = new ImageView(this);
+            more.setImageDrawable(Icons.tinted(this, Icons.MORE, 0xFF6E6E76, dp(20)));
+            more.setScaleType(ImageView.ScaleType.CENTER);
+            more.setContentDescription(getString(R.string.more_title));
+            android.util.TypedValue ripple = new android.util.TypedValue();
+            getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
+            more.setBackgroundResource(ripple.resourceId);
+            more.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    android.widget.PopupMenu menu = new android.widget.PopupMenu(MainActivity.this, more);
+                    if (canPrimary) menu.getMenu().add(0, 1, 0, R.string.workspace_set_primary);
+                    if (canRemove) menu.getMenu().add(0, 2, 1, R.string.workspace_remove);
+                    menu.setOnMenuItemClickListener(new android.widget.PopupMenu.OnMenuItemClickListener() {
+                        @Override public boolean onMenuItemClick(android.view.MenuItem item) {
+                            if (item.getItemId() == 1) settings.setPrimaryWorkDir(dir);
+                            else if (!settings.removeAuthorizedWorkDir(dir)) {
+                                toast(getString(R.string.workspace_keep_one));
+                                return true;
+                            }
+                            applyWorkDir();
+                            return true;
+                        }
+                    });
+                    menu.show();
+                }
+            });
+            row.addView(more, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        }
         return row;
     }
 
-    private TextView workspaceAction(int title, final Runnable action) {
+    /** 组末尾的两行：用系统文件夹选择器添加，或手动输入路径。 */
+    private View addDirRow() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(groupAction(R.string.dir_pick, Icons.PLUS, new Runnable() {
+            @Override public void run() { pickWorkDir(); }
+        }), fullWidth());
+        box.addView(groupDivider());
+        box.addView(groupAction(R.string.dir_type_path, Icons.PENCIL, new Runnable() {
+            @Override public void run() { askWorkDir(""); }
+        }), fullWidth());
+        return box;
+    }
+
+    private TextView groupAction(int title, int icon, final Runnable action) {
+        TextView add = new TextView(this);
+        add.setText(title);
+        add.setTextSize(16);
+        add.setTextColor(getResources().getColor(R.color.accent));
+        add.setGravity(Gravity.CENTER_VERTICAL);
+        add.setMinHeight(dp(52));
+        add.setPadding(dp(14), 0, dp(14), 0);
+        Icons.left(add, icon, getResources().getColor(R.color.accent), dp(22));
+        add.setCompoundDrawablePadding(dp(16));
+        add.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { action.run(); }
+        });
+        return add;
+    }
+
+    private static final int PICK_WORK_DIR = 41;
+
+    /** 打开系统的文件夹选择器；选完换算成真实路径再授权。 */
+    private void pickWorkDir() {
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        try {
+            startActivityForResult(pick, PICK_WORK_DIR);
+        } catch (android.content.ActivityNotFoundException missing) {
+            askWorkDir("");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_WORK_DIR || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        String dir = WorkDirs.fromTreeUri(data.getData());
+        if (dir == null || !Settings.validWorkDir(dir)) {
+            // 选到的不是本机存储里的文件夹（比如网盘），只能手动填。
+            toast(getString(R.string.dir_pick_unsupported));
+            askWorkDir("");
+            return;
+        }
+        settings.addAuthorizedWorkDir(dir);
+        applyWorkDir();
+    }
+
+    /** 行尾的小圆角按钮，浅蓝底。 */
+    private TextView pill(int title, final Runnable action) {
         TextView button = new TextView(this);
-        button.setText(title); button.setTextSize(13); button.setTextColor(getResources().getColor(R.color.accent));
-        button.setGravity(Gravity.CENTER); button.setMinHeight(dp(48));
-        button.setBackgroundResource(android.R.drawable.list_selector_background);
+        button.setText(title);
+        button.setTextSize(13);
+        button.setTextColor(getResources().getColor(R.color.accent));
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(12), 0, dp(12), 0);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(0xFFE3ECFD);
+        bg.setCornerRadius(dp(16));
+        button.setBackground(bg);
         button.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { action.run(); } });
+        button.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32)));
         return button;
     }
 
     /** 手输或粘贴一个路径加进来。 */
-    private void askWorkDir() {
+    private void askWorkDir(String draft) {
         final EditText input = new EditText(this);
+        input.setText(draft);
         input.setHint(Settings.DEFAULT_WORK_DIR + "/项目");
         input.setSingleLine(true);
         input.setTextSize(15);
@@ -1160,6 +1339,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     /** 会话铺到状态栏和导航栏下面。顶上留一条轻微模糊，底部只让出小白条。 */
     private void bindEdgeToEdge() {
         topBar = findViewById(R.id.top_bar);
+        if (topBar != null) {
+            topBar.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    if (b - t != ob - ot) fitFrost();
+                }
+            });
+        }
         inputBar = findViewById(R.id.input_bar);
         if (composerDock == null) {
             composerDock = findViewById(R.id.composer_dock);
@@ -1222,11 +1409,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (topBar != null) {
             topBar.setPadding(dp(16), top + dp(8), dp(16), dp(8));
         }
-        if (statusFrost != null) {
-            ViewGroup.LayoutParams lp = statusFrost.getLayoutParams();
-            lp.height = top + dp(28);
-            statusFrost.setLayoutParams(lp);
-        }
+        fitFrost();
         View footer = composerDock != null ? composerDock : inputBar;
         if (footer != null) {
             ViewGroup.MarginLayoutParams mlp =
@@ -1370,6 +1553,23 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         stream.setTranslationY(0f);
     }
 
+    /** 模糊层盖住状态栏和整条顶栏，最下面一小段淡出，不画硬分隔线。 */
+    private void fitFrost() {
+        if (statusFrost == null || topBar == null) return;
+        int barHeight = topBar.getHeight();
+        if (barHeight <= 0) {
+            topBar.post(new Runnable() { public void run() { if (topBar.getHeight() > 0) fitFrost(); } });
+            return;
+        }
+        int height = barHeight + dp(14);
+        ViewGroup.LayoutParams lp = statusFrost.getLayoutParams();
+        if (lp.height != height) {
+            lp.height = height;
+            statusFrost.setLayoutParams(lp);
+            scheduleFrost();
+        }
+    }
+
     private void scheduleFrost() {
         if (statusFrost == null || scroll == null || frostQueued) {
             return;
@@ -1437,12 +1637,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         bmp.getPixels(px, 0, w, 0, 0, w, h);
         boxBlur(px, w, h, 1);
         boxBlur(px, w, h, 1);
-        int last = Math.max(1, h - 1);
+        // 上面约八成保持同样的磨砂，只有最下面一段淡出到透明。
+        int solid = Math.max(1, h * 4 / 5);
+        int last = Math.max(1, h - 1 - solid);
         for (int y = 0; y < h; y++) {
-            float fade = 1f - (y / (float) last);
+            float fade = y < solid ? 1f : 1f - ((y - solid) / (float) last);
             fade = fade * fade;
-            int veil = (int) (196f * fade);
-            int keep = (int) (230f * fade);
+            int veil = (int) (180f * fade);
+            int keep = (int) (236f * fade);
             int row = y * w;
             for (int x = 0; x < w; x++) {
                 int c = px[row + x];
@@ -1775,6 +1977,172 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         startActivity(new Intent(this, ToolConfigActivity.class));
     }
 
+    /** 子代理页的顶栏和输入区：返回键代替菜单，去掉只属于主会话的模型、权限、目标和附件入口。 */
+    private void bindChildChrome() {
+        TextView back = (TextView) findViewById(R.id.action_menu);
+        mountIcon(back, Icons.BACK);
+        back.setContentDescription(getString(R.string.agent_panel_back));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { finish(); }
+        });
+        View title = findViewById(R.id.title_chip);
+        if (title != null) title.setOnClickListener(null);
+        int[] hidden = { R.id.action_more, R.id.model_chip, R.id.access_chip, R.id.action_plus,
+                R.id.context_meter, R.id.goal_bar };
+        for (int id : hidden) {
+            View view = findViewById(id);
+            if (view != null) view.setVisibility(View.GONE);
+        }
+        prompt.setHint(R.string.agent_chat_hint);
+        sessionTitle.setText(R.string.history_loading);
+        if (sessionSub != null) sessionSub.setText("");
+        send.setEnabled(true);
+        stop.setEnabled(true);
+    }
+
+    private SubAgentManager childManager() {
+        RunHub hub = RunHub.get(this);
+        AgentLoop root = hub.existingSession(childRoot);
+        if (root == null) { hub.prepareSession(childRoot); root = hub.existingSession(childRoot); }
+        return root == null ? null : hub.subAgents(root);
+    }
+
+    /** 读出子代理的历史，有变化才整页重画；还在跑就每秒再看一次。 */
+    private void loadChild() {
+        if (!childMode || activityDestroyed) return;
+        stream.removeCallbacks(childPoll);
+        historyReader.execute(new Runnable() {
+            @Override public void run() {
+                SubAgentManager.Record record = null;
+                List<Message> messages = new ArrayList<Message>();
+                try {
+                    SubAgentManager manager = childManager();
+                    record = manager == null ? null : manager.find(childId);
+                    if (record != null) {
+                        for (int i = 0; i < record.history.length(); i++) {
+                            Message m = Message.fromCheckpointJson(record.history.getJSONObject(i));
+                            if (Message.SYSTEM.equals(m.role)) continue;
+                            // 派活和转来的消息只显示原话，不显示给模型看的包装。
+                            if (Message.USER.equals(m.role) && m.delegatedRequest != null) m.content = m.delegatedRequest;
+                            messages.add(m);
+                        }
+                    }
+                } catch (Exception error) {
+                    recordUiFailure(childRoot, "ui:agent_chat", error);
+                }
+                final SubAgentManager.Record row = record;
+                final List<Message> page = messages;
+                ui(new Runnable() {
+                    @Override public void run() {
+                        if (activityDestroyed || isFinishing()) return;
+                        if (row == null) {
+                            sessionTitle.setText(R.string.agent_chat_missing);
+                            send.setEnabled(false);
+                            return;
+                        }
+                        showChild(row, page);
+                        if (slashResumed && childBusy) stream.postDelayed(childPoll, 1000L);
+                    }
+                });
+            }
+        });
+    }
+
+    private void showChild(SubAgentManager.Record row, List<Message> messages) {
+        childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status);
+        sessionTitle.setText(row.name);
+        if (sessionSub != null) sessionSub.setText(getString(childBusy ? R.string.agent_chat_running
+                : SubAgentManager.FAILED.equals(row.status) ? R.string.agent_chat_failed
+                : SubAgentManager.CLOSED.equals(row.status) ? R.string.agent_chat_closed : R.string.agent_chat_idle));
+        boolean open = !SubAgentManager.CLOSED.equals(row.status);
+        prompt.setEnabled(open);
+        send.setEnabled(open && !childSending);
+        setBusy(childBusy);
+        String signature = row.id + ":" + row.revision + ":" + messages.size() + ":" + row.status;
+        if (signature.equals(childRendered)) return;
+        childRendered = signature;
+        historyToken++;
+        final int token = historyToken;
+        final boolean atEnd = followLatest || stuckAtEnd();
+        final int scrollY = scroll.getScrollY();
+        final LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        ChatStore.MessagePage page = new ChatStore.MessagePage(messages, 0, 0, null, "", null,
+                new ArrayList<Message>());
+        renderPage(page, block, token, new Runnable() {
+            @Override public void run() {
+                if (token != historyToken) return;
+                releaseLiveViews();
+                stream.removeAllViews();
+                stream.addView(block, fullWidth());
+                if (stream != null && !childBusy) PlanCard.settleAll(stream);
+                if (atEnd) scrollToLatest();
+                else scroll.post(new Runnable() { @Override public void run() { scroll.scrollTo(0, scrollY); } });
+                updateLatestButton();
+            }
+        }, false);
+    }
+
+    /** 跟主会话发消息一样：气泡先出来，后面的回复随轮询画上。 */
+    private void sendToChild() {
+        final String text = prompt.getText().toString().trim();
+        if (TextUtils.isEmpty(text) || childSending || stop.getVisibility() == View.VISIBLE) return;
+        childSending = true;
+        send.setEnabled(false);
+        prompt.setText("");
+        followLatest = true;
+        addUserBubble(Message.user(text));
+        historyReader.execute(new Runnable() {
+            @Override public void run() {
+                Exception failure = null;
+                try {
+                    SubAgentManager manager = childManager();
+                    if (manager == null) throw new IllegalStateException("子代理不存在");
+                    SubAgentManager.Record target = manager.find(childId);
+                    manager.sendFromUser(childId, text,
+                            com.mkei.backcast.ui.AgentPanelState.active(target.status) ? "message" : "task");
+                } catch (Exception error) {
+                    failure = error;
+                    recordUiFailure(childRoot, "ui:agent_chat", error);
+                }
+                final boolean failed = failure != null;
+                ui(new Runnable() {
+                    @Override public void run() {
+                        childSending = false;
+                        if (activityDestroyed || isFinishing()) return;
+                        if (failed) {
+                            if (prompt.length() == 0) { prompt.setText(text); prompt.setSelection(prompt.length()); }
+                            toast(getString(R.string.agent_chat_send_failed));
+                        }
+                        childRendered = "";
+                        loadChild();
+                    }
+                });
+            }
+        });
+    }
+
+    private void confirmStopChild() {
+        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(R.string.agent_panel_stop)
+                .setMessage(R.string.agent_panel_stop_confirm)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.agent_panel_stop, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                        historyReader.execute(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    SubAgentManager manager = childManager();
+                                    if (manager != null) manager.stopFromUser(childId);
+                                } catch (Exception error) {
+                                    recordUiFailure(childRoot, "ui:agent_chat", error);
+                                }
+                                ui(new Runnable() { @Override public void run() { loadChild(); } });
+                            }
+                        });
+                    }
+                }).show();
+    }
+
     private void showSubAgents() {
         Intent intent = new Intent(this, SubAgentsActivity.class);
         intent.putExtra(SubAgentsActivity.EXTRA_SESSION_ID, sessionId);
@@ -2041,7 +2409,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
     /** 顶栏是会话身份，不是模型。模型在底栏芯片。 */
     private void refreshIdentity() {
-        if (sessionOpening) return;
+        if (sessionOpening || childMode) return;
         if (sessionTitle == null) {
             return;
         }
@@ -2401,6 +2769,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     
 
     private void onSend() {
+        if (childMode) { sendToChild(); return; }
         // Browsing and drafting remain available while a tool is running; sending never replaces it.
         if (sessionOpening || stop.getVisibility() == View.VISIBLE || loop != null && loop.busy()) return;
         final String text = prompt.getText().toString().trim();
@@ -3278,6 +3647,230 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         contextMeter.setUsage(ratio, pct + "%");
         contextMeter.setContentDescription(getString(R.string.context_used,
                 compactK(used), compactK(contextLimit)));
+    }
+
+    /** 点上下文圆环：像 Claude 的「用量」一样，分段条加各部分明细，MCP 工具可以展开看每个占多少。 */
+    private void showUsageSheet() {
+        LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
+        if (body == null) return;
+        body.removeAllViews();
+        sheetToken++;
+        AgentLoop.ContextBreakdown usage = loop == null ? null : loop.contextBreakdown();
+        if (usage == null) {
+            usage = new AgentLoop.ContextBreakdown();
+            usage.used = lastContextUsed;
+            usage.limit = contextLimit;
+            usage.messages = lastContextUsed;
+        }
+        int limit = Math.max(1, usage.limit);
+        int prompt = Math.min(usage.system, TokenMeter.of(settings.userPrompt()));
+        int system = usage.system - prompt;
+        int free = Math.max(0, limit - usage.used - usage.compactBuffer);
+
+        TextView title = new TextView(this);
+        title.setText(R.string.usage_title);
+        title.setTextSize(20);
+        title.setTextColor(getResources().getColor(R.color.text_primary));
+        body.addView(title, fullWidth());
+        TextView section = new TextView(this);
+        section.setText(R.string.usage_context);
+        section.setTextSize(13);
+        section.setTextColor(getResources().getColor(R.color.text_secondary));
+        section.setPadding(dp(4), dp(14), 0, dp(8));
+        body.addView(section, fullWidth());
+
+        LinearLayout card = dirGroup();
+        card.setPadding(dp(16), dp(14), dp(16), dp(8));
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(R.string.usage_window);
+        name.setTextSize(17);
+        name.setTextColor(getResources().getColor(R.color.text_primary));
+        head.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView pct = new TextView(this);
+        pct.setText(getString(R.string.usage_percent, Math.round(usage.used * 100f / limit)));
+        pct.setTextSize(15);
+        pct.setTextColor(0xFF6E6E76);
+        head.addView(pct);
+        card.addView(head, fullWidth());
+
+        final int[] colors = { 0xFF2E6BE6, 0xFFE8663D, 0xFF1EA672, 0xFFE0A21B, 0xFF8A3FC2 };
+        int[] values = { usage.messages, usage.systemTools, usage.mcpTools, system, prompt };
+        float[] parts = new float[values.length];
+        for (int i = 0; i < values.length; i++) parts[i] = values[i] / (float) limit;
+        com.mkei.backcast.ui.UsageBar bar = new com.mkei.backcast.ui.UsageBar(this);
+        bar.setParts(parts, colors, 0xFFE4E4E9);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8));
+        barLp.topMargin = dp(12);
+        card.addView(bar, barLp);
+        TextView total = new TextView(this);
+        total.setText(getString(R.string.context_used, compactK(usage.used), compactK(limit)) + " 个 token");
+        total.setTextSize(13);
+        total.setTextColor(getResources().getColor(R.color.text_secondary));
+        total.setPadding(0, dp(8), 0, dp(10));
+        card.addView(total, fullWidth());
+
+        View line = new View(this);
+        line.setBackgroundColor(0xFFE6E6EA);
+        card.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        int[] labels = { R.string.usage_messages, R.string.usage_system_tools, R.string.usage_mcp_tools,
+                R.string.usage_system_prompt, R.string.usage_user_prompt };
+        LinearLayout legend = new LinearLayout(this);
+        legend.setOrientation(LinearLayout.VERTICAL);
+        legend.setPadding(0, dp(6), 0, dp(6));
+        for (int i = 0; i < labels.length; i++) {
+            if (i == 4 && prompt == 0) continue;
+            legend.addView(usageRow(colors[i], getString(labels[i]), values[i], limit));
+        }
+        legend.addView(usageRow(0xFFC9C9CF, getString(R.string.usage_compact_buffer), usage.compactBuffer, limit));
+        legend.addView(usageRow(0xFFEDEDF0, getString(R.string.usage_free), free, limit));
+        card.addView(legend, fullWidth());
+
+        if (!usage.mcp.isEmpty()) {
+            View line2 = new View(this);
+            line2.setBackgroundColor(0xFFE6E6EA);
+            card.addView(line2, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
+            card.addView(mcpUsage(usage.mcp, usage.mcpTools), fullWidth());
+        }
+        body.addView(card, fullWidth());
+        TextView note = new TextView(this);
+        note.setText(R.string.usage_note);
+        note.setTextSize(12);
+        note.setTextColor(getResources().getColor(R.color.text_secondary));
+        note.setPadding(dp(4), dp(10), dp(4), 0);
+        body.addView(note, fullWidth());
+        showSheet();
+    }
+
+    /** 明细一行：色点、名称、token 数、占比。 */
+    private View usageRow(int color, String label, int tokens, int limit) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(34));
+        View dot = new View(this);
+        android.graphics.drawable.GradientDrawable circle = new android.graphics.drawable.GradientDrawable();
+        circle.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+        circle.setColor(color);
+        dot.setBackground(circle);
+        row.addView(dot, new LinearLayout.LayoutParams(dp(9), dp(9)));
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextSize(15);
+        name.setTextColor(getResources().getColor(R.color.text_primary));
+        LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        nameLp.leftMargin = dp(12);
+        row.addView(name, nameLp);
+        TextView count = new TextView(this);
+        count.setText(compactK(tokens));
+        count.setTextSize(15);
+        count.setTextColor(getResources().getColor(R.color.text_primary));
+        count.setGravity(Gravity.END);
+        row.addView(count, new LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView share = new TextView(this);
+        share.setText(String.format(java.util.Locale.ROOT, "%.1f%%", tokens * 100f / Math.max(1, limit)));
+        share.setTextSize(15);
+        share.setTextColor(0xFF6E6E76);
+        share.setGravity(Gravity.END);
+        row.addView(share, new LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        return row;
+    }
+
+    /** 「MCP 工具 [数量] 合计 ›」，点开逐个列出，先显示 12 个。 */
+    private View mcpUsage(final List<String[]> tools, int total) {
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setMinimumHeight(dp(48));
+        TextView name = new TextView(this);
+        name.setText(R.string.usage_mcp_tools);
+        name.setTextSize(16);
+        name.setTextColor(getResources().getColor(R.color.text_primary));
+        head.addView(name);
+        TextView count = new TextView(this);
+        count.setText(String.valueOf(tools.size()));
+        count.setTextSize(12);
+        count.setTextColor(0xFF4A4A52);
+        count.setPadding(dp(8), dp(1), dp(8), dp(2));
+        android.graphics.drawable.GradientDrawable chip = new android.graphics.drawable.GradientDrawable();
+        chip.setColor(0xFFE4E4E9);
+        chip.setCornerRadius(dp(10));
+        count.setBackground(chip);
+        LinearLayout.LayoutParams countLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        countLp.leftMargin = dp(8);
+        head.addView(count, countLp);
+        head.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        TextView sum = new TextView(this);
+        sum.setText(compactK(total));
+        sum.setTextSize(15);
+        sum.setTextColor(getResources().getColor(R.color.text_primary));
+        head.addView(sum);
+        final ImageView chevron = new ImageView(this);
+        chevron.setImageDrawable(Icons.tinted(this, Icons.CHEVRON_RIGHT, 0xFF8E8E93, dp(18)));
+        LinearLayout.LayoutParams chevronLp = new LinearLayout.LayoutParams(dp(18), dp(18));
+        chevronLp.leftMargin = dp(8);
+        head.addView(chevron, chevronLp);
+        box.addView(head, fullWidth());
+        final LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setVisibility(View.GONE);
+        box.addView(list, fullWidth());
+        final int[] shown = { 0 };
+        final Runnable more = new Runnable() {
+            @Override public void run() {
+                int end = Math.min(tools.size(), shown[0] + (shown[0] == 0 ? 12 : 50));
+                if (list.getChildCount() > 0 && list.getChildAt(list.getChildCount() - 1).getTag() == "more")
+                    list.removeViewAt(list.getChildCount() - 1);
+                for (int i = shown[0]; i < end; i++) {
+                    LinearLayout row = new LinearLayout(MainActivity.this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    row.setMinimumHeight(dp(30));
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    TextView tool = new TextView(MainActivity.this);
+                    tool.setText(tools.get(i)[0]);
+                    tool.setTextSize(13);
+                    tool.setTextColor(0xFF4A4A52);
+                    tool.setSingleLine(true);
+                    tool.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                    row.addView(tool, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                    TextView n = new TextView(MainActivity.this);
+                    n.setText(compactK(Integer.parseInt(tools.get(i)[1])));
+                    n.setTextSize(13);
+                    n.setTextColor(0xFF4A4A52);
+                    n.setGravity(Gravity.END);
+                    row.addView(n, new LinearLayout.LayoutParams(dp(56), ViewGroup.LayoutParams.WRAP_CONTENT));
+                    list.addView(row, fullWidth());
+                }
+                shown[0] = end;
+                if (end < tools.size()) {
+                    TextView next = new TextView(MainActivity.this);
+                    next.setTag("more");
+                    next.setText(getString(R.string.usage_show_more, Math.min(50, tools.size() - end)));
+                    next.setTextSize(14);
+                    next.setTextColor(getResources().getColor(R.color.accent));
+                    next.setPadding(0, dp(8), 0, dp(10));
+                    final Runnable self = this;
+                    next.setOnClickListener(new View.OnClickListener() {
+                        @Override public void onClick(View v) { self.run(); }
+                    });
+                    list.addView(next, fullWidth());
+                }
+            }
+        };
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                boolean open = list.getVisibility() != View.VISIBLE;
+                if (open && shown[0] == 0) more.run();
+                list.setVisibility(open ? View.VISIBLE : View.GONE);
+                chevron.setRotation(open ? 90f : 0f);
+            }
+        });
+        return box;
     }
 
     /** 圆环里的字：按 k 显示，太长的数字塞不进环。 */
@@ -4311,6 +4904,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         panel.setLayoutParams(lp);
         sheetToken++;
         getWindow().setNavigationBarColor(Color.WHITE);
+        // 已经打开着（比如从更多菜单进工作文件夹、或改了目录后刷新），只换内容，不再从底部重新弹一次。
+        boolean open = overlay.getVisibility() == View.VISIBLE && !sheetClosing;
+        sheetClosing = false;
+        if (open) return;
         overlay.setVisibility(View.VISIBLE);
         panel.startAnimation(AnimationUtils.loadAnimation(this, R.anim.sheet_in));
         if (scrim != null) {
@@ -4389,12 +4986,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         sheetTrace = null; sheetTimeline = null; sheetRange = null;
         if (overlay == null || overlay.getVisibility() != View.VISIBLE) return;
         sheetToken++;
+        sheetClosing = true;
         final int token = sheetToken;
         if (panel != null) panel.startAnimation(AnimationUtils.loadAnimation(this, R.anim.sheet_out));
         if (scrim != null) scrim.startAnimation(AnimationUtils.loadAnimation(this, R.anim.scrim_out));
         overlay.postDelayed(new Runnable() {
             public void run() {
                 if (token != sheetToken) return;
+                sheetClosing = false;
                 overlay.setVisibility(View.GONE);
                 resetSheetDetails();
                 getWindow().setNavigationBarColor(Color.TRANSPARENT);
@@ -4427,7 +5026,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private void enableMessageActions(final TextView view, final Message request) {
         final long sid = sessionId;
         final int owner = historyToken;
-        MessageActions.install(this, view, request == null || request.content == null
+        // 子代理页只读历史，不在这里对主会话重发。
+        MessageActions.install(this, view, childMode || request == null || request.content == null
                 || request.content.trim().length() == 0 ? null : new Runnable() {
             @Override public void run() {
                 if (activityDestroyed || isFinishing() || sid != sessionId || owner != historyToken) return;

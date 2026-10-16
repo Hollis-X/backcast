@@ -363,6 +363,38 @@ public class AgentLoop {
         }
     }
 
+    /** 上下文用量按来源拆开，给「用量」面板用。数字都是估算，messages 取总量减去其余部分。 */
+    public static final class ContextBreakdown {
+        public int used, limit, system, systemTools, mcpTools, messages, compactBuffer;
+        /** MCP 工具逐个的估算：{名字, token}。 */
+        public final List<String[]> mcp = new ArrayList<String[]>();
+    }
+
+    public ContextBreakdown contextBreakdown() {
+        ToolRegistry reg = currentTools();
+        ContextBreakdown out = new ContextBreakdown();
+        if (reg != null) {
+            for (Tool tool : reg.local()) out.systemTools += TokenMeter.of(ToolRegistry.schemaOf(tool).toString());
+            for (Tool tool : reg.sourced()) {
+                int n = TokenMeter.of(ToolRegistry.schemaOf(tool).toString());
+                out.mcpTools += n;
+                out.mcp.add(new String[] { tool.name(), Integer.toString(n) });
+            }
+        }
+        JSONArray schema = reg == null || reg.isEmpty() ? null : reg.toSchema();
+        synchronized (lock) {
+            out.used = contextUsedLocked(schema);
+            out.limit = contextLimit;
+            out.compactBuffer = Math.max(0, Math.round(contextLimit * (1f - compactRatio)));
+            for (Message m : history) if (Message.SYSTEM.equals(m.role)) out.system += TokenMeter.of(m);
+        }
+        out.messages = Math.max(0, out.used - out.system - out.systemTools - out.mcpTools);
+        java.util.Collections.sort(out.mcp, new java.util.Comparator<String[]>() {
+            @Override public int compare(String[] a, String[] b) { return Integer.parseInt(b[1]) - Integer.parseInt(a[1]); }
+        });
+        return out;
+    }
+
     private int contextUsedLocked(JSONArray schema) {
         long used;
         if (contextBaselineMessages >= 0 && contextBaselineMessages <= history.size()) {

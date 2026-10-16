@@ -51,6 +51,7 @@ public class ScreenshotTour {
         click(main, R.id.action_menu, "03-main-drawer", false);
         main = start(MainActivity.class, null);
         click(main, R.id.action_more, "04-main-more-sheet", false);
+        workDirSheet();
         main = start(MainActivity.class, null);
         click(main, R.id.access_chip, "05-main-access-sheet", false);
         main = start(MainActivity.class, null);
@@ -74,6 +75,38 @@ public class ScreenshotTour {
             System.out.println("SCREENSHOT FAILED " + name + ": " + failure);
             return null;
         }
+    }
+
+    /** 更多菜单里点「工作文件夹」：两个已授权目录加一个用过但没授权的目录。 */
+    private void workDirSheet() {
+        try {
+            Settings settings = new Settings(RuntimeEnvironment.getApplication());
+            settings.addAuthorizedWorkDir("/storage/emulated/0/项目/backcast");
+            settings.addAuthorizedWorkDir("/storage/emulated/0/Download/old-notes");
+            settings.removeAuthorizedWorkDir("/storage/emulated/0/Download/old-notes");
+            Activity main = start(MainActivity.class, null);
+            if (main == null) return;
+            main.findViewById(R.id.action_more).performClick();
+            settle();
+            View row = findText(main.findViewById(R.id.sheet_body), main.getString(R.string.more_work_dir));
+            if (row != null) ((View) row.getParent()).performClick();
+            settle();
+            save(main.getWindow().getDecorView(), "07-workdir-sheet");
+        } catch (Throwable failure) {
+            System.out.println("SCREENSHOT FAILED 07-workdir-sheet: " + failure);
+        }
+    }
+
+    private static View findText(View view, String text) {
+        if (view instanceof android.widget.TextView && text.contentEquals(((android.widget.TextView) view).getText())) return view;
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View found = findText(group.getChildAt(i), text);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     private void click(Activity activity, int id, String name, boolean popup) {

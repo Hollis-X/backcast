@@ -68,7 +68,7 @@ public class ConversationShot {
         store.append(sid, Message.assistant("", call("c5", "update_plan", plan("新建 demo/todo.txt，写 3 条待办", "completed",
                 "新建 demo/show.sh，按行编号显示", "completed", "运行脚本确认输出", "completed", "第 2 条改为已完成并再跑一次", "completed"))));
         store.append(sid, Message.toolResult("c5", "计划已更新：共 4 步，已完成 4 步，全部完成。"));
-        Message done = Message.assistant("已完成。\n\n第二次运行（第 2 条已改）：\n\n```\n1. 写项目文档\n2. 已完成\n3. 备份工作目录\n```\n\n文件在 `demo/todo.txt`、`demo/show.sh`。", null);
+        Message done = Message.assistant("已完成。\n\n第一次：\n```\n1. 写项目文档\n2. 整理测试用例\n3. 备份工作目录\n```\n\n第二次运行（第 2 条已改）：\n```\n1. 写项目文档\n2. 已完成\n3. 备份工作目录\n```\n\n文件在 `demo/todo.txt`、`demo/show.sh`。", null);
         done.elapsedMs = 71000; done.thinkMs = 4000;
         store.append(sid, done);
         store.close();
@@ -84,6 +84,15 @@ public class ConversationShot {
         out.mkdirs();
         try (FileOutputStream stream = new FileOutputStream(new File(out, "20-conversation.png"))) {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream);
+        }
+        main.findViewById(R.id.context_meter).performClick();
+        for (int i = 0; i < 6; i++) ShadowLooper.idleMainLooper(500, java.util.concurrent.TimeUnit.MILLISECONDS);
+        Bitmap usage = Bitmap.createBitmap(decor.getWidth(), decor.getHeight(), Bitmap.Config.ARGB_8888);
+        Canvas usageCanvas = new Canvas(usage);
+        usageCanvas.drawColor(Color.WHITE);
+        decor.draw(usageCanvas);
+        try (FileOutputStream stream = new FileOutputStream(new File(out, "23-usage.png"))) {
+            usage.compress(Bitmap.CompressFormat.PNG, 100, stream);
         }
     }
 }

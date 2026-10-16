@@ -23,11 +23,11 @@ public final class SettingsActivity extends AppCompatActivity {
         toolbar.setNavigationOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { finish(); }
         });
-        entry(R.id.settings_ai_row, R.id.settings_ai_icon, R.id.settings_ai_arrow, Icons.CHAT, AiConfigActivity.class);
+        entry(R.id.settings_ai_row, R.id.settings_ai_icon, R.id.settings_ai_arrow, Icons.CHAT, 0xFF2E6BE6, AiConfigActivity.class);
         entry(R.id.settings_preferences_row, R.id.settings_preferences_icon, R.id.settings_preferences_arrow,
-                Icons.SETTINGS, UserPreferencesActivity.class);
-        entry(R.id.settings_tools_row, R.id.settings_tools_icon, R.id.settings_tools_arrow, Icons.TERMINAL, ToolConfigActivity.class);
-        entry(R.id.settings_mcp_row, R.id.settings_mcp_icon, R.id.settings_mcp_arrow, Icons.TERMINAL, McpConfigActivity.class);
+                Icons.SETTINGS, 0xFF8E8E93, UserPreferencesActivity.class);
+        entry(R.id.settings_tools_row, R.id.settings_tools_icon, R.id.settings_tools_arrow, Icons.TERMINAL, 0xFF1E8A4C, ToolConfigActivity.class);
+        entry(R.id.settings_mcp_row, R.id.settings_mcp_icon, R.id.settings_mcp_arrow, Icons.FOLDER, 0xFF8A3FC2, McpConfigActivity.class);
     }
 
     @Override protected void onResume() {
@@ -57,8 +57,14 @@ public final class SettingsActivity extends AppCompatActivity {
         ((TextView) findViewById(R.id.settings_mcp_summary)).setText(getString(R.string.settings_mcp_summary, enabled));
     }
 
-    private void entry(int rowId, int iconId, int arrowId, int icon, final Class<?> destination) {
-        ((ImageView) findViewById(iconId)).setImageDrawable(Icons.tinted(this, icon, 0xFF3C3C43, dp(24)));
+    /** 一行入口：彩色圆角方块里放白色图标，右侧箭头。 */
+    private void entry(int rowId, int iconId, int arrowId, int icon, int tone, final Class<?> destination) {
+        ImageView tile = (ImageView) findViewById(iconId);
+        tile.setImageDrawable(Icons.tinted(this, icon, 0xFFFFFFFF, dp(20)));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(tone);
+        bg.setCornerRadius(dp(9));
+        tile.setBackground(bg);
         ((ImageView) findViewById(arrowId)).setImageDrawable(Icons.tinted(this, Icons.CHEVRON_RIGHT, 0xFF8E8E93, dp(18)));
         findViewById(rowId).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { startActivity(new Intent(SettingsActivity.this, destination)); }

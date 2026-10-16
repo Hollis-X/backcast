@@ -17,7 +17,8 @@ public class Settings {
 
     private static final String PREF = "backcast";
     private static final String KEY_USE_ROOT = "use_root";
-    private static final String KEY_SYSTEM_PROMPT = "system_prompt";
+    /** 旧版可编辑系统提示词存在 system_prompt；那是整份系统提示词的副本，不迁移成用户提示词。 */
+    private static final String KEY_USER_PROMPT = "user_prompt";
     private static final String KEY_ACTIVE_PROVIDER = "active_ai_provider";
     private static final Object AI_LOCK = new Object();
     public static final String PROVIDER_DEEPSEEK = "deepseek";
@@ -111,9 +112,9 @@ public class Settings {
         return "自定义";
     }
     private static String providerUrl(String id) {
-        if (PROVIDER_DEEPSEEK.equals(id)) return "https://api.deepseek.com/v1";
-        if (PROVIDER_OPENAI.equals(id)) return "https://api.openai.com/v1";
-        if (PROVIDER_GROK.equals(id)) return "https://api.x.ai/v1";
+        if (PROVIDER_DEEPSEEK.equals(id)) return "https://api.deepseek.com";
+        if (PROVIDER_OPENAI.equals(id)) return "https://api.openai.com";
+        if (PROVIDER_GROK.equals(id)) return "https://api.x.ai";
         return "";
     }
     private static String profileKey(String id, String suffix) { return "ai_profile_" + id + "_" + suffix; }
@@ -304,27 +305,19 @@ public class Settings {
     }
 
     /**
-     * 静态指令：角色、做事方式、操作分寸、工具用法、回答风格。
-     *
-     * 这里不拼环境事实。设置页把这份文本读进输入框，用户像 Codex 的 AGENTS.md
-     * 那样直接改。环境事实每轮由 fullSystemPrompt() 现拼，改目录不会把它冻住。
+     * 内置系统提示词：角色、做事方式、操作分寸、工具用法、回答风格。
+     * 和环境一样由应用决定，设置页只读展示，不让用户改。
      */
     public String systemPrompt() {
-        String s = prefs.getString(KEY_SYSTEM_PROMPT, "");
-        if (s == null || s.length() == 0) {
-            return defaultPrompt;
-        }
-        String base = stripStoredPrompt(s);
-        return base.length() == 0 ? defaultPrompt : base;
+        return defaultPrompt;
     }
 
-    /** 去掉存档里自动拼上的环境尾巴，只留用户能改的那一段。 */
-    private static String stripStoredPrompt(String s) {
-        int cut = s.indexOf(ENV_SEPARATOR);
-        if (cut >= 0) {
-            s = s.substring(0, cut);
-        }
-        return s.trim();
+    /**
+     * 用户自己的提示词（偏好、习惯、项目约定）。
+     * 拼在系统提示词和环境之后，冲突时以前面的为准。
+     */
+    public String userPrompt() {
+        return prefs.getString(KEY_USER_PROMPT, "").trim();
     }
 
     /**
@@ -462,8 +455,11 @@ public class Settings {
 
     /** 每轮真正发给模型的：静态指令 + 现拼的环境事实。 */
     public String fullSystemPrompt() {
+        String user = userPrompt();
         return systemPrompt() + ENV_SEPARATOR + environmentContext()
-                + "\n\n" + responseInstructions() + "\n\n" + workflowInstructions();
+                + "\n\n" + responseInstructions() + "\n\n" + workflowInstructions()
+                + (user.length() == 0 ? "" : "\n\nUser prompt (the user's own preferences; everything above, "
+                + "including the environment, takes priority where they conflict):\n" + user);
     }
 
     /** 不依赖用户可编辑的提示词，每轮都附上：怎么拆任务、怎么展示进度。 */
@@ -524,7 +520,7 @@ public class Settings {
                 .putString(KEY_OUTPUT_LANGUAGE, ResponsePreferences.normalizeLanguage(language))
                 .putString(KEY_AGENT_CONCURRENCY, Integer.toString(concurrency >= 1 && concurrency <= 4
                         ? concurrency : DEFAULT_AGENT_CONCURRENCY))
-                .putString(KEY_SYSTEM_PROMPT, prompt == null ? "" : prompt)
+                .putString(KEY_USER_PROMPT, prompt == null ? "" : prompt.trim())
                 .apply();
     }
 

@@ -77,6 +77,28 @@ public class ToolRegistry {
         return result;
     }
 
+    /** 本地注册的工具（系统工具），不含 MCP 等外部来源。 */
+    public List<Tool> local() {
+        return new ArrayList<Tool>(tools.values());
+    }
+
+    /** 外部来源（MCP）提供的工具。 */
+    public List<Tool> sourced() {
+        List<Tool> result = new ArrayList<Tool>();
+        for (Source source : sources) result.addAll(source.tools());
+        return result;
+    }
+
+    /** 一个工具发给模型的 schema，用于估算它占多少上下文。 */
+    public static JSONObject schemaOf(Tool t) {
+        try {
+            return new JSONObject().put("type", "function").put("function", new JSONObject()
+                    .put("name", t.name()).put("description", t.description()).put("parameters", t.parameters()));
+        } catch (Exception invalid) {
+            return new JSONObject();
+        }
+    }
+
     public boolean isEmpty() {
         return all().isEmpty();
     }

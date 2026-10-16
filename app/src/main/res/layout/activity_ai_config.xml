@@ -12,7 +12,7 @@
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="@string/label_ai_provider" android:textColor="@color/text_secondary" android:textSize="12sp"/>
             <Spinner android:id="@+id/ai_provider" android:layout_width="match_parent" android:layout_height="48dp"
-                android:saveEnabled="false" android:background="@drawable/bg_spinner" android:paddingStart="12dp" android:paddingEnd="12dp"/>
+                android:saveEnabled="false" android:background="@drawable/bg_spinner" android:paddingStart="12dp" android:paddingEnd="40dp"/>
             <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:text="@string/ai_provider_help" android:textColor="@color/text_secondary" android:textSize="12sp"
                 android:paddingBottom="14dp"/>

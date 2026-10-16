@@ -94,7 +94,7 @@ public final class ResponsePreferencesRegressionTest {
             preferences(settings, "setOutputVerbosity".equals(method) ? value : get(settings, "outputVerbosity"),
                     "setReasoningSummary".equals(method) ? value : get(settings, "reasoningSummary"),
                     "setOutputLanguage".equals(method) ? value : get(settings, "outputLanguage"),
-                    concurrency(settings), get(settings, "systemPrompt"));
+                    concurrency(settings), get(settings, "userPrompt"));
             return;
         }
         settingsType.getMethod(method, String.class).invoke(settings, value);
@@ -173,9 +173,9 @@ public final class ResponsePreferencesRegressionTest {
         customPrompt(settings, custom);
         String rule = policy("languageInstruction", "zh-CN");
         String full = get(settings, "fullSystemPrompt");
-        check(custom.equals(get(settings, "systemPrompt")), "Dynamic preference contaminated editable prompt");
-        check(full.startsWith(custom), "Custom prompt was dropped");
-        check(full.indexOf(rule) > full.indexOf(custom), "Selected Chinese rule does not follow conflicting prompt");
+        check(custom.equals(get(settings, "userPrompt")), "Dynamic preference contaminated editable prompt");
+        check(full.endsWith(custom) && full.contains("takes priority"), "User prompt was dropped or lost its lower-priority label");
+        check(full.indexOf(rule) >= 0 && full.indexOf(rule) < full.indexOf(custom), "Selected Chinese rule must outrank the later user prompt");
         check(full.contains(instructions("default", "zh-CN")), "Full response preference policy was not injected");
     }
 
@@ -217,7 +217,7 @@ public final class ResponsePreferencesRegressionTest {
             set(settings, "setOutputVerbosity", verbosity);
             check(get(settings, "fullSystemPrompt").contains(instructions(verbosity, "ja")),
                     "Changed verbosity policy was not applied: " + verbosity);
-            check(custom.equals(get(settings, "systemPrompt")), "Changing verbosity changed editable prompt");
+            check(custom.equals(get(settings, "userPrompt")), "Changing verbosity changed editable prompt");
         }
     }
 
@@ -241,7 +241,7 @@ public final class ResponsePreferencesRegressionTest {
     }
     private static void concurrency(Object settings, int value) throws Exception {
         preferences(settings, get(settings, "outputVerbosity"), get(settings, "reasoningSummary"),
-                get(settings, "outputLanguage"), value, get(settings, "systemPrompt"));
+                get(settings, "outputLanguage"), value, get(settings, "userPrompt"));
     }
     private static void childDefaultsAndEveryChoicePersist() throws Exception {
         Object context=context(), settings=settings(context);
@@ -307,12 +307,12 @@ public final class ResponsePreferencesRegressionTest {
         check(get(settings,"fullSystemPrompt").contains("unless the actual user explicitly"),"Off effort bypassed explicit-user policy");
     }
     private static void unsavedModePreviewDoesNotPersistOrAlterPrompt() throws Exception {
-        Object settings=settings(context());String raw=get(settings,"systemPrompt");
+        Object settings=settings(context());String raw=get(settings,"userPrompt");
         String preview=(String)settingsType.getMethod("environmentContext",boolean.class,String.class,int.class)
                 .invoke(settings,false,"ultra",2);
         check(preview.contains("Subagent mode: ultra") && preview.contains("At most 2 child agents"),
                 "Preview ignored unsaved mode and concurrency");
-        check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3 && raw.equals(get(settings,"systemPrompt")),
+        check("manual".equals(get(settings,"agentMode")) && concurrency(settings)==3 && raw.equals(get(settings,"userPrompt")),
                 "Unsaved preview contaminated preferences or editable prompt");
     }
 
@@ -346,7 +346,7 @@ public final class ResponsePreferencesRegressionTest {
         for (String key : before.keySet()) check(before.get(key).equals(stored.get(key)), "Preference save changed another group: " + key);
         check("medium".equals(get(settings, "outputVerbosity")) && "detailed".equals(get(settings, "reasoningSummary"))
                 && "en".equals(get(settings, "outputLanguage")) && "max".equals(get(settings, "reasoningEffort"))
-                && concurrency(settings) == 2 && "My preference draft".equals(get(settings, "systemPrompt")), "Preference group did not save every field");
+                && concurrency(settings) == 2 && "My preference draft".equals(get(settings, "userPrompt")), "Preference group did not save every field");
     }
 
     private static void groupedPreferenceSaveNormalizesValuesAndDoesNotResurrectOldUltra() throws Exception {
@@ -402,9 +402,9 @@ public final class ResponsePreferencesRegressionTest {
     @SuppressWarnings("unchecked")
     private static void providersKeepSeparateCredentialsAndImmutableOfficialDefaults() throws Exception {
         Object context=context(),settings=settings(context); List<Object> providers=profiles(settings);
-        check(providers.size()==4&&"https://api.deepseek.com/v1".equals(profileText(profile(settings,"deepseek"),"baseUrl"))
-                        &&"https://api.openai.com/v1".equals(profileText(profile(settings,"openai"),"baseUrl"))
-                        &&"https://api.x.ai/v1".equals(profileText(profile(settings,"grok"),"baseUrl")),"Official preset endpoints are incorrect");
+        check(providers.size()==4&&"https://api.deepseek.com".equals(profileText(profile(settings,"deepseek"),"baseUrl"))
+                        &&"https://api.openai.com".equals(profileText(profile(settings,"openai"),"baseUrl"))
+                        &&"https://api.x.ai".equals(profileText(profile(settings,"grok"),"baseUrl")),"Official preset endpoints are incorrect");
         for(Object p:providers)check("".equals(profileText(p,"apiKey"))&&"".equals(profileText(p,"model")),"Fresh presets claimed credentials or account models");
         boolean immutable=false;try{providers.clear();}catch(UnsupportedOperationException expected){immutable=true;}check(immutable,"Provider snapshots can be changed externally");
         for(String id:new String[]{"deepseek","openai","grok","custom"})saveProfile(settings,id,"https://"+id+".example/v1",id+"-key",id+"-model",Arrays.asList(id+"-model","common"));
