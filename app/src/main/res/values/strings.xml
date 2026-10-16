@@ -234,4 +234,12 @@
     <string name="usage_free">剩余空间</string>
     <string name="usage_show_more">再显示 %1$d 项</string>
     <string name="usage_note">各部分按字符估算；用到窗口的 90% 会自动压缩历史。</string>
+    <string name="background_title">后台运行</string>
+    <string name="background_message">切到后台或熄屏后，系统的电池优化会把任务杀掉。允许「回译」不受电池优化限制后，任务才能在后台一直运行。\n\n部分手机还需要在应用设置里打开「自启动」「允许后台运行」，或把省电策略设为「无限制」。</string>
+    <string name="background_message_ok">已不受电池优化限制。如果后台仍被清理，请在应用设置里打开「自启动」「允许后台运行」，或把省电策略设为「无限制」。</string>
+    <string name="background_allow">去允许</string>
+    <string name="background_open_app">应用设置</string>
+    <string name="background_never">不再提示</string>
+    <string name="settings_background_on">不受电池优化限制</string>
+    <string name="settings_background_off">受电池优化限制，后台可能被杀</string>
 </resources>

@@ -161,6 +161,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private long earlierBeforeId;
     private TextView earlierRow;
     private ImageView latestButton;
+    /** 回到底部按钮：任务还在跑时显示跳动的三个点，空闲时是向下箭头。 */
+    private com.mkei.backcast.ui.DotsDrawable latestDots;
+    private boolean latestBusy;
     private boolean followLatest = true;
     private boolean autoScrollQueued;
     private int scrollActionToken;
@@ -368,6 +371,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (latestButton != null) {
             latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, 0xFF3C3C43, dp(20)));
             latestButton.setRotation(180f);
+            latestDots = new com.mkei.backcast.ui.DotsDrawable(0xFF3C3C43, dp(20));
             latestButton.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { jumpToLatest(); }
             });
@@ -377,6 +381,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 @Override public void run() {
                     scrollActionToken++;
                     cancelLatestJumpAnimation();
+                }
+            });
+            // 键盘弹起或输入框变高时视图变矮；正在跟随就继续贴着最新一条。
+            scroll.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                    if (b - t != ob - ot && followLatest && !initialHistoryLoading && !historyInserting) autoScroll();
                 }
             });
         }
@@ -715,6 +725,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
     @Override
     public void onBackPressed() {
+        if (sheetOverlayVisible() && sheetCommand != null && commandReturn != null) {
+            TurnTrace.Range back = commandReturn;
+            commandReturn = null;
+            showActivitySheet(back);
+            return;
+        }
         if (sheetOverlayVisible()) {
             hideWorkSheet();
             return;
@@ -1348,6 +1364,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             });
         }
         inputBar = findViewById(R.id.input_bar);
+        // 输入条浮在会话上：柔和的四周投影，不做扁平卡片。阴影颜色调淡，避免发脏。
+        if (inputBar != null && android.os.Build.VERSION.SDK_INT >= 28) {
+            inputBar.setOutlineAmbientShadowColor(0x26000000);
+            inputBar.setOutlineSpotShadowColor(0x40000000);
+        }
         if (composerDock == null) {
             composerDock = findViewById(R.id.composer_dock);
         }
@@ -1381,7 +1402,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                         @Override
                         public void onScrollChanged() {
                             if (!initialHistoryLoading && !historyInserting) {
-                                followLatest = stuckAtEnd();
+                                // 到底就继续跟随；只有用户自己往上翻才停止跟随。
+                                // 新消息把内容撑长、键盘弹起压矮视图时引起的滚动，不能把跟随关掉。
+                                if (stuckAtEnd()) followLatest = true;
+                                else if (scroll.isUserScroll()) followLatest = false;
                             }
                             updateLatestButton();
                             scheduleFrost();
@@ -1414,7 +1438,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (footer != null) {
             ViewGroup.MarginLayoutParams mlp =
                     (ViewGroup.MarginLayoutParams) footer.getLayoutParams();
-            mlp.bottomMargin = bottom + dp(10);
+            mlp.bottomMargin = bottom + dp(4);
             footer.setLayoutParams(mlp);
         }
         if (drawerPanel != null) {
@@ -1516,8 +1540,19 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
     private void updateLatestButton() {
         if (latestButton == null) return;
-        latestButton.setVisibility(!initialHistoryLoading && !stuckAtEnd()
-                && stream != null && stream.getChildCount() > 0 ? View.VISIBLE : View.GONE);
+        boolean show = !initialHistoryLoading && !stuckAtEnd() && stream != null && stream.getChildCount() > 0;
+        latestButton.setVisibility(show ? View.VISIBLE : View.GONE);
+        if (latestDots == null) return;
+        boolean dots = show && latestBusy;
+        if (dots && latestButton.getDrawable() != latestDots) {
+            latestButton.setRotation(0f);
+            latestButton.setImageDrawable(latestDots);
+            latestDots.start();
+        } else if (!dots && latestButton.getDrawable() == latestDots) {
+            latestDots.stop();
+            latestButton.setRotation(180f);
+            latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, 0xFF3C3C43, dp(20)));
+        }
     }
 
     private void jumpToLatest() {
@@ -2051,12 +2086,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private void showChild(SubAgentManager.Record row, List<Message> messages) {
         childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status);
         sessionTitle.setText(row.name);
-        if (sessionSub != null) sessionSub.setText(getString(childBusy ? R.string.agent_chat_running
-                : SubAgentManager.FAILED.equals(row.status) ? R.string.agent_chat_failed
-                : SubAgentManager.CLOSED.equals(row.status) ? R.string.agent_chat_closed : R.string.agent_chat_idle));
-        boolean open = !SubAgentManager.CLOSED.equals(row.status);
-        prompt.setEnabled(open);
-        send.setEnabled(open && !childSending);
+        bindChildStatus(row);
+        // 已结束、已关闭的子代理也能接着聊：发出去就是新任务，沿用原来的上下文。
+        prompt.setEnabled(true);
+        send.setEnabled(!childSending);
         setBusy(childBusy);
         String signature = row.id + ":" + row.revision + ":" + messages.size() + ":" + row.status;
         if (signature.equals(childRendered)) return;
@@ -2081,6 +2114,30 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 updateLatestButton();
             }
         }, false);
+    }
+
+    /**
+     * 副标题：运行中写「运行中」；出错结束写黄色三角加「异常停止」；
+     * 用户手动停掉写「已停止」；正常做完或被主会话关闭不显示。
+     */
+    private void bindChildStatus(SubAgentManager.Record row) {
+        if (sessionSub == null) return;
+        boolean failed = SubAgentManager.FAILED.equals(row.status) && !"cancelled".equals(row.phase);
+        int text = childBusy ? R.string.agent_chat_running : failed ? R.string.agent_chat_failed
+                : SubAgentManager.STOPPED.equals(row.status) || SubAgentManager.FAILED.equals(row.status)
+                ? R.string.agent_chat_closed : 0;
+        sessionSub.setVisibility(text == 0 ? View.GONE : View.VISIBLE);
+        if (text == 0) return;
+        sessionSub.setText(text);
+        sessionSub.setTextColor(failed ? 0xFFB7790A : getResources().getColor(R.color.text_secondary));
+        if (failed) {
+            android.graphics.drawable.Drawable warn = getResources().getDrawable(R.drawable.ic_warning);
+            warn.setBounds(0, 0, dp(13), dp(13));
+            sessionSub.setCompoundDrawables(warn, null, null, null);
+            sessionSub.setCompoundDrawablePadding(dp(4));
+        } else {
+            sessionSub.setCompoundDrawables(null, null, null, null);
+        }
     }
 
     /** 跟主会话发消息一样：气泡先出来，后面的回复随轮询画上。 */
@@ -2829,6 +2886,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
         final String selectionDraft = savedSelection;
         final long sid = ensureSession(text);
+        BackgroundAccess.remind(this);
         final int gen = target.generation();
         final int token = liveToken = target.nextUiToken(liveToken);
         prompt.setText("");
@@ -2878,6 +2936,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     }
 
     private void setBusy(boolean busy) {
+        latestBusy = busy;
+        updateLatestButton();
         send.setVisibility(busy ? View.GONE : View.VISIBLE);
         stop.setVisibility(busy ? View.VISIBLE : View.GONE);
         if (!busy) {
@@ -4085,10 +4145,18 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         rows.setOrientation(LinearLayout.VERTICAL);
         final TurnTrace.Range beforeBody = new TurnTrace.Range(trace, 0);
         rows.setTag(beforeBody);
-        TextView activity = new TextView(this);
-        activity.setTextSize(13);
-        activity.setTextColor(0xFF8E8E93);
-        activity.setPadding(0, dp(3), 0, dp(8));
+        // 「思考 N 段 · 工具 N 次」这一行自带一个箭头；只有上面「工作了」那行不显示时（没有耗时记录）才露出来。
+        LinearLayout activity = new LinearLayout(this);
+        activity.setOrientation(LinearLayout.HORIZONTAL);
+        activity.setGravity(Gravity.CENTER_VERTICAL);
+        TextView caption = new TextView(this);
+        caption.setTextSize(13);
+        caption.setTextColor(0xFF8E8E93);
+        caption.setPadding(0, dp(3), dp(8), dp(8));
+        activity.addView(caption, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        View rowChevron = makeChevron();
+        rowChevron.setVisibility(View.GONE);
+        activity.addView(rowChevron);
         rows.addView(activity, fullWidth());
         View.OnClickListener details = new View.OnClickListener() {
             public void onClick(View view) { showActivitySheet(beforeBody); }
@@ -4171,18 +4239,29 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
         long ms = trace.elapsedMs > 0 ? trace.elapsedMs
                 : (trace == currentTrace ? displayElapsed(trace) : 0L);
+        ViewParent parent = header.getParent();
+        showRowChevron(parent, ms <= 0);
         if (ms <= 0) {
             header.setText("");
-            ViewParent parent = header.getParent();
             if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.GONE);
             else header.setVisibility(View.GONE);
             return;
         }
-        ViewParent parent = header.getParent();
         if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.VISIBLE);
         else header.setVisibility(View.VISIBLE);
         String time = getString(R.string.worked, Integer.valueOf(seconds(ms)));
         header.setText(time);
+    }
+
+    /** 「工作了」那行藏起来时，把展开箭头挪到下面的「思考 · 工具」行上，否则第一段没有入口提示。 */
+    private void showRowChevron(ViewParent head, boolean show) {
+        if (!(head instanceof View) || !(((View) head).getParent() instanceof LinearLayout)) return;
+        LinearLayout box = (LinearLayout) ((View) head).getParent();
+        if (box.getChildCount() < 2 || !(box.getChildAt(1) instanceof LinearLayout)) return;
+        LinearLayout rows = (LinearLayout) box.getChildAt(1);
+        View first = rows.getChildCount() == 0 ? null : rows.getChildAt(0);
+        if (first instanceof LinearLayout && ((LinearLayout) first).getChildCount() > 1)
+            ((LinearLayout) first).getChildAt(1).setVisibility(show ? View.VISIBLE : View.GONE);
     }
 
     /** 这段思考结束。秒数钉在这段上，不跟后面的命令混。 */
@@ -4352,7 +4431,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private void showCommandScreen(TurnTrace.Step step) {
         LinearLayout panel = (LinearLayout) findViewById(R.id.sheet_panel);
         if (step == null || panel == null) return;
+        TurnTrace.Range back = sheetRange;
         showSheet();
+        commandReturn = back;
         findViewById(R.id.sheet_scroll).setVisibility(View.GONE);
         sheetCommand = new WorkTimeline.CommandView(this, step);
         panel.addView(sheetCommand, new LinearLayout.LayoutParams(
@@ -4899,6 +4980,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
         // 弹出面板时收起键盘，否则面板会被键盘顶掉一半。
         hideKeyboard();
+        if (sheetMorph != null) sheetMorph.cancel();
+        morphFrom = panel.getHeight();
         ViewGroup.LayoutParams lp = panel.getLayoutParams();
         lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
         panel.setLayoutParams(lp);
@@ -4907,12 +4990,75 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         // 已经打开着（比如从更多菜单进工作文件夹、或改了目录后刷新），只换内容，不再从底部重新弹一次。
         boolean open = overlay.getVisibility() == View.VISIBLE && !sheetClosing;
         sheetClosing = false;
-        if (open) return;
+        if (open) {
+            morphSheet(panel);
+            return;
+        }
         overlay.setVisibility(View.VISIBLE);
         panel.startAnimation(AnimationUtils.loadAnimation(this, R.anim.sheet_in));
         if (scrim != null) {
             scrim.startAnimation(AnimationUtils.loadAnimation(this, R.anim.scrim_in));
         }
+    }
+
+    private android.animation.ValueAnimator sheetMorph;
+    /** 从过程列表点进某条工具调用时记下列表，返回键回到列表而不是关掉面板。 */
+    private TurnTrace.Range commandReturn;
+    private int morphFrom;
+
+    /**
+     * 面板已经打开、只换内容时（比如从过程列表点进某条工具调用）：
+     * 高度从原来平滑过渡到新内容的高度，新内容淡入并轻微上移，不再瞬间跳变。
+     * 调用方在同一帧里换好内容，这里等到下一帧量出目标高度再开始。
+     */
+    private void morphSheet(final View panel) {
+        final int from = morphFrom;
+        if (from <= 0) return;
+        final int token = sheetToken;
+        panel.post(new Runnable() {
+            @Override public void run() {
+                if (token != sheetToken || sheetClosing) return;
+                final ViewGroup.LayoutParams lp = panel.getLayoutParams();
+                final int intended = lp.height;
+                int target = intended;
+                if (target <= 0) {
+                    View parent = (View) panel.getParent();
+                    panel.measure(View.MeasureSpec.makeMeasureSpec(panel.getWidth(), View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(parent.getHeight(), View.MeasureSpec.AT_MOST));
+                    target = panel.getMeasuredHeight();
+                }
+                for (int i = 1; i < ((ViewGroup) panel).getChildCount(); i++) {
+                    View content = ((ViewGroup) panel).getChildAt(i);
+                    if (content.getVisibility() != View.VISIBLE) continue;
+                    content.setAlpha(0f);
+                    content.setTranslationY(dp(10));
+                    content.animate().alpha(1f).translationY(0f).setStartDelay(60).setDuration(200)
+                            .setInterpolator(new DecelerateInterpolator()).start();
+                }
+                if (Math.abs(target - from) < dp(2)) return;
+                lp.height = from;
+                panel.setLayoutParams(lp);
+                sheetMorph = android.animation.ValueAnimator.ofInt(from, target);
+                sheetMorph.setDuration(240);
+                sheetMorph.setInterpolator(new DecelerateInterpolator());
+                sheetMorph.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                    @Override public void onAnimationUpdate(android.animation.ValueAnimator animation) {
+                        lp.height = (Integer) animation.getAnimatedValue();
+                        panel.setLayoutParams(lp);
+                    }
+                });
+                sheetMorph.addListener(new AnimatorListenerAdapter() {
+                    private boolean cancelled;
+                    @Override public void onAnimationCancel(Animator animation) { cancelled = true; }
+                    @Override public void onAnimationEnd(Animator animation) {
+                        sheetMorph = null;
+                        // 动画结束回到内容本来要的高度（固定值或随内容），之后的刷新照常生效。
+                        if (!cancelled) { lp.height = intended; panel.setLayoutParams(lp); }
+                    }
+                });
+                sheetMorph.start();
+            }
+        });
     }
 
     /** 收起软键盘。面板要占满底部时，键盘不该跟着一起顶上来。 */
@@ -4941,6 +5087,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 if (panel.getChildAt(i) instanceof WorkTimeline.CommandView) panel.removeViewAt(i);
         }
         sheetCommand = null;
+        commandReturn = null;
         sheetTrace = null;
         sheetRange = null;
         sheetTimeline = null;

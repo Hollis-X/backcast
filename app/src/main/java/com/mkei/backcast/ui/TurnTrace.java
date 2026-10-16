@@ -95,7 +95,6 @@ public class TurnTrace {
             int priority = 0;
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.step != null && PLAN.equals(piece.step.name)) continue;
                 if (piece.think != null ? !piece.sealed
                         : piece.step != null && !piece.step.done) pending = true;
                 if (piece.step != null && !piece.step.done) {
@@ -116,7 +115,7 @@ public class TurnTrace {
         public boolean hasActivity() {
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.step != null && !PLAN.equals(piece.step.name) || piece.think != null) return true;
+                if (piece.step != null || piece.think != null) return true;
             }
             return false;
         }
@@ -128,8 +127,8 @@ public class TurnTrace {
         for (int i = Math.max(0, from); i < Math.min(to, order.size()); i++) {
             if (order.get(i).think != null) thinks++;
             Step step = order.get(i).step;
-            // 计划单独画成会话里的卡片，不算工具调用。
-            if (step != null && !PLAN.equals(step.name)) tools++;
+            // 计划也是一次工具调用：卡片画清单，这里照常计数，时间线里也能看到这次调用。
+            if (step != null) tools++;
         }
         if (thinks == 0 && tools == 0) return "";
         String thought = thinks > 0 ? "思考 " + thinks + " 段" : "";

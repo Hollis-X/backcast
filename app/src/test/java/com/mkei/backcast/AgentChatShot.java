@@ -76,7 +76,8 @@ public class AgentChatShot {
         ChatStore store = new ChatStore(app);
         long sid = store.create("迷你待办清单");
         store.append(sid, Message.user("开两个子代理分别检查 demo 目录和脚本"));
-        SubAgentManager.Record checker = agent("a1", "demo_checker", SubAgentManager.IDLE);
+        SubAgentManager.Record checker = agent("a1", "demo_checker", SubAgentManager.FAILED);
+        checker.phase = "model"; checker.error = "模型请求失败";
         JSONArray history = new JSONArray();
         history.put(Message.system("system").toCheckpointJson());
         history.put(Message.delegated("检查 demo/todo.txt 是否有 3 条待办，并运行 show.sh 看输出", "").toCheckpointJson());
@@ -85,7 +86,6 @@ public class AgentChatShot {
         history.put(a1.toCheckpointJson());
         history.put(Message.toolResult("t1", "1. 写项目文档\n2. 已完成\n3. 备份工作目录").toCheckpointJson());
         Message fin = Message.assistant("检查完毕：todo.txt 有 3 条，show.sh 输出正确，第 2 条已标记「已完成」。", null);
-        fin.elapsedMs = 12000;
         history.put(fin.toCheckpointJson());
         checker.history = history;
         store.saveSubAgentRecord("session-" + sid, checker.toJson());

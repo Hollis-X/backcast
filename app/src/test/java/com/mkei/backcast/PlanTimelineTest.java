@@ -11,8 +11,8 @@ import android.graphics.Color;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
-import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import com.mkei.backcast.ui.PlanCard;
 import com.mkei.backcast.ui.TurnTrace;
@@ -75,7 +75,7 @@ public class PlanTimelineTest {
     }
 
     @Test
-    public void planIsNotInTheTimelineAndEditsShowLineCounts() throws Exception {
+    public void planCallIsInTheTimelineAndEditsShowLineCounts() throws Exception {
         Context context = RuntimeEnvironment.getApplication();
         TurnTrace trace = new TurnTrace();
         trace.addStep("p1", TurnTrace.PLAN, plan("读代码", "completed", "改代码", "in_progress"));
@@ -84,9 +84,9 @@ public class PlanTimelineTest {
         trace.steps.get(1).result = "已修改 1 处：a.txt\n变更：+5 -2";
         WorkTimeline view = timeline(context, trace);
         layout(view);
-        assertEquals("only the edit row is in the timeline", 1, view.getChildCount());
+        assertEquals("plan call and edit both appear in the timeline", 2, view.getChildCount());
         List<String> shown = texts(view);
-        assertFalse(shown.toString(), shown.contains("任务计划"));
+        assertTrue(shown.toString(), shown.contains("更新任务计划") && shown.contains("已完成 1/2"));
         boolean chips = false;
         for (String text : shown) chips |= text.contains("+5") && text.contains("-2");
         assertTrue("edit row lacks the line counts: " + shown, chips);

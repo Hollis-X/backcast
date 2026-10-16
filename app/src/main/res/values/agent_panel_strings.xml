@@ -8,8 +8,7 @@
     <string name="agent_chat_hint">给子代理发消息</string>
     <string name="agent_chat_missing">子代理不存在</string>
     <string name="agent_chat_running">运行中</string>
-    <string name="agent_chat_idle">空闲</string>
-    <string name="agent_chat_failed">失败</string>
+    <string name="agent_chat_failed">异常停止</string>
     <string name="agent_chat_closed">已停止</string>
     <string name="agent_chat_send_failed">发送失败，详细原因已记录。</string>
 </resources>

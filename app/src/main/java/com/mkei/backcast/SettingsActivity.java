@@ -28,10 +28,19 @@ public final class SettingsActivity extends AppCompatActivity {
                 Icons.SETTINGS, 0xFF8E8E93, UserPreferencesActivity.class);
         entry(R.id.settings_tools_row, R.id.settings_tools_icon, R.id.settings_tools_arrow, Icons.TERMINAL, 0xFF1E8A4C, ToolConfigActivity.class);
         entry(R.id.settings_mcp_row, R.id.settings_mcp_icon, R.id.settings_mcp_arrow, Icons.FOLDER, 0xFF8A3FC2, McpConfigActivity.class);
+        entry(R.id.settings_background_row, R.id.settings_background_icon, R.id.settings_background_arrow,
+                Icons.PLAY, 0xFFE0A21B, null);
+        findViewById(R.id.settings_background_row).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { BackgroundAccess.show(SettingsActivity.this, false); }
+        });
     }
 
     @Override protected void onResume() {
         super.onResume();
+        boolean free = BackgroundAccess.unrestricted(this);
+        TextView background = (TextView) findViewById(R.id.settings_background_summary);
+        background.setText(free ? R.string.settings_background_on : R.string.settings_background_off);
+        background.setTextColor(free ? getResources().getColor(R.color.text_secondary) : 0xFFC2620E);
         Settings settings = new Settings(this);
         Settings.AiProfile active = settings.activeAiProfile();
         ((TextView) findViewById(R.id.settings_ai_summary)).setText(

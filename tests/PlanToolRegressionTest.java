@@ -38,19 +38,19 @@ public final class PlanToolRegressionTest {
         check("已完成 1/3".equals(view[0]) && view[1].equals("\u2713 读代码\n\u25cf 改代码\n\u25cb 跑测试"), "Checklist text is wrong: " + view[0] + " | " + view[1]);
         String[] partial = TurnTrace.planView("{\"items\":[{\"content\":\"读");
         check("正在整理计划".equals(partial[0]) && partial[1].length() == 0, "Half-streamed arguments were not handled");
-        // The folded row shows the latest progress without opening it; plan calls are not counted as tools
+        // The folded row counts plan calls like any other tool call; the card shows the latest plan
         TurnTrace trace = new TurnTrace();
         trace.appendThink("想一下"); trace.sealThink();
         trace.addStep("p1", TurnTrace.PLAN, plan("读代码", "in_progress", "改代码", "pending").toString());
         trace.addStep("r1", "read", "{}");
         trace.addStep("p2", TurnTrace.PLAN, plan("读代码", "completed", "改代码", "in_progress", "跑测试", "pending").toString());
         String caption = trace.activityCaption(0, trace.order.size());
-        check("思考 1 段 · 工具 1 次".equals(caption), "Plan calls leaked into the folded caption: " + caption);
+        check("思考 1 段 · 工具 3 次".equals(caption), "Plan calls were not counted in the folded caption: " + caption);
         check(trace.latestPlan().contains("跑测试"), "Latest plan was not the newest snapshot");
         TurnTrace onlyPlan = new TurnTrace();
         onlyPlan.addStep("p", TurnTrace.PLAN, plan("a", "pending").toString());
         TurnTrace.Range planRange = new TurnTrace.Range(onlyPlan, 0); planRange.end = 1;
-        check(!planRange.hasActivity(), "A plan-only range showed an empty activity row");
+        check(planRange.hasActivity(), "A plan-only range hid the plan call");
         // Line deltas from edit/write results are summed for the folded row
         TurnTrace edits = new TurnTrace();
         edits.addStep("e1", "edit", "{}"); edits.addStep("w1", "write", "{}"); edits.addStep("s1", "shell", "{}");

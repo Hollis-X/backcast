@@ -35,8 +35,6 @@ public final class WorkTimeline extends LinearLayout {
         List<TurnTrace.Piece> visible = new ArrayList<TurnTrace.Piece>();
         for (int i = start; i < end; i++) {
             TurnTrace.Piece piece = range.trace.order.get(i);
-            // 计划画在会话里的卡片上，时间线里不再出现。
-            if (piece.step != null && TurnTrace.PLAN.equals(piece.step.name)) continue;
             visible.add(piece);
         }
         int count = visible.size();
@@ -234,6 +232,8 @@ public final class WorkTimeline extends LinearLayout {
     }
 
     public static String command(TurnTrace.Step step) {
+        // 计划的完整清单画在会话卡片上，这里只写一句进度，不摊开原始 JSON。
+        if (TurnTrace.PLAN.equals(step.name)) return TurnTrace.planView(step.args)[0];
         try {
             JSONObject args = new JSONObject(step.args);
             return "shell".equals(step.name) ? args.optString("command", step.args)
@@ -242,7 +242,7 @@ public final class WorkTimeline extends LinearLayout {
     }
 
     public static String toolTitle(TurnTrace.Step step) {
-        if (TurnTrace.PLAN.equals(step.name)) return "任务计划";
+        if (TurnTrace.PLAN.equals(step.name)) return "更新任务计划";
         if (TurnTrace.ASK.equals(step.name)) return "询问用户";
         if ("shell".equals(step.name)) return "执行命令";
         if ("read".equals(step.name)) return "读取文件";

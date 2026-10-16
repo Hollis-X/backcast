@@ -2863,12 +2863,15 @@ public class AgentLoop {
         JSONArray all = tools.toSchema();
         // 创建子代理只属于获得派活授权的主会话；发消息不受限制，唤醒已完成的子代理由管理器检查授权。
         boolean delegating = delegationAllowed();
+        // 目标工具只在用户用 /goal 设了目标时出现；否则模型看到「目标」二字就会自己去查、去改，用户没要。
+        boolean goal = goalOpen();
         JSONArray allowed = new JSONArray();
         for (int i = 0; i < all.length(); i++) {
             JSONObject item = all.optJSONObject(i);
             JSONObject function = item == null ? null : item.optJSONObject("function");
             String name = function == null ? "" : function.optString("name", "");
             if ("spawn_agent".equals(name) && (delegationParent != null || !delegating)) continue;
+            if (!goal && ("update_goal".equals(name) || "get_goal".equals(name))) continue;
             allowed.put(item);
         }
         return allowed.length() == 0 ? null : allowed;

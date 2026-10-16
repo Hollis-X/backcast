@@ -155,6 +155,21 @@ public final class SubAgentTaskLifecycleRegressionTest {
         fixture.manager.close("main", id);
         check(fixture.manager.find(id).results.length() == 1, "Closing terminal instance deleted the result");
     }
+    static void userCanReopenAClosedChildButTheModelCannot() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.script = (f, record, messages, sink) -> text("first result");
+        String id = fixture.spawn(false); fixture.settled();
+        fixture.manager.close("main", id);
+        boolean rejected = false; try { fixture.manager.send("main", id, "model reuse", "task"); } catch (IllegalStateException expected) { rejected = true; }
+        check(rejected, "Model reopened a closed child");
+        rejected = false; try { fixture.manager.sendFromUser(id, "just a note", "message"); } catch (IllegalStateException expected) { rejected = true; }
+        check(rejected, "Ordinary user mail reopened a closed child");
+        fixture.script = (f, record, messages, sink) -> text("second result");
+        fixture.manager.sendFromUser(id, "user follow-up task", "task"); fixture.settled();
+        SubAgentManager.Record record = fixture.manager.find(id);
+        check(!SubAgentManager.CLOSED.equals(record.status) && record.results.length() == 2 && "second result".equals(record.result),
+                "User task did not reopen the closed child with its earlier result kept");
+    }
     static void reportsSeparateProgressPartialAndFinal() throws Exception {
         Fixture fixture = new Fixture();
         fixture.script = (f, record, messages, sink) -> {
@@ -554,7 +569,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
     public static void main(String[] args) throws Exception {
         String[] names = {"defaultSpawnIsIndependentAndCapturesParentConfiguration", "ordinaryMailNeverBecomesAnIdleTask",
                 "explicitTasksKeepEarlierResultsAndDistinctIds", "failedFollowupDoesNotEraseCompletedEvidence", "emptyFollowupCannotReuseAnOldAnswer",
-                "stoppedTaskPreservesPartialAndRejectsLateResurrection", "reportsSeparateProgressPartialAndFinal",
+                "stoppedTaskPreservesPartialAndRejectsLateResurrection", "userCanReopenAClosedChildButTheModelCannot", "reportsSeparateProgressPartialAndFinal",
                 "longStoppedAndFailedPartialIsDeliveredCompletely", "distinctLongFinalAndPartialStreamsBothReachTheParent",
                 "parentCheckpointPersistsChunksAndRestartSkipsOnlyKnownPieces", "parentPersistenceFailureNeverAcknowledgesCollectedEvidence",
                 "partialChunkCannotBeAcknowledgedAndRestartReplaysIt", "skippedResultRangesDoNotCountAsDelivered",

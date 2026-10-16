@@ -360,7 +360,14 @@ public final class SubAgentManager {
             boolean trustedRunningMessage = fromUser && ROOT.equals(owner) && !assignment && rootState.userRestartOnly
                     && slot.executing && !slot.stop;
             if (trustedRestart || trustedRunningMessage) requireSlot(owner); else requireOwner(owner);
-            if (CLOSED.equals(slot.task.status)) throw new IllegalStateException("子代理已关闭。");
+            if (CLOSED.equals(slot.task.status)) {
+                // 主会话关掉的子代理，用户在它的会话页里明确派新任务时可以重新打开，沿用原上下文。
+                if (!(fromUser && ROOT.equals(owner) && assignment)) throw new IllegalStateException("子代理已关闭。");
+                if (slot.executing) throw new IllegalStateException("子代理仍在停止，请等待清理完成后复用。");
+                int open = 0;
+                for (Slot other : slots.values()) if (!ROOT.equals(other.task.id) && !CLOSED.equals(other.task.status)) open++;
+                if (open >= MAX_AGENTS) throw new IllegalStateException("子 agent 数量已达上限，请先关闭不再需要的子代理。");
+            }
             if (slot.stop && slot.executing) throw new IllegalStateException("子代理仍在停止，请等待清理完成后复用。");
             if (!assignment && (slot.stop || FAILED.equals(slot.task.status) || STOPPED.equals(slot.task.status)))
                 throw new IllegalStateException("任务已停止或失败。普通消息不会重新启动它；需明确派发新的 task。");

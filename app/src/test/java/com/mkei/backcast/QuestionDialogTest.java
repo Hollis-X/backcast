@@ -15,7 +15,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.CompoundButton;
 import android.widget.EditText;
-import androidx.appcompat.app.AlertDialog;
+import android.app.Dialog;
 import com.mkei.backcast.agent.QuestionRequest;
 import com.mkei.backcast.ui.QuestionDialog;
 import java.io.File;
@@ -81,24 +81,31 @@ public class QuestionDialogTest {
 
     private static void tap(CompoundButton button) { ((View) button.getParent()).performClick(); }
 
+    private static View tagged(Dialog dialog, String tag) {
+        java.util.ArrayList<View> found = new java.util.ArrayList<View>();
+        dialog.getWindow().getDecorView().findViewsWithText(found, tag, View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION);
+        return found.get(0);
+    }
+
     @Test
     public void answersNeedEveryQuestionAndComeBackAsLabels() throws Exception {
         QuestionRequest request = sample();
-        QuestionDialog.show(open(), request);
-        AlertDialog dialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        QuestionDialog.show(open(), request); ShadowLooper.idleMainLooper();
+        Dialog dialog = ShadowDialog.getLatestDialog();
         assertNotNull(dialog);
         assertTrue(dialog.isShowing());
         View root = dialog.getWindow().getDecorView();
         List<CompoundButton> options = buttons(root);
         assertEquals(5, options.size());
-        assertFalse("OK must wait for every answer", dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
+        assertEquals("1/2", ((android.widget.TextView) ((ViewGroup) tagged(dialog, QuestionDialog.PREV).getParent()).getChildAt(2)).getText().toString());
+        assertFalse("OK must wait for every answer", tagged(dialog, QuestionDialog.OK).isEnabled());
         tap(options.get(1));                       // single choice: second option
         tap(options.get(0));                       // switching replaces the first choice
         assertTrue(options.get(0).isChecked() && !options.get(1).isChecked());
-        assertFalse(dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
+        assertFalse(tagged(dialog, QuestionDialog.OK).isEnabled());
         tap(options.get(2)); tap(options.get(4));  // multi choice: two of three
-        assertTrue(dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertTrue(tagged(dialog, QuestionDialog.OK).isEnabled());
+        tagged(dialog, QuestionDialog.OK).performClick();
         ShadowLooper.idleMainLooper();
         assertTrue(request.finished());
         JSONObject answers = request.await();
@@ -110,8 +117,8 @@ public class QuestionDialogTest {
     @Test
     public void typedAnswerReplacesTheSingleChoiceAndSkipCancels() throws Exception {
         QuestionRequest request = sample();
-        QuestionDialog.show(open(), request);
-        AlertDialog dialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        QuestionDialog.show(open(), request); ShadowLooper.idleMainLooper();
+        Dialog dialog = ShadowDialog.getLatestDialog();
         View root = dialog.getWindow().getDecorView();
         List<CompoundButton> options = buttons(root);
         List<EditText> typed = inputs(root);
@@ -119,16 +126,16 @@ public class QuestionDialogTest {
         typed.get(0).setText("两边一起改");
         assertFalse("typing replaces the chosen option", options.get(0).isChecked());
         typed.get(1).setText("只要冒烟测试");
-        assertTrue(dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        assertTrue(tagged(dialog, QuestionDialog.OK).isEnabled());
+        tagged(dialog, QuestionDialog.OK).performClick();
         JSONObject answers = request.await();
         assertEquals("两边一起改", answers.getString("先改哪一块？"));
         assertEquals("只要冒烟测试", answers.getString("要补哪些测试？"));
 
         QuestionRequest skipped = sample();
-        QuestionDialog.show(open(), skipped);
-        AlertDialog second = (AlertDialog) ShadowDialog.getLatestDialog();
-        second.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+        QuestionDialog.show(open(), skipped); ShadowLooper.idleMainLooper();
+        Dialog second = ShadowDialog.getLatestDialog();
+        tagged(second, QuestionDialog.SKIP).performClick();
         ShadowLooper.idleMainLooper();
         assertTrue(skipped.cancelled());
         assertNull(skipped.await());
@@ -138,8 +145,8 @@ public class QuestionDialogTest {
     @Test
     public void cancellingTheRequestClosesTheDialog() throws Exception {
         QuestionRequest request = sample();
-        QuestionDialog.show(open(), request);
-        AlertDialog dialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        QuestionDialog.show(open(), request); ShadowLooper.idleMainLooper();
+        Dialog dialog = ShadowDialog.getLatestDialog();
         assertTrue(dialog.isShowing());
         request.cancel();           // what the stop button does to a waiting tool
         ShadowLooper.idleMainLooper();
@@ -152,10 +159,12 @@ public class QuestionDialogTest {
         String dir = System.getenv("BACKCAST_SCREENSHOTS");
         if (dir == null || dir.length() == 0) return;
         QuestionRequest request = sample();
-        QuestionDialog.show(open(), request);
-        AlertDialog dialog = (AlertDialog) ShadowDialog.getLatestDialog();
+        QuestionDialog.show(open(), request); ShadowLooper.idleMainLooper();
+        Dialog dialog = ShadowDialog.getLatestDialog();
         List<CompoundButton> options = buttons(dialog.getWindow().getDecorView());
         tap(options.get(0)); tap(options.get(3));
+        ShadowLooper.idleMainLooper();
+        tagged(dialog, QuestionDialog.PREV).performClick();
         ShadowLooper.idleMainLooper();
         View decor = dialog.getWindow().getDecorView();
         int width = Math.round(380 * RuntimeEnvironment.getApplication().getResources().getDisplayMetrics().density);

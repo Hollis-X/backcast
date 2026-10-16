@@ -25,12 +25,11 @@ import org.json.JSONObject;
 /** 本会话的子代理：只列名字和图标，点进去就是和主会话一样的会话页。 */
 public final class SubAgentsActivity extends AppCompatActivity {
     public static final String EXTRA_SESSION_ID = "session_id";
-    /** 图标按名字取，同一个子代理每次进来都是同一个。 */
-    private static final String[] GLYPHS = { "◆", "▲", "●", "★", "✦", "♣", "♠", "✿", "■", "♥" };
-    private static final int[][] TONES = {
-            { 0xFFE3ECFD, 0xFF2E6BE6 }, { 0xFFE4F5EA, 0xFF1E8A4C }, { 0xFFFDECDD, 0xFFC2620E },
-            { 0xFFF3E6FB, 0xFF8A3FC2 }, { 0xFFFCE4E8, 0xFFC23A55 }, { 0xFFE2F4F6, 0xFF14818F },
-            { 0xFFF8F1D8, 0xFF9A7400 }, { 0xFFECECEF, 0xFF4A4A52 } };
+    /** 图标用彩色表情，按名字固定取一个，比几何符号更像「图标」，也更好区分。 */
+    private static final String[] GLYPHS = { "\uD83E\uDD8A", "\uD83D\uDC19", "\uD83E\uDD89", "\uD83D\uDC1D", "\uD83D\uDC22",
+            "\uD83E\uDD84", "\uD83D\uDC33", "\uD83D\uDC27", "\uD83E\uDD8B", "\uD83C\uDF35", "\uD83D\uDC3C", "\uD83E\uDD80",
+            "\uD83D\uDC28", "\uD83E\uDD94", "\uD83D\uDC38", "\uD83E\uDD9C" };
+    private static final int[] TONES = { 0xFFE3ECFD, 0xFFE4F5EA, 0xFFFDECDD, 0xFFF3E6FB, 0xFFFCE4E8, 0xFFE2F4F6, 0xFFF8F1D8, 0xFFECECEF };
     private final ExecutorService reader = Executors.newSingleThreadExecutor();
     private long sessionId;
     private LinearLayout body;
@@ -124,15 +123,14 @@ public final class SubAgentsActivity extends AppCompatActivity {
         getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
         item.setBackgroundResource(ripple.resourceId);
         int seed = (row.name.length() == 0 ? row.id : row.name).hashCode() & 0x7fffffff;
-        int[] tone = TONES[seed % TONES.length];
+        int tone = TONES[seed % TONES.length];
         TextView icon = new TextView(this);
         icon.setText(GLYPHS[(Integer.reverse(seed) >>> 1) % GLYPHS.length]);
-        icon.setTextSize(15);
-        icon.setTextColor(tone[1]);
+        icon.setTextSize(18);
         icon.setGravity(Gravity.CENTER);
         GradientDrawable circle = new GradientDrawable();
         circle.setShape(GradientDrawable.OVAL);
-        circle.setColor(tone[0]);
+        circle.setColor(tone);
         icon.setBackground(circle);
         item.addView(icon, new LinearLayout.LayoutParams(dp(36), dp(36)));
         TextView name = new TextView(this);
