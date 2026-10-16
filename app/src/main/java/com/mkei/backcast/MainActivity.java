@@ -217,11 +217,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private String childId = "";
     private String childRendered = "";
     private boolean childBusy, childSending;
-    /** 子代理页的通信记录：最近一次读到的快照、面板是否开着、已展开全文的条目。 */
-    private org.json.JSONArray childComms = new org.json.JSONArray();
-    private String commRendered = "";
-    private int commSheetToken = -1;
-    private final java.util.Set<String> commExpanded = new java.util.HashSet<String>();
+    /**
+     * 子代理页的通信记录，渲染对话前按收件 mailId、派活 taskId、发出的原文建索引，
+     * 画到对应的协作消息、派活气泡和 send_message / report_agent 调用时取出来，穿插在发生的位置。
+     */
+    private final java.util.Map<String, org.json.JSONObject> commIncoming = new java.util.HashMap<String, org.json.JSONObject>();
+    private final java.util.Map<String, org.json.JSONObject> commTasks = new java.util.HashMap<String, org.json.JSONObject>();
+    private final java.util.Map<String, java.util.ArrayDeque<org.json.JSONObject>> commOutgoing =
+            new java.util.HashMap<String, java.util.ArrayDeque<org.json.JSONObject>>();
     private final Runnable childPoll = new Runnable() {
         @Override public void run() { loadChild(); }
     };
@@ -2105,16 +2108,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         });
         View title = findViewById(R.id.title_chip);
         if (title != null) title.setOnClickListener(null);
-        // 右上角换成「通信记录」：和其他代理之间收发的全部消息、任务、汇报和结果。
-        TextView comms = (TextView) findViewById(R.id.action_more);
-        if (comms != null) {
-            mountIcon(comms, R.drawable.ic_mail);
-            comms.setContentDescription(getString(R.string.comm_title));
-            comms.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) { showCommSheet(); }
-            });
-        }
-        int[] hidden = { R.id.model_chip, R.id.access_chip, R.id.action_plus,
+        int[] hidden = { R.id.action_more, R.id.model_chip, R.id.access_chip, R.id.action_plus,
                 R.id.context_meter, R.id.goal_bar };
         for (int id : hidden) {
             View view = findViewById(id);
@@ -2170,18 +2164,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                             send.setEnabled(false);
                             return;
                         }
-                        showChild(row, page);
-                        childComms = log;
-                        if (commSheetOpen()) renderCommSheet(false);
-                        // 运行中或通信面板开着时每秒刷新；空闲时也慢慢看，别的代理发来消息、对方读到回执都能跟上。
-                        if (slashResumed) stream.postDelayed(childPoll, childBusy || commSheetOpen() ? 1000L : 3000L);
+                        showChild(row, page, log);
+                        // 运行中每秒刷新；空闲时也慢慢看，别的代理发来消息、对方读到的回执都能跟上。
+                        if (slashResumed) stream.postDelayed(childPoll, childBusy ? 1000L : 3000L);
                     }
                 });
             }
         });
     }
 
-    private void showChild(SubAgentManager.Record row, List<Message> messages) {
+    private void showChild(SubAgentManager.Record row, List<Message> messages, org.json.JSONArray comms) {
         childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status);
         sessionTitle.setText(row.name);
         bindChildStatus(row);
@@ -2189,9 +2181,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         prompt.setEnabled(true);
         send.setEnabled(!childSending);
         setBusy(childBusy);
-        String signature = row.id + ":" + row.revision + ":" + messages.size() + ":" + row.status;
+        // 通信状态（对方读没读到）变了也要重画，所以把通信记录算进签名。
+        String signature = row.id + ":" + row.revision + ":" + messages.size() + ":" + row.status
+                + ":" + comms.toString().hashCode();
         if (signature.equals(childRendered)) return;
         childRendered = signature;
+        indexComms(comms);
         historyToken++;
         final int token = historyToken;
         final boolean atEnd = followLatest || stuckAtEnd();
@@ -2214,71 +2209,98 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }, false);
     }
 
-    private boolean commSheetOpen() {
-        View overlay = findViewById(R.id.sheet_overlay);
-        return commSheetToken == sheetToken && !sheetClosing && overlay != null && overlay.getVisibility() == View.VISIBLE;
+    private void indexComms(org.json.JSONArray log) {
+        commIncoming.clear(); commTasks.clear(); commOutgoing.clear();
+        for (int i = 0; i < log.length(); i++) {
+            org.json.JSONObject event = log.optJSONObject(i);
+            if (event == null) continue;
+            String kind = event.optString("kind");
+            boolean outgoing = event.optBoolean("outgoing");
+            if (!outgoing && "task".equals(kind)) commTasks.put(event.optString("taskId"), event);
+            else if (!outgoing && event.optString("mailId").length() > 0) commIncoming.put(event.optString("mailId"), event);
+            else if (outgoing && !"final".equals(kind) && (event.optString("mailId").length() > 0 || "task".equals(kind))) {
+                String key = kind + "\n" + event.optString("text").trim();
+                java.util.ArrayDeque<org.json.JSONObject> queue = commOutgoing.get(key);
+                if (queue == null) commOutgoing.put(key, queue = new java.util.ArrayDeque<org.json.JSONObject>());
+                queue.add(event);
+            }
+        }
     }
 
-    private void showCommSheet() {
-        commRendered = "";
-        renderCommSheet(true);
-        // 刚打开就按快节奏刷新一次。
-        stream.removeCallbacks(childPoll);
-        stream.postDelayed(childPoll, 1000L);
+    /** 通信行放进当前这一轮的盒子里；之后再来的正文、思考和命令另起一段，排在它下面。 */
+    private void addInlineComm(LinearLayout rows, View view) {
+        Flow flow = flowOf(rows);
+        if (flow == null) {
+            host().addView(view, fullWidth());
+            return;
+        }
+        TurnTrace trace = traceOf(rows);
+        if (trace != null && trace.bodyAt < 0) trace.bodyAt = trace.order.size();
+        flow.box.addView(view, fullWidth());
+        flow.bodySeen = true;
+        flow.body = null;
+        flow.tail = null;
+        flow.activeRange = null;
     }
 
-    /**
-     * 通信记录面板：按时间先后列出这个子代理收到和发出的全部通信。
-     * open=false 是轮询刷新：内容没变不重画；变了就原地换掉，停在底部时继续贴底。
-     */
-    private void renderCommSheet(boolean open) {
-        final LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
-        if (body == null) return;
-        String signature = childComms.toString() + commExpanded;
-        if (!open && signature.equals(commRendered)) return;
-        commRendered = signature;
-        final ScrollView sheetScroll = (ScrollView) findViewById(R.id.sheet_scroll);
-        boolean atBottom = open || sheetScroll == null || body.getHeight() <= 0
-                || sheetScroll.getScrollY() + sheetScroll.getHeight() >= body.getHeight() - dp(24);
-        body.removeAllViews();
-        TextView title = new TextView(this);
-        title.setText(R.string.comm_title);
-        sheetTitle(title);
-        body.addView(title, fullWidth());
-        int incoming = 0, outgoing = 0;
-        for (int i = 0; i < childComms.length(); i++) {
-            if (childComms.optJSONObject(i) != null && childComms.optJSONObject(i).optBoolean("outgoing")) outgoing++;
-            else incoming++;
+    private String commParty(org.json.JSONObject event, String side, String fallback) {
+        if (event == null) return fallback;
+        String name = event.optString(side + "Name");
+        return name.length() == 0 ? fallback : name;
+    }
+
+    /** 收到的协作消息原本不进对话；子代理页把每一封画成「收到 xx 的消息」。 */
+    private void inlineIncoming(Message m, LinearLayout rows) {
+        org.json.JSONArray mail;
+        try {
+            org.json.JSONObject batch = new org.json.JSONObject(m.content.substring(m.content.lastIndexOf('\n') + 1));
+            mail = batch.optJSONArray("messages");
+            if (mail == null) mail = batch.optJSONArray("inbox");
+        } catch (Exception unreadable) {
+            return;
         }
-        TextView summary = new TextView(this);
-        summary.setText(childComms.length() == 0 ? getString(R.string.comm_empty)
-                : getString(R.string.comm_summary, childComms.length(), incoming, outgoing));
-        summary.setTextSize(14);
-        summary.setTextColor(M3.onSurfaceVariant);
-        summary.setPadding(dp(16), 0, dp(16), dp(12));
-        body.addView(summary, fullWidth());
-        for (int i = 0; i < childComms.length(); i++) {
-            org.json.JSONObject entry = childComms.optJSONObject(i);
-            if (entry == null) continue;
-            final String key = entry.optString("id", "#" + i);
-            View row = com.mkei.backcast.ui.AgentComms.row(this, entry, childId, commExpanded.contains(key),
-                    new View.OnClickListener() {
-                        @Override public void onClick(View v) {
-                            if (!commExpanded.remove(key)) commExpanded.add(key);
-                            renderCommSheet(false);
-                        }
-                    });
-            LinearLayout.LayoutParams lp = fullWidth();
-            lp.bottomMargin = dp(8);
-            body.addView(row, lp);
+        if (mail == null) return;
+        for (int i = 0; i < mail.length(); i++) {
+            org.json.JSONObject item = mail.optJSONObject(i);
+            if (item == null) continue;
+            org.json.JSONObject event = commIncoming.get(item.optString("id"));
+            String path = item.optString("fromPath", item.optString("from"));
+            String from = commParty(event, "from", path.substring(path.lastIndexOf('/') + 1));
+            String label = event != null && event.optBoolean("fromUser") ? getString(R.string.comm_received_user)
+                    : getString(R.string.comm_received, from);
+            addInlineComm(rows, com.mkei.backcast.ui.AgentComms.inline(this, label, event, item.optString("text")));
         }
-        if (open) {
-            showSheet();
-            commSheetToken = sheetToken;
-        }
-        if (atBottom && sheetScroll != null) sheetScroll.post(new Runnable() {
-            @Override public void run() { sheetScroll.fullScroll(View.FOCUS_DOWN); }
-        });
+    }
+
+    /** 同级子代理派来的任务：气泡上面加一行说明是谁派的（main 派的就是默认情况，不另加）。 */
+    private void inlineTaskSource(Message m) {
+        org.json.JSONObject event = m.agentTaskId == null ? null : commTasks.get(m.agentTaskId);
+        if (event == null || event.optBoolean("fromUser") || SubAgentManager.ROOT.equals(event.optString("from"))) return;
+        host().addView(com.mkei.backcast.ui.AgentComms.inline(this,
+                getString(R.string.comm_task_from, commParty(event, "from", event.optString("from"))), event, ""), fullWidth());
+    }
+
+    /** 子代理调用 send_message / report_agent 后，在命令下面画一行「已向 xx 发送消息」。 */
+    private void inlineOutgoing(LinearLayout rows, String name, String arguments) {
+        if (!childMode || !("send_message".equals(name) || "report_agent".equals(name))) return;
+        org.json.JSONObject args;
+        try { args = new org.json.JSONObject(arguments); } catch (Exception partial) { return; }
+        boolean report = "report_agent".equals(name);
+        String kind = report ? args.optString("kind", "progress") : "message";
+        String text = (report ? args.optString("text") : args.optString("message")).trim();
+        if (text.length() == 0) return;
+        org.json.JSONObject event = takeOutgoing(kind, text);
+        if (event == null && !report) event = takeOutgoing("task", text);
+        String to = commParty(event, "to", report ? SubAgentManager.ROOT : args.optString("target"));
+        int label = !report ? (event != null && "task".equals(event.optString("kind")) ? R.string.comm_sent_task : R.string.comm_sent)
+                : "partial".equals(kind) ? R.string.comm_report_partial
+                : "error".equals(kind) ? R.string.comm_report_error : R.string.comm_report_progress;
+        addInlineComm(rows, com.mkei.backcast.ui.AgentComms.inline(this, getString(label, to), event, text));
+    }
+
+    private org.json.JSONObject takeOutgoing(String kind, String text) {
+        java.util.ArrayDeque<org.json.JSONObject> queue = commOutgoing.get(kind + "\n" + text);
+        return queue == null ? null : queue.poll();
     }
 
     /**
@@ -4934,6 +4956,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             if (Message.USER.equals(m.role)) {
                 if (Goal.isSteer(m.content) || Goal.isNote(m.content)) {
                     // 续跑不是用户新说的话：不画进对话，也不继承上一句的披露请求。
+                    // 子代理页例外：别的代理发来的协作消息按时间画成「收到 xx 的消息」。
+                    if (childMode && Message.isCoordination(m.content)) inlineIncoming(m, rows);
                     request = "";
                     continue;
                 }
@@ -4943,6 +4967,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 rendered = 0;
                 request = m.content;
                 original = m;
+                if (childMode && m.delegatedRequest != null) inlineTaskSource(m);
                 addUserBubble(m);
             } else if (Message.ASSISTANT.equals(m.role)) {
                 String content = PromptGuard.redact(m.content, settings.systemPrompt(),
@@ -5002,6 +5027,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                             String name = fn == null ? "tool" : fn.optString("name", "tool");
                             String args = fn == null ? "" : fn.optString("arguments", "");
                             turn.addStep(call.optString("id", ""), name, args);
+                            rendered = appendFoldRows(rows, turn, rendered);
+                            inlineOutgoing(rows, name, args);
                         }
                     }
                     rendered = appendFoldRows(rows, turn, rendered);
@@ -5049,6 +5076,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                         fn == null ? "tool" : fn.optString("name", "tool"),
                         fn == null ? "" : fn.optString("arguments", ""));
                 rendered = appendFoldRows(rows, turn, rendered);
+                if (fn != null) inlineOutgoing(rows, fn.optString("name", "tool"), fn.optString("arguments", ""));
             }
         }
         turn.sealThink();

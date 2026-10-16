@@ -1,7 +1,6 @@
 package com.mkei.backcast;
 
 import android.content.Intent;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -13,7 +12,6 @@ import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.agent.AgentLoop;
 import com.mkei.backcast.agent.SubAgentManager;
-import com.mkei.backcast.ui.AgentComms;
 import com.mkei.backcast.ui.AgentPanelState;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.M3;
@@ -25,8 +23,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 本会话的子代理：每个一张 M3 卡片，头像、名字和路径、状态标签、当前进度或任务、通信条数和最近活动时间；
- * 点进去就是和主会话一样的会话页。
+ * 本会话的子代理：只列图标和名字（M3 分段列表）。状态、任务和通信都在点进去的会话页里看，
+ * 那里和主会话一样的界面，收发的消息按时间穿插在对话中。
  */
 public final class SubAgentsActivity extends AppCompatActivity {
     public static final String EXTRA_SESSION_ID = "session_id";
@@ -70,7 +68,6 @@ public final class SubAgentsActivity extends AppCompatActivity {
         reader.execute(new Runnable() {
             @Override public void run() {
                 final List<SubAgentManager.Record> records = new ArrayList<SubAgentManager.Record>();
-                final java.util.Map<String, Integer> comms = new java.util.HashMap<String, Integer>();
                 boolean active = false;
                 try {
                     AgentLoop root = sessionId < 0 ? null : hub.existingSession(sessionId);
@@ -85,10 +82,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
                             cursor = snapshot.isNull("nextCursor") ? -1 : snapshot.getInt("nextCursor");
                         } while (cursor >= 0);
                     }
-                    for (SubAgentManager.Record row : records) {
-                        if (AgentPanelState.active(row.status)) active = true;
-                        if (manager != null) comms.put(row.id, Integer.valueOf(manager.communications(row.id).length()));
-                    }
+                    for (SubAgentManager.Record row : records) if (AgentPanelState.active(row.status)) active = true;
                 } catch (Exception ignored) {
                     // 读不到就显示空列表，下次进来再读。
                 }
@@ -96,7 +90,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (destroyed || isFinishing()) return;
-                        render(AgentPanelState.ordered(records), comms);
+                        render(AgentPanelState.ordered(records));
                         // 运行中的子代理可能刚派出来新的，列表跟着刷新。
                         if (resumed && polling) body.postDelayed(poll, 1500L);
                     }
@@ -105,11 +99,9 @@ public final class SubAgentsActivity extends AppCompatActivity {
         });
     }
 
-    private void render(List<SubAgentManager.Record> rows, java.util.Map<String, Integer> comms) {
+    private void render(List<SubAgentManager.Record> rows) {
         StringBuilder signature = new StringBuilder();
-        for (SubAgentManager.Record row : rows) signature.append(row.id).append('\n').append(row.name).append('\n')
-                .append(row.status).append(row.phase).append('\n').append(row.progress).append('\n')
-                .append(row.lastActivityAt).append(':').append(comms.get(row.id)).append('\n');
+        for (SubAgentManager.Record row : rows) signature.append(row.id).append('\n').append(row.name).append('\n');
         if (signature.toString().equals(rendered) && body.getChildCount() > 0) return;
         rendered = signature.toString();
         body.removeAllViews();
@@ -123,122 +115,50 @@ public final class SubAgentsActivity extends AppCompatActivity {
             body.addView(empty, new LinearLayout.LayoutParams(-1, -2));
             return;
         }
-        int running = 0;
-        for (SubAgentManager.Record row : rows) if (AgentPanelState.active(row.status)) running++;
-        TextView summary = new TextView(this);
-        summary.setText(getString(R.string.agent_panel_summary, rows.size(), running));
-        summary.setTextSize(14);
-        summary.setTextColor(M3.primary);
-        summary.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        summary.setPadding(dp(4), dp(8), dp(4), dp(12));
-        body.addView(summary, new LinearLayout.LayoutParams(-1, -2));
-        for (SubAgentManager.Record row : rows) {
-            Integer count = comms.get(row.id);
+        for (int i = 0; i < rows.size(); i++) {
+            // M3 分段列表：首尾大圆角，中间小圆角，行间 2dp 缝。
+            float top = dp(i == 0 ? M3.L : M3.XS), bottom = dp(i == rows.size() - 1 ? M3.L : M3.XS);
+            View item = item(rows.get(i), new float[] { top, top, top, top, bottom, bottom, bottom, bottom });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.bottomMargin = dp(8);
-            body.addView(item(row, count == null ? 0 : count.intValue()), lp);
+            lp.bottomMargin = dp(2);
+            body.addView(item, lp);
         }
     }
 
-    /** 一张子代理卡片：surfaceContainer 填充、16dp 圆角，按下出现状态层。 */
-    private View item(final SubAgentManager.Record row, int comms) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(16), dp(16), dp(14));
-        card.setBackground(M3.ripple(M3.fill(M3.container, dp(M3.L)), M3.onSurface, dp(M3.L)));
-        card.setClickable(true);
-        card.setContentDescription(row.name);
-
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
+    /** 一行：圆角方形头像（统一的矢量图标，底色按名字固定）加名字。 */
+    private View item(final SubAgentManager.Record row, float[] corners) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.HORIZONTAL);
+        item.setGravity(Gravity.CENTER_VERTICAL);
+        item.setPadding(dp(16), dp(12), dp(16), dp(12));
+        item.setMinimumHeight(dp(64));
+        android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
+        shape.setColor(M3.container);
+        shape.setCornerRadii(corners);
+        android.graphics.drawable.GradientDrawable mask = new android.graphics.drawable.GradientDrawable();
+        mask.setColor(0xFFFFFFFF);
+        mask.setCornerRadii(corners);
+        item.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(M3.alpha(M3.onSurface, 0.1f)), shape, mask));
+        item.setClickable(true);
+        item.setContentDescription(row.name);
         int seed = (row.name.length() == 0 ? row.id : row.name).hashCode() & 0x7fffffff;
         int[] tone = tones()[seed % tones().length];
         ImageView avatar = new ImageView(this);
         avatar.setImageDrawable(Icons.tinted(this, R.drawable.ic_agent, tone[1], dp(22)));
         avatar.setScaleType(ImageView.ScaleType.CENTER);
         avatar.setBackground(M3.fill(tone[0], dp(M3.M)));
-        head.addView(avatar, new LinearLayout.LayoutParams(dp(40), dp(40)));
-
-        LinearLayout names = new LinearLayout(this);
-        names.setOrientation(LinearLayout.VERTICAL);
+        item.addView(avatar, new LinearLayout.LayoutParams(dp(40), dp(40)));
         TextView name = new TextView(this);
         name.setText(row.name);
         name.setTextSize(16);
         name.setTextColor(M3.onSurface);
-        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
-        names.addView(name);
-        if (row.path.length() > 0) {
-            TextView path = new TextView(this);
-            path.setText(row.path);
-            path.setTextSize(12);
-            path.setTextColor(M3.onSurfaceVariant);
-            path.setSingleLine(true);
-            path.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-            path.setPadding(0, dp(2), 0, 0);
-            names.addView(path);
-        }
-        LinearLayout.LayoutParams namesLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        namesLp.leftMargin = dp(16);
-        namesLp.rightMargin = dp(8);
-        head.addView(names, namesLp);
-        head.addView(AgentComms.chip(this, AgentComms.stateColor(row.status, row.phase),
-                getString(AgentComms.stateLabel(row.status, row.phase)), SubAgentManager.RUNNING.equals(row.status)));
-        card.addView(head);
-
-        // 运行中写当前进度，其余写分到的任务；都没有就不占这一行。
-        String detail = AgentPanelState.active(row.status) && row.progress.trim().length() > 0 ? row.progress : row.task;
-        detail = detail == null ? "" : detail.trim().replace('\n', ' ');
-        if (detail.length() > 0) {
-            TextView task = new TextView(this);
-            task.setText(detail);
-            task.setTextSize(14);
-            task.setTextColor(M3.onSurfaceVariant);
-            task.setLineSpacing(dp(2), 1f);
-            task.setMaxLines(2);
-            task.setEllipsize(TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.topMargin = dp(12);
-            card.addView(task, lp);
-        }
-
-        View line = new View(this);
-        line.setBackgroundColor(M3.outlineVariant);
-        LinearLayout.LayoutParams lineLp = new LinearLayout.LayoutParams(-1, 1);
-        lineLp.topMargin = dp(12);
-        card.addView(line, lineLp);
-        LinearLayout meta = new LinearLayout(this);
-        meta.setOrientation(LinearLayout.HORIZONTAL);
-        meta.setGravity(Gravity.CENTER_VERTICAL);
-        ImageView mail = new ImageView(this);
-        mail.setImageDrawable(Icons.tinted(this, R.drawable.ic_mail, M3.onSurfaceVariant, dp(16)));
-        meta.addView(mail, new LinearLayout.LayoutParams(dp(16), dp(16)));
-        TextView count = new TextView(this);
-        count.setText(comms == 0 ? getString(R.string.agent_meta_no_comms) : getString(R.string.agent_meta_comms, comms));
-        count.setTextSize(12);
-        count.setTextColor(M3.onSurfaceVariant);
-        LinearLayout.LayoutParams countLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        countLp.leftMargin = dp(6);
-        meta.addView(count, countLp);
-        if (row.lastActivityAt > 0) {
-            TextView when = new TextView(this);
-            when.setText(AgentComms.ago(this, row.lastActivityAt));
-            when.setTextSize(12);
-            when.setTextColor(M3.onSurfaceVariant);
-            meta.addView(when);
-        }
-        ImageView chevron = new ImageView(this);
-        chevron.setImageDrawable(Icons.tinted(this, Icons.CHEVRON_RIGHT, M3.onSurfaceVariant, dp(18)));
-        LinearLayout.LayoutParams chevronLp = new LinearLayout.LayoutParams(dp(18), dp(18));
-        chevronLp.leftMargin = dp(4);
-        meta.addView(chevron, chevronLp);
-        LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-1, -2);
-        metaLp.topMargin = dp(10);
-        card.addView(meta, metaLp);
-
-        card.setOnClickListener(new View.OnClickListener() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp.leftMargin = dp(16);
+        item.addView(name, lp);
+        item.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) {
                 Intent intent = new Intent(SubAgentsActivity.this, SubAgentChatActivity.class);
                 intent.putExtra(MainActivity.EXTRA_AGENT_ROOT, sessionId);
@@ -246,7 +166,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
                 startActivity(intent);
             }
         });
-        return card;
+        return item;
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }

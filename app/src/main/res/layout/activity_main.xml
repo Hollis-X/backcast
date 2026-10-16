@@ -294,53 +294,70 @@
                     android:text=""
                     android:textColor="@color/text_primary"/>
 
-                <LinearLayout
-                    android:id="@+id/model_chip"
-                    android:layout_width="wrap_content"
-                    android:layout_height="32dp"
-                    android:layout_marginLeft="4dp"
-                    android:background="@drawable/bg_chip_outlined"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
-                    android:paddingLeft="12dp"
-                    android:paddingRight="8dp">
-
-                    <TextView
-                        android:id="@+id/model_chip_text"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:ellipsize="end"
-                        android:maxWidth="148dp"
-                        android:maxLines="1"
-                        android:includeFontPadding="false"
-                        android:text="@string/status_no_model"
-                        android:textColor="@color/md_on_surface_variant"
-                        android:fontFamily="sans-serif-medium"
-                        android:textSize="14sp"/>
-
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/access_chip"
-                    android:layout_width="wrap_content"
-                    android:layout_height="32dp"
-                    android:layout_marginLeft="8dp"
-                    android:background="@drawable/bg_chip_warning"
-                    android:drawableStart="@drawable/ic_warning"
-                    android:drawablePadding="6dp"
-                    android:gravity="center_vertical"
-                    android:includeFontPadding="false"
-                    android:paddingLeft="8dp"
-                    android:paddingRight="8dp"
-                    android:text="@string/access_full"
-                    android:textColor="@color/md_warning"
-                    android:fontFamily="sans-serif-medium"
-                    android:textSize="14sp"/>
-
-                <View
+                <!--
+                  两个芯片放进占满剩余宽度的格子里，里面这一行按内容收缩：
+                  放不下时只压窄模型芯片（文字省略），权限芯片和发送键保持原样，不会被挤变形。
+                -->
+                <FrameLayout
                     android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1"/>
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:layout_marginLeft="4dp"
+                    android:layout_marginRight="8dp">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:layout_gravity="start|center_vertical"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <LinearLayout
+                            android:id="@+id/model_chip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="32dp"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_chip_outlined"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingLeft="12dp"
+                            android:paddingRight="8dp">
+
+                            <TextView
+                                android:id="@+id/model_chip_text"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:ellipsize="end"
+                                android:maxWidth="148dp"
+                                android:maxLines="1"
+                                android:includeFontPadding="false"
+                                android:text="@string/status_no_model"
+                                android:textColor="@color/md_on_surface_variant"
+                                android:fontFamily="sans-serif-medium"
+                                android:textSize="14sp"/>
+
+                        </LinearLayout>
+
+                        <TextView
+                            android:id="@+id/access_chip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="32dp"
+                            android:layout_marginLeft="4dp"
+                            android:background="@drawable/bg_chip_warning"
+                            android:drawableStart="@drawable/ic_warning"
+                            android:drawablePadding="6dp"
+                            android:gravity="center_vertical"
+                            android:includeFontPadding="false"
+                            android:paddingLeft="8dp"
+                            android:paddingRight="8dp"
+                            android:text="@string/access_full"
+                            android:textColor="@color/md_warning"
+                            android:fontFamily="sans-serif-medium"
+                            android:textSize="14sp"/>
+
+                    </LinearLayout>
+
+                </FrameLayout>
 
                 <FrameLayout
                     android:layout_width="40dp"

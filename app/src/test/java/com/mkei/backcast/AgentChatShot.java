@@ -62,6 +62,13 @@ public class AgentChatShot {
         }
     }
 
+    private static Message coordination(String id, String from, String path, String text) throws Exception {
+        Message note = Message.user(Message.COORDINATION_PREFIX + "同会话协作消息如下。\n" + new JSONObject().put("messages",
+                new JSONArray().put(new JSONObject().put("id", id).put("from", from).put("fromPath", path).put("text", text))));
+        note.coordinationIds = new JSONArray().put(id);
+        return note;
+    }
+
     private static JSONObject event(String id, String kind, String from, String to, String text, long at) throws Exception {
         return new JSONObject().put("id", id).put("kind", kind).put("from", from).put("to", to).put("text", text)
                 .put("createdAt", at);
@@ -96,6 +103,16 @@ public class AgentChatShot {
         a1.reasoning = "先运行脚本看看输出。";
         history.put(a1.toCheckpointJson());
         history.put(Message.toolResult("t1", "1. 写项目文档\n2. 已完成\n3. 备份工作目录").toCheckpointJson());
+        // 子代理 → main 的进度汇报、同级发来的消息、发给同级的消息、用户从子代理页发的消息，按发生顺序在对话里。
+        history.put(Message.assistant("", call("t2", "report_agent",
+                "{\"kind\":\"progress\",\"text\":\"已运行 show.sh，输出 3 行，正在核对第 2 条的格式。\"}")).toCheckpointJson());
+        history.put(Message.toolResult("t2", "{\"saved\":true}").toCheckpointJson());
+        history.put(coordination("m2", "a2", "/main/script_reviewer",
+                "show.sh 第 2 行的「已完成」标记要和 todo.txt 一致，麻烦确认一下。").toCheckpointJson());
+        history.put(Message.assistant("", call("t3", "send_message",
+                "{\"target\":\"script_reviewer\",\"message\":\"已确认：两边都是「已完成」，格式一致。\"}")).toCheckpointJson());
+        history.put(Message.toolResult("t3", "{\"status\":\"idle\"}").toCheckpointJson());
+        history.put(coordination("m4", "main", "/main", "也顺便看一下 README 里的用法说明。").toCheckpointJson());
         Message fin = Message.assistant("检查完毕：todo.txt 有 3 条，show.sh 输出正确，第 2 条已标记「已完成」。", null);
         history.put(fin.toCheckpointJson());
         checker.history = history;
@@ -127,9 +144,6 @@ public class AgentChatShot {
         shoot(Robolectric.buildActivity(SubAgentsActivity.class, list).setup().get(), dir, "21-agent-list" + suffix + ".png");
         Intent chat = new Intent(app, SubAgentChatActivity.class)
                 .putExtra(MainActivity.EXTRA_AGENT_ROOT, sid).putExtra(MainActivity.EXTRA_AGENT_ID, "a1");
-        Activity page = Robolectric.buildActivity(SubAgentChatActivity.class, chat).setup().get();
-        shoot(page, dir, "22-agent-chat" + suffix + ".png");
-        page.findViewById(R.id.action_more).performClick();
-        shoot(page, dir, "24-agent-comm" + suffix + ".png");
+        shoot(Robolectric.buildActivity(SubAgentChatActivity.class, chat).setup().get(), dir, "22-agent-chat" + suffix + ".png");
     }
 }
