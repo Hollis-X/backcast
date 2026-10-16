@@ -4408,11 +4408,33 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             return;
         }
         if (card == null) {
-            // 紧跟在“工作了”折叠行下面，之后正文和工具都排在它后面，不再挪动。
+            // 哪一段第一次调用了计划，卡片就画在那一段折叠行下面；之后的更新原地刷新，不再挪动。
+            View anchor = planAnchor(flow, trace);
+            if (anchor == null) return;
             card = new PlanCard(this);
-            flow.box.addView(card, flow.box.indexOfChild(flow.rows) + 1, PlanCard.layout(this));
+            flow.box.addView(card, flow.box.indexOfChild(anchor) + 1, PlanCard.layout(this));
         }
         card.bind(plan, trace == currentTrace && loop != null && loop.busy());
+    }
+
+    /** 找到包含第一次计划调用的折叠行（第一段或正文之后的某一段）。还没画出来就返回 null，下次刷新再放。 */
+    private View planAnchor(Flow flow, TurnTrace trace) {
+        int at = -1;
+        for (int i = 0; i < trace.order.size(); i++) {
+            TurnTrace.Step step = trace.order.get(i).step;
+            if (step != null && TurnTrace.PLAN.equals(step.name)) { at = i; break; }
+        }
+        if (at < 0) return null;
+        for (int i = 0; i < flow.box.getChildCount(); i++) {
+            View child = flow.box.getChildAt(i);
+            Object tag = child == flow.box.getChildAt(0) ? null : child.getTag();
+            if (child == flow.rows) tag = flow.rows.getTag();
+            if (tag instanceof TurnTrace.Range) {
+                TurnTrace.Range range = (TurnTrace.Range) tag;
+                if (range.start <= at && at < range.end) return child;
+            }
+        }
+        return null;
     }
 
     private void refreshFoldResults(LinearLayout rows) {
