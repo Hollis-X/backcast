@@ -413,6 +413,105 @@ public final class SubAgentCommunicationRegressionTest {
         } finally { f.toolRelease.countDown(); f.cleanupRelease.countDown(); f.manager.cancelAll(); }
     }
 
+    private static void awaitStatus(Fixture f, String id, String status) throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (!status.equals(f.manager.find(id).status)) {
+            check(System.currentTimeMillis() < deadline, "Agent did not reach " + status + ": " + f.manager.find(id).status);
+            Thread.sleep(20);
+        }
+    }
+
+    private static JSONObject entry(JSONArray log, String kind, String text) throws Exception {
+        JSONObject found = null;
+        for (int i = 0; i < log.length(); i++) {
+            JSONObject item = log.getJSONObject(i);
+            if (kind.equals(item.getString("kind")) && item.getString("text").contains(text)) {
+                check(found == null, "Communication logged twice: " + kind + " " + text);
+                found = item;
+            }
+        }
+        check(found != null, "Communication missing: " + kind + " " + text + " in " + log);
+        return found;
+    }
+
+    private static void communicationLogCoversEveryDirectionOnce() throws Exception {
+        final Fixture f = new Fixture(); f.holdTool = true;
+        f.script = new Script() {
+            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn, List<Message> messages) throws Exception {
+                if ("reporter".equals(task.name)) {
+                    if (turn == 1) return call("report_agent", new JSONObject().put("kind", "progress").put("text", "half of the files checked"));
+                    if (turn == 2) return call("probe", new JSONObject());
+                    return text("reporter finished");
+                }
+                return text(task.name + " finished");
+            }
+        };
+        String reporter = f.spawn("reporter", "check every file and report midway", false);
+        String peer = f.spawn("peer", "stand by for questions", false);
+        try {
+            await(f.toolStarted);
+            awaitStatus(f, peer, SubAgentManager.IDLE);
+            f.manager.send("main", reporter, "main to reporter: also check docs", "message");
+            f.manager.send(peer, reporter, "peer to reporter: docs are in /docs", "message");
+            f.manager.send(reporter, peer, "reporter to peer: thanks", "message");
+            f.manager.send(reporter, "main", "reporter to main: docs found", "message");
+        } finally { f.toolRelease.countDown(); }
+        awaitStatus(f, reporter, SubAgentManager.IDLE);
+
+        JSONArray log = f.manager.communications(reporter);
+        long last = 0;
+        for (int i = 0; i < log.length(); i++) {
+            JSONObject item = log.getJSONObject(i);
+            check(item.getLong("createdAt") >= last, "Communication log is not chronological");
+            last = item.getLong("createdAt");
+            check(!item.getString("text").startsWith("子代理阶段汇报"), "Report was logged again as a wrapped message");
+        }
+        JSONObject task = entry(log, "task", "check every file");
+        check("main".equals(task.getString("from")) && !task.getBoolean("outgoing")
+                && "completed".equals(task.getString("status")), "Main's assignment lost sender or status: " + task);
+        JSONObject progress = entry(log, "progress", "half of the files checked");
+        check(progress.getBoolean("outgoing") && "main".equals(progress.getString("toName"))
+                && SubAgentManager.MAIL_PENDING.equals(progress.getString("status")), "Report to main is not tracked: " + progress);
+        JSONObject fromMain = entry(log, "message", "main to reporter");
+        check(!fromMain.getBoolean("outgoing") && SubAgentManager.MAIL_READ.equals(fromMain.getString("status")),
+                "Main to child message not shown as read: " + fromMain);
+        JSONObject fromPeer = entry(log, "message", "peer to reporter");
+        check("peer".equals(fromPeer.getString("fromName")) && SubAgentManager.MAIL_READ.equals(fromPeer.getString("status")),
+                "Peer message not shown as read on the receiver: " + fromPeer);
+        JSONObject toPeer = entry(log, "message", "reporter to peer");
+        check(toPeer.getBoolean("outgoing") && "/main/peer".equals(toPeer.getString("toPath"))
+                && SubAgentManager.MAIL_PENDING.equals(toPeer.getString("status")), "Idle peer's unread mail not pending: " + toPeer);
+        JSONObject toMain = entry(log, "message", "reporter to main");
+        check(SubAgentManager.MAIL_PENDING.equals(toMain.getString("status")), "Main's unread mail not pending: " + toMain);
+        JSONObject result = entry(log, "final", "reporter finished");
+        check(result.getBoolean("outgoing") && SubAgentManager.MAIL_PENDING.equals(result.getString("status")),
+                "Final result delivery is not tracked: " + result);
+
+        // 同一条同级消息，两边都能看到，状态一致。
+        JSONArray peerLog = f.manager.communications(peer);
+        JSONObject sent = entry(peerLog, "message", "peer to reporter");
+        JSONObject received = entry(peerLog, "message", "reporter to peer");
+        check(sent.getBoolean("outgoing") && SubAgentManager.MAIL_READ.equals(sent.getString("status"))
+                && !received.getBoolean("outgoing") && received.getString("mailId").equals(toPeer.getString("mailId")),
+                "Peer side does not mirror the conversation: " + peerLog);
+
+        // main 收下后，发给 main 的汇报、消息和最终结果都变成已读取。
+        f.manager.collectResults("main", null); f.manager.acknowledgeResults();
+        log = f.manager.communications(reporter);
+        check(SubAgentManager.MAIL_READ.equals(entry(log, "progress", "half of the files").getString("status"))
+                && SubAgentManager.MAIL_READ.equals(entry(log, "message", "reporter to main").getString("status"))
+                && SubAgentManager.MAIL_READ.equals(entry(log, "final", "reporter finished").getString("status")),
+                "Main's acknowledgement did not reach the child's log: " + log);
+
+        // 收件方停止前没读到的消息标成未送达，发件方那边同步看到。
+        f.manager.stopFromUser(peer);
+        check(SubAgentManager.MAIL_DROPPED.equals(entry(f.manager.communications(reporter), "message", "reporter to peer")
+                .getString("status")), "Mail dropped by a stopped peer still looks pending");
+        Fixture restarted = new Fixture(f.store);
+        check(SubAgentManager.MAIL_READ.equals(entry(restarted.manager.communications(reporter), "message", "peer to reporter")
+                .getString("status")), "Delivery status was not persisted");
+    }
+
     public static void main(String[] args) throws Exception {
         String[] tests = {"complexForkedTaskReachesTheModelAndRunsTools", "actualDisclosureTaskRemainsRefusedAndFailed",
                 "delegatedMetadataSurvivesRecoveryWithoutLeakingToApi", "liveParentMessageArrivesBeforeTheNextToolRequest",
@@ -422,7 +521,7 @@ public final class SubAgentCommunicationRegressionTest {
                 "checkpointedLiveMessageIsNotInjectedTwiceAfterRestart", "objectiveChangeDropsOldLiveInstructionsBeforeChildReuse",
                 "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
                 "userReusedChildReportsLifecycleOutsideManagerLock", "restoredQueuesRemainDormantUntilExplicitResume",
-                "closingChildKeepsLiveWorkUntilItsToolCleanupFinishes"};
+                "closingChildKeepsLiveWorkUntilItsToolCleanupFinishes", "communicationLogCoversEveryDirectionOnce"};
         int failed = 0;
         for (String test : tests) {
             try { SubAgentCommunicationRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); }

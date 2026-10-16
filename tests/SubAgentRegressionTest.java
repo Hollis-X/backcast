@@ -319,6 +319,9 @@ public final class SubAgentRegressionTest {
             }
         });
         String done = f.spawn("done", "first"); String busy = f.spawn("busy", "long"); await(started);
+        // 先等它真的做完：还在跑时发消息只会进收件箱，测的就不是「已结束的子代理被消息唤醒」了。
+        for (long end = System.currentTimeMillis() + 20000; !SubAgentManager.IDLE.equals(f.manager.find(done).status)
+                && System.currentTimeMillis() < end;) Thread.sleep(10);
         // finished agent: the message resumes it, with its context, as its next task
         f.manager.sendMessage("main", "done", "also check the edge case");
         for (long end = System.currentTimeMillis() + 20000; !f.manager.find(done).result.contains("also check the edge case") && System.currentTimeMillis() < end;) Thread.sleep(10);

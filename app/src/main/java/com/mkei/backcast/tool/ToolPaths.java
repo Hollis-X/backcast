@@ -183,7 +183,7 @@ final class ToolPaths {
     }
 
     /** Recheck captured canonical paths immediately before a root operation. */
-    private static String rootPathGuard(File file) {
+    static String rootPathGuard(File file) {
         return "actual=$(" + rootCanonical(file) + ") || exit 1; [ \"$actual\" = "
                 + RootShell.quote(file.getAbsolutePath()) + " ] || exit 1; ";
     }

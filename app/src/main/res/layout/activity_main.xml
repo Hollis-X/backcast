@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  主界面（Material 3）。会话铺满全屏；顶部是 M3 小型顶部应用栏，滚动时由 surface 抬升为 surfaceContainer；
+  主界面（Material 3）。根布局 DrawerHost 给左侧抽屉加跟手拖拽。会话铺满全屏；顶部是 M3 小型顶部应用栏，滚动时由 surface 抬升为 surfaceContainer；
   底部输入条是 surfaceContainerHigh 填充块，里面放辅助芯片和填充图标按钮。
 -->
-<FrameLayout
+<com.mkei.backcast.ui.DrawerHost
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/main_root"
     android:layout_width="match_parent"
@@ -326,12 +326,14 @@
                     android:layout_height="32dp"
                     android:layout_marginLeft="8dp"
                     android:background="@drawable/bg_chip_warning"
+                    android:drawableStart="@drawable/ic_warning"
+                    android:drawablePadding="6dp"
                     android:gravity="center_vertical"
                     android:includeFontPadding="false"
-                    android:paddingLeft="12dp"
-                    android:paddingRight="12dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
                     android:text="@string/access_full"
-                    android:textColor="@color/md_on_secondary_container"
+                    android:textColor="@color/md_warning"
                     android:fontFamily="sans-serif-medium"
                     android:textSize="14sp"/>
 
@@ -385,6 +387,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
+        android:translationZ="6dp"
         android:clickable="true"
         android:focusable="true">
 
@@ -486,6 +489,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
+        android:translationZ="8dp"
         android:clickable="true"
         android:focusable="true">
 
@@ -536,4 +540,4 @@
         </LinearLayout>
 
     </FrameLayout>
-</FrameLayout>
+</com.mkei.backcast.ui.DrawerHost>

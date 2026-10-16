@@ -265,7 +265,7 @@ public final class ToolkitRegressionTest {
         File target = new File(project, "existing.bin"); byte[] before = new byte[]{7, 8}; Files.write(target.toPath(), before);
         final int[] calls = new int[]{0}; boolean cancelled = false;
         try {
-            ToolkitExport.copy(project.getPath(), temporary, store, source.getPath(), target.getPath(), "deliverable", true,
+            ToolkitExport.copy(project.getPath(), temporary, store, source.getPath(), target.getPath(), "deliverable", true, false,
                     new ToolchainInstaller.Cancellation() {
                         public void check() throws Exception { if (++calls[0] >= 3) throw new InterruptedException("cancel fixture"); }
                     });

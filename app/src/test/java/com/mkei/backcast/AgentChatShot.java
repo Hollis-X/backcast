@@ -62,8 +62,19 @@ public class AgentChatShot {
         }
     }
 
+    private static JSONObject event(String id, String kind, String from, String to, String text, long at) throws Exception {
+        return new JSONObject().put("id", id).put("kind", kind).put("from", from).put("to", to).put("text", text)
+                .put("createdAt", at);
+    }
+
     @Test
-    public void agents() throws Exception {
+    public void agents() throws Exception { render(""); }
+
+    @Test
+    @Config(qualifiers = "w411dp-h914dp-night-xxhdpi")
+    public void agentsDark() throws Exception { render("-dark"); }
+
+    private void render(String suffix) throws Exception {
         String dir = System.getenv("BACKCAST_SCREENSHOTS");
         Assume.assumeTrue(dir != null && dir.length() > 0);
         Context app = RuntimeEnvironment.getApplication();
@@ -88,15 +99,37 @@ public class AgentChatShot {
         Message fin = Message.assistant("检查完毕：todo.txt 有 3 条，show.sh 输出正确，第 2 条已标记「已完成」。", null);
         history.put(fin.toCheckpointJson());
         checker.history = history;
+        // 三种通信：main ↔ 子代理、子代理 → main、子代理 ↔ 子代理。
+        long t = System.currentTimeMillis() - 8 * 60000L;
+        checker.tasks.put(new JSONObject().put("taskId", "t1").put("request", "检查 demo").put("status", "failed"));
+        checker.events.put(event("e1", "task", "main", "a1", "检查 demo/todo.txt 是否有 3 条待办，并运行 show.sh 看输出", t).put("taskId", "t1"));
+        checker.events.put(event("e2", "progress", "a1", "main", "已运行 show.sh，输出 3 行，正在核对第 2 条的格式。", t + 60000)
+                .put("mailId", "m1").put("status", "read"));
+        checker.events.put(event("e3", "message", "a2", "a1", "show.sh 第 2 行的「已完成」标记要和 todo.txt 一致，麻烦确认一下。", t + 120000)
+                .put("mailId", "m2").put("status", "read"));
+        checker.events.put(event("e4", "message", "a1", "a2", "已确认：两边都是「已完成」，格式一致。", t + 180000)
+                .put("mailId", "m3").put("status", "pending"));
+        checker.events.put(event("e5", "message", "main", "a1", "也顺便看一下 README 里的用法说明。", t + 240000)
+                .put("mailId", "m4").put("status", "pending").put("fromUser", true));
+        checker.events.put(event("e6", "error", "a1", "main", "模型请求失败", t + 300000).put("taskId", "t1").put("resultId", "r1"));
         store.saveSubAgentRecord("session-" + sid, checker.toJson());
-        store.saveSubAgentRecord("session-" + sid, agent("a2", "script_reviewer", SubAgentManager.IDLE).toJson());
+        SubAgentManager.Record reviewer = agent("a2", "script_reviewer", SubAgentManager.IDLE);
+        reviewer.task = "审阅 show.sh 的输出格式，发现问题直接找 demo_checker 确认";
+        reviewer.events.put(event("r1", "message", "a2", "a1", "show.sh 第 2 行的「已完成」标记要和 todo.txt 一致，麻烦确认一下。", t + 120000)
+                .put("mailId", "m2").put("status", "pending"));
+        reviewer.events.put(event("r2", "message", "a1", "a2", "已确认：两边都是「已完成」，格式一致。", t + 180000)
+                .put("mailId", "m3").put("status", "pending"));
+        store.saveSubAgentRecord("session-" + sid, reviewer.toJson());
         store.saveSubAgentRecord("session-" + sid, agent("a3", "doc_writer", SubAgentManager.CLOSED).toJson());
         store.close();
 
         Intent list = new Intent(app, SubAgentsActivity.class).putExtra(SubAgentsActivity.EXTRA_SESSION_ID, sid);
-        shoot(Robolectric.buildActivity(SubAgentsActivity.class, list).setup().get(), dir, "21-agent-list.png");
+        shoot(Robolectric.buildActivity(SubAgentsActivity.class, list).setup().get(), dir, "21-agent-list" + suffix + ".png");
         Intent chat = new Intent(app, SubAgentChatActivity.class)
                 .putExtra(MainActivity.EXTRA_AGENT_ROOT, sid).putExtra(MainActivity.EXTRA_AGENT_ID, "a1");
-        shoot(Robolectric.buildActivity(SubAgentChatActivity.class, chat).setup().get(), dir, "22-agent-chat.png");
+        Activity page = Robolectric.buildActivity(SubAgentChatActivity.class, chat).setup().get();
+        shoot(page, dir, "22-agent-chat" + suffix + ".png");
+        page.findViewById(R.id.action_more).performClick();
+        shoot(page, dir, "24-agent-comm" + suffix + ".png");
     }
 }

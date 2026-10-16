@@ -44,6 +44,7 @@ javac -proc:none -encoding UTF-8 -source 17 -target 17 -Xlint:-options -cp "$jso
     "$root"/tests/SubAgentProgressRegressionTest.java \
     "$root"/tests/SubAgentTaskLifecycleRegressionTest.java \
     "$root"/tests/ToolkitRegressionTest.java \
+    "$root"/tests/RootToolRegressionTest.java \
     "$root"/tests/ToolchainFixtures.java \
     "$root"/tests/ToolkitDiagnosticsRegressionTest.java \
     "$root"/tests/ProgramArgumentRegressionTest.java \
@@ -89,6 +90,7 @@ cls SubAgentCommunicationRegressionTest
 cls SubAgentProgressRegressionTest
 cls SubAgentTaskLifecycleRegressionTest
 cls com.mkei.backcast.tool.ToolkitRegressionTest
+cls com.mkei.backcast.tool.RootToolRegressionTest
 cls com.mkei.backcast.tool.ToolkitDiagnosticsRegressionTest
 cls com.mkei.backcast.tool.MultipleWorkspaceRegressionTest
 cls com.mkei.backcast.tool.ToolBatchProbeRegressionTest

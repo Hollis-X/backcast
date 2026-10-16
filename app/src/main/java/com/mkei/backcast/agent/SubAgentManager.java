@@ -26,6 +26,8 @@ public final class SubAgentManager {
     private static final int MAX_TEXT = 32000;
     private static final int RESULT_BATCH_CHARS = 60000;
     private static final long MAX_WAIT_MS = 60000L;
+    /** 通信记录里一条消息的送达状态：在收件箱里待读、已被对方读进上下文、对方停止前没读到。 */
+    public static final String MAIL_PENDING = "pending", MAIL_READ = "read", MAIL_DROPPED = "dropped";
 
     public interface Factory {
         AgentLoop create(Record task, AgentLoop.Listener listener, SubAgentManager manager) throws Exception;
@@ -347,6 +349,15 @@ public final class SubAgentManager {
     }
 
     private JSONObject send(String owner, String target, String message, String kind, boolean fromUser) throws Exception {
+        return send(owner, target, message, kind, fromUser, null, null);
+    }
+
+    /**
+     * eventKind / eventText 让阶段汇报以 progress、partial、error 记进通信记录，原文不带给模型看的包装；
+     * 收发两边各记一条，带同一个 mailId，送达状态之后两边一起更新。
+     */
+    private JSONObject send(String owner, String target, String message, String kind, boolean fromUser,
+            String eventKind, String eventText) throws Exception {
         requireText(message);
         synchronized (lock) { target = resolveLocked(owner, target); }
         if (!"message".equals(kind) && !"task".equals(kind)) throw new IllegalArgumentException("kind 必须是 message 或 task。");
@@ -383,7 +394,15 @@ public final class SubAgentManager {
             }
             queue.put(entry.put("usageLease", trustedRestart ? DETACHED_USAGE_LEASE : lease)); slot.task.revision++;
             if (queue == slot.task.inbox) slot.task.inboxRevision++;
-            if (!assignment) eventLocked(slot.task, "message", message, owner, target);
+            String logKind = eventKind == null ? "message" : eventKind, logText = eventText == null ? message : eventText;
+            JSONObject received;
+            if (assignment) received = slot.task.events.getJSONObject(slot.task.events.length() - 1);
+            else {
+                eventLocked(slot.task, logKind, logText, owner, target);
+                received = slot.task.events.getJSONObject(slot.task.events.length() - 1)
+                        .put("mailId", entry.getString("id")).put("status", MAIL_PENDING);
+            }
+            if (fromUser) received.put("fromUser", true);
             if (assignment) {
                 slot.stop = false;
                 if (trustedRestart) {
@@ -394,7 +413,13 @@ public final class SubAgentManager {
             if (assignment && !slot.executing && !QUEUED.equals(slot.task.status)) {
                 slot.task.status = QUEUED; slot.task.phase = QUEUED; slot.task.activeTool = ""; slot.ready = false;
             }
-            if (!ROOT.equals(owner)) eventLocked(requireSlot(owner).task, "message", message, owner, target);
+            if (!ROOT.equals(owner) && !owner.equals(target)) {
+                Record sender = requireSlot(owner).task;
+                eventLocked(sender, assignment ? "task" : logKind, logText, owner, target);
+                JSONObject sent = sender.events.getJSONObject(sender.events.length() - 1);
+                if (assignment) sent.put("taskId", entry.getString("taskId"));
+                else sent.put("mailId", entry.getString("id")).put("status", MAIL_PENDING);
+            }
             lock.notifyAll();
         }
         try { persist(target); }
@@ -443,6 +468,90 @@ public final class SubAgentManager {
         return mailLocked(owner, request).put("kind", "task").put("taskId", id);
     }
 
+    /** 收件方这一侧的事件是送达状态的唯一来源；发件方那条按 mailId 回查，不用跨记录同步保存。 */
+    private static void markMailLocked(Record receiver, JSONArray mails, String status) throws Exception {
+        if (mails == null || mails.length() == 0) return;
+        java.util.Set<String> ids = new java.util.HashSet<String>();
+        for (int i = 0; i < mails.length(); i++) {
+            JSONObject mail = mails.optJSONObject(i);
+            if (mail != null && mail.optString("id").length() > 0) ids.add(mail.optString("id"));
+        }
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < receiver.events.length(); i++) {
+            JSONObject event = receiver.events.optJSONObject(i);
+            if (event != null && ids.contains(event.optString("mailId")) && receiver.id.equals(event.optString("to"))
+                    && !MAIL_READ.equals(event.optString("status"))) event.put("status", status).put("statusAt", now);
+        }
+    }
+
+    /**
+     * 某个子代理的完整通信记录，按发生先后：派给它的任务、它收到和发出的消息、阶段汇报、最终结果。
+     * 每条带发送方、接收方的名字和路径，以及当前状态（消息看收件方是否读到，任务看执行状态，结果看 main 是否收下）。
+     */
+    public JSONArray communications(String id) throws Exception {
+        synchronized (lock) {
+            Record record = requireSlot(id).task;
+            JSONArray out = new JSONArray();
+            java.util.Set<String> seen = new java.util.HashSet<String>();
+            JSONObject previous = null;
+            for (int i = 0; i < record.events.length(); i++) {
+                JSONObject event = record.events.optJSONObject(i);
+                if (event == null || !seen.add(event.optString("id", "#" + i))) continue;
+                String kind = event.optString("kind"), from = event.optString("from"), to = event.optString("to");
+                // 旧版本的阶段汇报会再记一条同内容的 message，显示时并掉。
+                if ("message".equals(kind) && previous != null && event.optString("text").startsWith("子代理阶段汇报（")
+                        && isReport(previous.optString("kind")) && from.equals(previous.optString("from"))
+                        && to.equals(previous.optString("to")) && event.optString("text").endsWith(previous.optString("text"))) continue;
+                JSONObject view = new JSONObject(event.toString())
+                        .put("fromName", nameLocked(from)).put("fromPath", pathLocked(from))
+                        .put("toName", nameLocked(to)).put("toPath", pathLocked(to))
+                        .put("outgoing", id.equals(from)).put("status", statusLocked(record, event));
+                out.put(view);
+                previous = event;
+            }
+            return out;
+        }
+    }
+
+    private static boolean isReport(String kind) {
+        return "progress".equals(kind) || "partial".equals(kind) || "error".equals(kind);
+    }
+
+    private String nameLocked(String id) {
+        if (ROOT.equals(id)) return ROOT;
+        Slot slot = slots.get(id);
+        return slot == null ? id : slot.task.name;
+    }
+
+    private String statusLocked(Record owner, JSONObject event) {
+        String kind = event.optString("kind"), to = event.optString("to");
+        Slot receiver = slots.get(to);
+        if ("task".equals(kind)) {
+            if (receiver == null) return "";
+            for (int i = 0; i < receiver.task.tasks.length(); i++) {
+                JSONObject attempt = receiver.task.tasks.optJSONObject(i);
+                if (attempt != null && event.optString("taskId").equals(attempt.optString("taskId")))
+                    return attempt.optString("status", QUEUED);
+            }
+            return "";
+        }
+        String mailId = event.optString("mailId");
+        if (mailId.length() > 0) {
+            if (receiver != null && receiver.task != owner) for (int i = 0; i < receiver.task.events.length(); i++) {
+                JSONObject copy = receiver.task.events.optJSONObject(i);
+                if (copy != null && mailId.equals(copy.optString("mailId")) && to.equals(copy.optString("to")))
+                    return copy.optString("status", MAIL_PENDING);
+            }
+            return event.optString("status", "");
+        }
+        String resultId = event.optString("resultId");
+        if (resultId.length() > 0 && receiver != null) {
+            if (receiver.task.acknowledgedResults.has(resultId)) return MAIL_READ;
+            return MAIL_PENDING;
+        }
+        return "";
+    }
+
     private void eventLocked(Record record, String kind, String text, String from, String to) throws Exception {
         record.events.put(new JSONObject().put("id", "event_" + UUID.randomUUID().toString())
                 .put("taskId", record.currentTaskId).put("kind", kind).put("text", text)
@@ -463,13 +572,14 @@ public final class SubAgentManager {
                 slot.task.progress = Text.clip(text, 600); task.put("progress", text);
                 if (phase != null && phase.length() > 0) { slot.task.phase = phase; task.put("phase", phase); }
             } else task.put(kind, text);
-            eventLocked(slot.task, kind, text, owner, slot.task.parentId); lock.notifyAll();
+            slot.task.revision++; lock.notifyAll();
         }
         persist(owner);
         String parent;
         synchronized (lock) { parent = requireSlot(owner).task.parentId; }
+        // 汇报只在 send 里记一次（收发两边各一条），不再另记一条同内容的 message。
         send(owner, parent, "子代理阶段汇报（" + kind + "）" + (phase == null || phase.length() == 0 ? "" : "，阶段 " + phase)
-                + "：\n" + text, "message");
+                + "：\n" + text, "message", false, kind, text);
         notifyWorkChanged();
         return new JSONObject().put("saved", true).put("kind", kind);
     }
@@ -504,16 +614,16 @@ public final class SubAgentManager {
     public void acknowledgeInbox(String owner, JSONArray messageIds) throws Exception {
         synchronized (lock) {
             Record receiver = requireSlot(owner).task;
-            JSONArray retained = new JSONArray(); boolean changed = false;
+            JSONArray retained = new JSONArray(), read = new JSONArray(); boolean changed = false;
             for (int i = 0; i < receiver.inbox.length(); i++) {
                 JSONObject entry = receiver.inbox.getJSONObject(i); boolean acknowledged = false;
                 for (int j = 0; j < messageIds.length(); j++) if (entry.optString("id").equals(messageIds.optString(j))) {
                     acknowledged = true; break;
                 }
-                if (acknowledged) changed = true; else retained.put(entry);
+                if (acknowledged) { changed = true; read.put(entry); } else retained.put(entry);
             }
             if (!changed) return;
-            receiver.inbox = retained; receiver.revision++; lock.notifyAll();
+            receiver.inbox = retained; markMailLocked(receiver, read, MAIL_READ); receiver.revision++; lock.notifyAll();
         }
         persist(owner);
     }
@@ -711,6 +821,7 @@ public final class SubAgentManager {
         try {
             synchronized (lock) {
                 Slot caller = requireSlot(owner);
+                markMailLocked(caller.task, caller.task.deliveredInbox, MAIL_READ);
                 caller.task.deliveredInbox = new JSONArray();
                 caller.task.acknowledgedChildren = new JSONObject(caller.task.deliveredChildren.toString());
                 // A truncated chunk is not confirmation of the unseen remainder.
@@ -947,6 +1058,8 @@ public final class SubAgentManager {
     }
 
     private void stopSlotLocked(Slot slot, String reason, List<AgentLoop> loops) {
+        try { markMailLocked(slot.task, slot.task.inbox, MAIL_DROPPED); }
+        catch (Exception error) { persistenceError = error.toString(); }
         slot.stop = true; slot.task.pending = new JSONArray(); slot.task.inbox = new JSONArray(); slot.task.inFlight = "";
         slot.task.status = STOPPED; slot.task.error = reason; slot.task.phase = STOPPED; slot.task.activeTool = "";
         slot.task.progressRevision++; slot.task.resume = false;
@@ -969,7 +1082,8 @@ public final class SubAgentManager {
                 .put("partial", attempt.optString("partial")).put("createdAt", now));
         eventLocked(record, "completed".equals(status) ? "final" : "error", "completed".equals(status) ? content : error,
                 record.id, record.parentId);
-        record.events.getJSONObject(record.events.length() - 1).put("taskId", attempt.getString("taskId"));
+        record.events.getJSONObject(record.events.length() - 1).put("taskId", attempt.getString("taskId"))
+                .put("resultId", resultId);
     }
 
     private void scheduleLocked() {

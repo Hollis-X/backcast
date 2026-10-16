@@ -203,7 +203,7 @@ final class ProcessTree {
                 return true;
             }
             if (root && live == null) {
-                check.append("s=$(cat /proc/").append(value.pid).append("/stat 2>/dev/null) || { ")
+                check.append("s=; IFS= read -r s 2>/dev/null < /proc/").append(value.pid).append("/stat || { ")
                         .append("[ ! -d /proc/").append(value.pid).append(" ] || exit 9; }; ")
                         .append("s=${s##*) }; set -- $s; [ $# -ge 20 ] || { ")
                         .append("[ ! -d /proc/").append(value.pid).append(" ] || exit 9; }; ")
@@ -241,7 +241,9 @@ final class ProcessTree {
     }
 
     private static String guard(Identity value, String action) {
-        return "(s=$(cat /proc/" + value.pid + "/stat 2>/dev/null) || exit; "
+        // A shell builtin avoids forking cat once per PID while the tree is
+        // stopped. Large root trees must leave time to KILL and verify exit.
+        return "(IFS= read -r s 2>/dev/null < /proc/" + value.pid + "/stat || exit; "
                 + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || exit; "
                 + (action.indexOf(" -- -") >= 0 ? "[ \"$3\" = " + value.pid
                     + " ] && [ \"$4\" = " + value.pid + " ] || exit; " : "")

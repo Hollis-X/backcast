@@ -217,6 +217,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private String childId = "";
     private String childRendered = "";
     private boolean childBusy, childSending;
+    /** 子代理页的通信记录：最近一次读到的快照、面板是否开着、已展开全文的条目。 */
+    private org.json.JSONArray childComms = new org.json.JSONArray();
+    private String commRendered = "";
+    private int commSheetToken = -1;
+    private final java.util.Set<String> commExpanded = new java.util.HashSet<String>();
     private final Runnable childPoll = new Runnable() {
         @Override public void run() { loadChild(); }
     };
@@ -474,6 +479,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         chatStore = new ChatStore(this);
         reasoningNotes = new ReasoningNotes(settings, chatStore);
         drawerSessions = (LinearLayout) findViewById(R.id.drawer_sessions);
+        bindDrawerGesture();
 
         send.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -868,11 +874,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             res = R.string.access_strict;
         }
         accessChip.setText(res);
-        // M3 色调芯片：完全访问下工具会直接执行、不再拦，用警示容器色提醒；另外两档有拦截，用 secondaryContainer。
+        // 完全访问下工具会直接执行、不再拦：不画底色和边框，只把文字和左侧警示三角染成 warning 黄；
+        // 另外两档有拦截，仍用 secondaryContainer 色调芯片。
         boolean full = ApprovalGate.ACCESS_FULL.equals(level);
-        accessChip.setTextColor(full ? M3.onWarningContainer : M3.onSecondaryContainer);
+        accessChip.setTextColor(full ? M3.warning : M3.onSecondaryContainer);
         accessChip.setBackgroundResource(full ? R.drawable.bg_chip_warning : R.drawable.bg_chip_tonal);
-        accessChip.setPadding(dp(12), 0, dp(12), 0);
+        accessChip.setCompoundDrawablesRelativeWithIntrinsicBounds(full ? R.drawable.ic_warning : 0, 0, 0, 0);
+        accessChip.setCompoundDrawablePadding(dp(6));
+        accessChip.setPadding(dp(full ? 8 : 12), 0, dp(full ? 8 : 12), 0);
     }
 
     /** 权限选择：三档，改完立刻保存。 */
@@ -1775,14 +1784,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private int drawerToken;
 
     private void showDrawer() {
-        renderSessions();
-        drawerToken++;
+        prepareDrawer();
         if (drawerPanel != null) {
-            ViewGroup.LayoutParams lp = drawerPanel.getLayoutParams();
-            int screen = getResources().getDisplayMetrics().widthPixels;
-            int peek = dp(56);
-            lp.width = Math.max(screen - peek, (int) (screen * 0.78f));
-            drawerPanel.setLayoutParams(lp);
             drawerPanel.startAnimation(AnimationUtils.loadAnimation(
                     this, R.anim.drawer_in));
         }
@@ -1791,6 +1794,55 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             scrim.startAnimation(AnimationUtils.loadAnimation(this, R.anim.scrim_in));
         }
         drawerOverlay.setVisibility(View.VISIBLE);
+    }
+
+    /** 填好会话列表、定好宽度（右侧留 56dp 遮罩）；返回抽屉宽度。点菜单和跟手拉出共用。 */
+    private int prepareDrawer() {
+        renderSessions();
+        drawerToken++;
+        int screen = getResources().getDisplayMetrics().widthPixels;
+        int width = Math.max(screen - dp(56), (int) (screen * 0.78f));
+        if (drawerPanel != null) {
+            ViewGroup.LayoutParams lp = drawerPanel.getLayoutParams();
+            lp.width = width;
+            drawerPanel.setLayoutParams(lp);
+            drawerPanel.setTranslationX(0);
+        }
+        if (drawerOverlay != null) drawerOverlay.setVisibility(View.VISIBLE);
+        return width;
+    }
+
+    /** 抽屉跟手拖拽：会话区右滑拉出，抽屉或遮罩上左滑推回；竖向滑动和轻点不受影响。 */
+    private void bindDrawerGesture() {
+        View root = findViewById(R.id.main_root);
+        if (!(root instanceof com.mkei.backcast.ui.DrawerHost) || drawerPanel == null) return;
+        ((com.mkei.backcast.ui.DrawerHost) root).attachDrawer(drawerPanel, findViewById(R.id.drawer_scrim),
+                new com.mkei.backcast.ui.DrawerHost.Callback() {
+                    @Override public boolean isDrawerOpen() {
+                        return drawerOverlay != null && drawerOverlay.getVisibility() == View.VISIBLE;
+                    }
+                    @Override public boolean canOpenFrom(float x, float y) {
+                        if (childMode || activityDestroyed) return false;
+                        View sheet = findViewById(R.id.sheet_overlay);
+                        if (sheet != null && sheet.getVisibility() == View.VISIBLE) return false;
+                        if (modelPopup != null && modelPopup.isShowing()) return false;
+                        return !hit(findViewById(R.id.top_bar), x, y) && !hit(findViewById(R.id.composer_dock), x, y);
+                    }
+                    @Override public int prepareOpen() {
+                        hideKeyboard();
+                        return prepareDrawer();
+                    }
+                    @Override public void settled(boolean open) {
+                        if (open) return;
+                        drawerToken++;
+                        drawerOverlay.setVisibility(View.GONE);
+                    }
+                });
+    }
+
+    private static boolean hit(View view, float x, float y) {
+        return view != null && view.getVisibility() == View.VISIBLE && x >= view.getLeft() && x < view.getRight()
+                && y >= view.getTop() && y < view.getBottom();
     }
 
     private void hideDrawer() {
@@ -2053,7 +2105,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         });
         View title = findViewById(R.id.title_chip);
         if (title != null) title.setOnClickListener(null);
-        int[] hidden = { R.id.action_more, R.id.model_chip, R.id.access_chip, R.id.action_plus,
+        // 右上角换成「通信记录」：和其他代理之间收发的全部消息、任务、汇报和结果。
+        TextView comms = (TextView) findViewById(R.id.action_more);
+        if (comms != null) {
+            mountIcon(comms, R.drawable.ic_mail);
+            comms.setContentDescription(getString(R.string.comm_title));
+            comms.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { showCommSheet(); }
+            });
+        }
+        int[] hidden = { R.id.model_chip, R.id.access_chip, R.id.action_plus,
                 R.id.context_meter, R.id.goal_bar };
         for (int id : hidden) {
             View view = findViewById(id);
@@ -2081,9 +2142,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             @Override public void run() {
                 SubAgentManager.Record record = null;
                 List<Message> messages = new ArrayList<Message>();
+                org.json.JSONArray comms = new org.json.JSONArray();
                 try {
                     SubAgentManager manager = childManager();
                     record = manager == null ? null : manager.find(childId);
+                    if (record != null) comms = manager.communications(childId);
                     if (record != null) {
                         for (int i = 0; i < record.history.length(); i++) {
                             Message m = Message.fromCheckpointJson(record.history.getJSONObject(i));
@@ -2098,6 +2161,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 }
                 final SubAgentManager.Record row = record;
                 final List<Message> page = messages;
+                final org.json.JSONArray log = comms;
                 ui(new Runnable() {
                     @Override public void run() {
                         if (activityDestroyed || isFinishing()) return;
@@ -2107,7 +2171,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                             return;
                         }
                         showChild(row, page);
-                        if (slashResumed && childBusy) stream.postDelayed(childPoll, 1000L);
+                        childComms = log;
+                        if (commSheetOpen()) renderCommSheet(false);
+                        // 运行中或通信面板开着时每秒刷新；空闲时也慢慢看，别的代理发来消息、对方读到回执都能跟上。
+                        if (slashResumed) stream.postDelayed(childPoll, childBusy || commSheetOpen() ? 1000L : 3000L);
                     }
                 });
             }
@@ -2145,6 +2212,73 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 updateLatestButton();
             }
         }, false);
+    }
+
+    private boolean commSheetOpen() {
+        View overlay = findViewById(R.id.sheet_overlay);
+        return commSheetToken == sheetToken && !sheetClosing && overlay != null && overlay.getVisibility() == View.VISIBLE;
+    }
+
+    private void showCommSheet() {
+        commRendered = "";
+        renderCommSheet(true);
+        // 刚打开就按快节奏刷新一次。
+        stream.removeCallbacks(childPoll);
+        stream.postDelayed(childPoll, 1000L);
+    }
+
+    /**
+     * 通信记录面板：按时间先后列出这个子代理收到和发出的全部通信。
+     * open=false 是轮询刷新：内容没变不重画；变了就原地换掉，停在底部时继续贴底。
+     */
+    private void renderCommSheet(boolean open) {
+        final LinearLayout body = (LinearLayout) findViewById(R.id.sheet_body);
+        if (body == null) return;
+        String signature = childComms.toString() + commExpanded;
+        if (!open && signature.equals(commRendered)) return;
+        commRendered = signature;
+        final ScrollView sheetScroll = (ScrollView) findViewById(R.id.sheet_scroll);
+        boolean atBottom = open || sheetScroll == null || body.getHeight() <= 0
+                || sheetScroll.getScrollY() + sheetScroll.getHeight() >= body.getHeight() - dp(24);
+        body.removeAllViews();
+        TextView title = new TextView(this);
+        title.setText(R.string.comm_title);
+        sheetTitle(title);
+        body.addView(title, fullWidth());
+        int incoming = 0, outgoing = 0;
+        for (int i = 0; i < childComms.length(); i++) {
+            if (childComms.optJSONObject(i) != null && childComms.optJSONObject(i).optBoolean("outgoing")) outgoing++;
+            else incoming++;
+        }
+        TextView summary = new TextView(this);
+        summary.setText(childComms.length() == 0 ? getString(R.string.comm_empty)
+                : getString(R.string.comm_summary, childComms.length(), incoming, outgoing));
+        summary.setTextSize(14);
+        summary.setTextColor(M3.onSurfaceVariant);
+        summary.setPadding(dp(16), 0, dp(16), dp(12));
+        body.addView(summary, fullWidth());
+        for (int i = 0; i < childComms.length(); i++) {
+            org.json.JSONObject entry = childComms.optJSONObject(i);
+            if (entry == null) continue;
+            final String key = entry.optString("id", "#" + i);
+            View row = com.mkei.backcast.ui.AgentComms.row(this, entry, childId, commExpanded.contains(key),
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            if (!commExpanded.remove(key)) commExpanded.add(key);
+                            renderCommSheet(false);
+                        }
+                    });
+            LinearLayout.LayoutParams lp = fullWidth();
+            lp.bottomMargin = dp(8);
+            body.addView(row, lp);
+        }
+        if (open) {
+            showSheet();
+            commSheetToken = sheetToken;
+        }
+        if (atBottom && sheetScroll != null) sheetScroll.post(new Runnable() {
+            @Override public void run() { sheetScroll.fullScroll(View.FOCUS_DOWN); }
+        });
     }
 
     /**
@@ -3799,7 +3933,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         float[] parts = new float[values.length];
         for (int i = 0; i < values.length; i++) parts[i] = values[i] / (float) limit;
         com.mkei.backcast.ui.UsageBar bar = new com.mkei.backcast.ui.UsageBar(this);
-        bar.setParts(parts, colors, M3.containerHighest);
+        // 剩余空间用 60% 的 outline：比卡片底色深得多，又比「自动压缩预留」浅，空着的那段条和图例色点都看得清。
+        final int freeColor = M3.alpha(M3.outline, 0.6f);
+        bar.setParts(parts, colors, freeColor);
         LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8));
         barLp.topMargin = dp(12);
         card.addView(bar, barLp);
@@ -3823,7 +3959,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             legend.addView(usageRow(colors[i], getString(labels[i]), values[i], limit));
         }
         legend.addView(usageRow(M3.outline, getString(R.string.usage_compact_buffer), usage.compactBuffer, limit));
-        legend.addView(usageRow(M3.containerHighest, getString(R.string.usage_free), free, limit));
+        legend.addView(usageRow(freeColor, getString(R.string.usage_free), free, limit));
         card.addView(legend, fullWidth());
 
         if (!usage.mcp.isEmpty()) {
