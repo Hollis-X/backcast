@@ -17,7 +17,7 @@ public final class MessageActions {
     public static void install(final Context context, final TextView text, final Runnable retry) {
         text.setOnLongClickListener(new View.OnLongClickListener() {
             @Override public boolean onLongClick(View view) {
-                new AlertDialog.Builder(context).setItems(retry == null
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(context).setItems(retry == null
                         ? new String[]{"复制"} : new String[]{"复制", "重试"}, new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface dialog, int item) {
                         if (item == 1 && retry != null) { retry.run(); return; }

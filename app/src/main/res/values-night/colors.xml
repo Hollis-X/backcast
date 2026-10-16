@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 深色色板（与浅色同一种子）。 -->
+    <color name="md_primary">#AAC7FF</color>
+    <color name="md_on_primary">#0A305F</color>
+    <color name="md_primary_container">#284777</color>
+    <color name="md_on_primary_container">#D6E3FF</color>
+    <color name="md_secondary">#BEC6DC</color>
+    <color name="md_on_secondary">#283141</color>
+    <color name="md_secondary_container">#3E4759</color>
+    <color name="md_on_secondary_container">#DAE2F9</color>
+    <color name="md_tertiary">#DDBCE0</color>
+    <color name="md_on_tertiary">#3F2844</color>
+    <color name="md_tertiary_container">#573E5C</color>
+    <color name="md_on_tertiary_container">#FAD8FD</color>
+    <color name="md_error">#FFB4AB</color>
+    <color name="md_on_error">#690005</color>
+    <color name="md_error_container">#93000A</color>
+    <color name="md_on_error_container">#FFDAD6</color>
+    <color name="md_surface">#111318</color>
+    <color name="md_on_surface">#E2E2E9</color>
+    <color name="md_surface_variant">#44474E</color>
+    <color name="md_on_surface_variant">#C4C6D0</color>
+    <color name="md_outline">#8E9099</color>
+    <color name="md_outline_variant">#44474E</color>
+    <color name="md_surface_container_lowest">#0C0E13</color>
+    <color name="md_surface_container_low">#191C20</color>
+    <color name="md_surface_container">#1D2024</color>
+    <color name="md_surface_container_high">#282A2F</color>
+    <color name="md_surface_container_highest">#33353A</color>
+    <color name="md_inverse_surface">#E2E2E9</color>
+    <color name="md_inverse_on_surface">#2E3036</color>
+    <color name="md_inverse_primary">#415F91</color>
+    <color name="md_scrim">#66000000</color>
+    <color name="md_success">#A1D39A</color>
+    <color name="md_success_container">#23501F</color>
+    <color name="md_on_success_container">#BCF0B4</color>
+    <color name="md_warning">#F5BD48</color>
+    <color name="md_warning_container">#5E4200</color>
+    <color name="md_on_warning_container">#FFDEA6</color>
+</resources>

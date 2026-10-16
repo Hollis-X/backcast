@@ -1,9 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 顶栏还没采到模糊帧时的兜底：顶上乳白，向下淡出。 -->
+<!-- 顶部应用栏底色：M3 surface；内容滚到下面时代码改成 surfaceContainer。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <gradient
-        android:angle="270"
-        android:startColor="#F4FFFFFF"
-        android:centerColor="#E6FFFFFF"
-        android:endColor="#00FFFFFF"/>
+    <solid android:color="@color/md_surface"/>
 </shape>

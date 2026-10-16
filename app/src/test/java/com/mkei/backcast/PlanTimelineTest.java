@@ -76,7 +76,7 @@ public class PlanTimelineTest {
 
     @Test
     public void planCallIsInTheTimelineAndEditsShowLineCounts() throws Exception {
-        Context context = RuntimeEnvironment.getApplication();
+        Context context = new android.view.ContextThemeWrapper(RuntimeEnvironment.getApplication(), R.style.AppTheme);
         TurnTrace trace = new TurnTrace();
         trace.addStep("p1", TurnTrace.PLAN, plan("读代码", "completed", "改代码", "in_progress"));
         trace.addStep("e1", "edit", "{\"path\":\"a.txt\"}");
@@ -94,24 +94,25 @@ public class PlanTimelineTest {
 
     @Test
     public void cardShowsDoneSpinnerAndDashedPendingThenSettles() throws Exception {
-        Context context = RuntimeEnvironment.getApplication();
+        Context context = new android.view.ContextThemeWrapper(RuntimeEnvironment.getApplication(), R.style.AppTheme);
         PlanCard card = new PlanCard(context);
         card.bind(plan("读代码", "completed", "改代码", "in_progress", "跑测试", "pending"), true);
         layout(card);
-        assertTrue(texts(card).contains("任务计划 · 1/3"));
-        assertEquals("one spinner for the running step", 1, find(card, ProgressBar.class, new ArrayList<ProgressBar>()).size());
+        assertTrue(texts(card).contains("任务计划") && texts(card).contains("1/3"));
+        assertEquals("one spinner for the running step", 1, find(card, com.google.android.material.progressindicator.CircularProgressIndicator.class, new ArrayList<com.google.android.material.progressindicator.CircularProgressIndicator>()).size());
+        assertEquals("progress bar shows done/total", 33, find(card, com.google.android.material.progressindicator.LinearProgressIndicator.class, new ArrayList<com.google.android.material.progressindicator.LinearProgressIndicator>()).get(0).getProgress());
         assertEquals("done and pending use icons", 2, find(card, ImageView.class, new ArrayList<ImageView>()).size());
         card.settle();
-        assertEquals("the spinner stops when the turn ends", 0, find(card, ProgressBar.class, new ArrayList<ProgressBar>()).size());
+        assertEquals("the spinner stops when the turn ends", 0, find(card, com.google.android.material.progressindicator.CircularProgressIndicator.class, new ArrayList<com.google.android.material.progressindicator.CircularProgressIndicator>()).size());
         card.bind("{\"items\":[{\"content\":\"半截", true);
-        assertTrue("half-streamed arguments keep the last good plan", texts(card).contains("任务计划 · 1/3"));
+        assertTrue("half-streamed arguments keep the last good plan", texts(card).contains("1/3"));
     }
 
     @Test
     public void rendersForReview() throws Exception {
         String dir = System.getenv("BACKCAST_SCREENSHOTS");
         if (dir == null || dir.length() == 0) return;
-        Context context = RuntimeEnvironment.getApplication();
+        Context context = new android.view.ContextThemeWrapper(RuntimeEnvironment.getApplication(), R.style.AppTheme);
         LinearLayout page = new LinearLayout(context);
         page.setOrientation(LinearLayout.VERTICAL);
         int pad = Math.round(16 * context.getResources().getDisplayMetrics().density);

@@ -56,6 +56,7 @@ android {
 
 dependencies {
     implementation(libs.androidx.appcompat)
+    implementation(libs.material)
     implementation(libs.openai.java)
     // App cancellation/deadline hooks use the SDK's public transport APIs directly.
     implementation(libs.okhttp)

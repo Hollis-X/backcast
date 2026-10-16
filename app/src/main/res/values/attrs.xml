@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 代码里 new 出来的 M3 控件靠这些主题属性拿到样式。 -->
+    <attr name="appButtonFilled" format="reference"/>
+    <attr name="appButtonTonal" format="reference"/>
+    <attr name="appButtonOutlined" format="reference"/>
+    <attr name="appButtonText" format="reference"/>
+    <attr name="appFieldStyle" format="reference"/>
+</resources>

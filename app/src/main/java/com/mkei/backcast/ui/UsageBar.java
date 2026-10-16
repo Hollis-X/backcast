@@ -14,7 +14,7 @@ public final class UsageBar extends View {
     private final Path clip = new Path();
     private float[] parts = new float[0];
     private int[] colors = new int[0];
-    private int track = 0xFFE9E9ED;
+    private int track = M3.containerHighest;
 
     public UsageBar(Context context) { super(context); }
 

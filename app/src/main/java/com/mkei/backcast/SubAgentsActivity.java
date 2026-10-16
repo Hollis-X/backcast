@@ -7,7 +7,6 @@ import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
@@ -15,6 +14,7 @@ import com.mkei.backcast.agent.AgentLoop;
 import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.ui.AgentPanelState;
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.ui.M3;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -29,7 +29,11 @@ public final class SubAgentsActivity extends AppCompatActivity {
     private static final String[] GLYPHS = { "\uD83E\uDD8A", "\uD83D\uDC19", "\uD83E\uDD89", "\uD83D\uDC1D", "\uD83D\uDC22",
             "\uD83E\uDD84", "\uD83D\uDC33", "\uD83D\uDC27", "\uD83E\uDD8B", "\uD83C\uDF35", "\uD83D\uDC3C", "\uD83E\uDD80",
             "\uD83D\uDC28", "\uD83E\uDD94", "\uD83D\uDC38", "\uD83E\uDD9C" };
-    private static final int[] TONES = { 0xFFE3ECFD, 0xFFE4F5EA, 0xFFFDECDD, 0xFFF3E6FB, 0xFFFCE4E8, 0xFFE2F4F6, 0xFFF8F1D8, 0xFFECECEF };
+    /** 头像底色：M3 各容器色，随深浅色变化，所以每次现取。 */
+    private static int[] tones() {
+        return new int[] { M3.primaryContainer, M3.secondaryContainer, M3.tertiaryContainer, M3.successContainer,
+                M3.warningContainer, M3.errorContainer, M3.surfaceVariant, M3.containerHighest };
+    }
     private final ExecutorService reader = Executors.newSingleThreadExecutor();
     private long sessionId;
     private LinearLayout body;
@@ -41,12 +45,13 @@ public final class SubAgentsActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle savedState) {
         super.onCreate(savedState);
+        M3.load(this);
         setContentView(R.layout.activity_sub_agents);
         sessionId = getIntent().getLongExtra(EXTRA_SESSION_ID, -1L);
         body = (LinearLayout) findViewById(R.id.agent_panel_body);
-        ImageButton back = (ImageButton) findViewById(R.id.agent_panel_back);
-        back.setImageDrawable(Icons.tinted(this, Icons.BACK, 0xFF0D0D0D, dp(20)));
-        back.setOnClickListener(new View.OnClickListener() {
+        androidx.appcompat.widget.Toolbar toolbar = (androidx.appcompat.widget.Toolbar) findViewById(R.id.agent_panel_toolbar);
+        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, M3.onSurface, dp(24)));
+        toolbar.setNavigationOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { finish(); }
         });
     }
@@ -105,25 +110,38 @@ public final class SubAgentsActivity extends AppCompatActivity {
             TextView empty = new TextView(this);
             empty.setText(R.string.agent_panel_empty);
             empty.setTextSize(14);
-            empty.setTextColor(0xFF8E8E93);
+            empty.setTextColor(M3.onSurfaceVariant);
             empty.setPadding(dp(12), dp(16), dp(12), dp(16));
             body.addView(empty);
             return;
         }
-        for (final SubAgentManager.Record row : rows) body.addView(item(row));
+        for (int i = 0; i < rows.size(); i++) {
+            View item = item(rows.get(i));
+            // M3 分段列表：首尾大圆角，中间小圆角，行间 2dp 缝。
+            float top = dp(i == 0 ? 16 : 4), bottom = dp(i == rows.size() - 1 ? 16 : 4);
+            GradientDrawable shape = new GradientDrawable();
+            shape.setColor(M3.container);
+            shape.setCornerRadii(new float[] { top, top, top, top, bottom, bottom, bottom, bottom });
+            GradientDrawable mask = new GradientDrawable();
+            mask.setColor(0xFFFFFFFF);
+            mask.setCornerRadii(shape.getCornerRadii());
+            item.setBackground(new android.graphics.drawable.RippleDrawable(
+                    android.content.res.ColorStateList.valueOf(M3.alpha(M3.onSurface, 0.1f)), shape, mask));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.bottomMargin = dp(2);
+            body.addView(item, lp);
+        }
     }
 
     private View item(final SubAgentManager.Record row) {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.HORIZONTAL);
         item.setGravity(Gravity.CENTER_VERTICAL);
-        item.setPadding(dp(12), dp(10), dp(12), dp(10));
-        item.setMinimumHeight(dp(56));
-        android.util.TypedValue ripple = new android.util.TypedValue();
-        getTheme().resolveAttribute(android.R.attr.selectableItemBackground, ripple, true);
-        item.setBackgroundResource(ripple.resourceId);
+        item.setPadding(dp(16), dp(12), dp(16), dp(12));
+        item.setMinimumHeight(dp(72));
+        item.setClickable(true);
         int seed = (row.name.length() == 0 ? row.id : row.name).hashCode() & 0x7fffffff;
-        int tone = TONES[seed % TONES.length];
+        int tone = tones()[seed % tones().length];
         TextView icon = new TextView(this);
         icon.setText(GLYPHS[(Integer.reverse(seed) >>> 1) % GLYPHS.length]);
         icon.setTextSize(18);
@@ -132,15 +150,15 @@ public final class SubAgentsActivity extends AppCompatActivity {
         circle.setShape(GradientDrawable.OVAL);
         circle.setColor(tone);
         icon.setBackground(circle);
-        item.addView(icon, new LinearLayout.LayoutParams(dp(36), dp(36)));
+        item.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
         TextView name = new TextView(this);
         name.setText(row.name);
         name.setTextSize(16);
-        name.setTextColor(0xFF0D0D0D);
+        name.setTextColor(M3.onSurface);
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        lp.leftMargin = dp(14);
+        lp.leftMargin = dp(16);
         item.addView(name, lp);
         item.setContentDescription(row.name);
         item.setOnClickListener(new View.OnClickListener() {

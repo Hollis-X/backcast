@@ -1,18 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent" android:layout_height="match_parent"
-    android:orientation="vertical" android:background="@color/bg_window">
-    <LinearLayout android:layout_width="match_parent" android:layout_height="56dp"
-        android:gravity="center_vertical" android:paddingLeft="8dp" android:paddingRight="8dp">
-        <ImageButton android:id="@+id/agent_panel_back" android:layout_width="48dp" android:layout_height="48dp"
-            android:background="@android:color/transparent" android:contentDescription="@string/agent_panel_back" />
-        <TextView android:id="@+id/agent_panel_title" android:layout_width="0dp" android:layout_weight="1"
-            android:layout_height="wrap_content" android:text="@string/agent_panel_title"
-            android:textColor="@color/text_primary" android:textSize="18sp" android:textStyle="bold" android:maxLines="1" />
-    </LinearLayout>
+    android:orientation="vertical" android:background="@color/md_surface">
+    <com.google.android.material.appbar.MaterialToolbar android:id="@+id/agent_panel_toolbar"
+        android:layout_width="match_parent" android:layout_height="?attr/actionBarSize"
+        app:title="@string/agent_panel_title" app:navigationContentDescription="@string/agent_panel_back"/>
     <ScrollView android:id="@+id/agent_panel_scroll" android:layout_width="match_parent" android:layout_height="0dp"
         android:layout_weight="1" android:fillViewport="true">
         <LinearLayout android:id="@+id/agent_panel_body" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="vertical" android:paddingLeft="8dp" android:paddingRight="8dp" android:paddingBottom="16dp" />
+            android:orientation="vertical" android:paddingLeft="16dp" android:paddingRight="16dp" android:paddingTop="8dp"
+            android:paddingBottom="16dp" />
     </ScrollView>
 </LinearLayout>

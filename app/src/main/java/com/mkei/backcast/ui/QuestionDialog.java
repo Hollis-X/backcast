@@ -81,9 +81,10 @@ public final class QuestionDialog {
 
     public static void show(final Activity activity, final QuestionRequest request) {
         final float density = activity.getResources().getDisplayMetrics().density;
-        final int accent = activity.getResources().getColor(R.color.accent);
-        final int primary = activity.getResources().getColor(R.color.text_primary);
-        final int secondary = activity.getResources().getColor(R.color.text_secondary);
+        M3.load(activity);
+        final int accent = M3.primary;
+        final int primary = M3.onSurface;
+        final int secondary = M3.onSurfaceVariant;
         final List<Ask> asks = new ArrayList<Ask>();
         final Runnable[] refresh = new Runnable[1];
         final ViewPager[] pagerRef = new ViewPager[1];
@@ -98,31 +99,34 @@ public final class QuestionDialog {
                 page.setPadding(dp(density, 2), 0, dp(density, 2), 0);
                 String header = item.optString("header", "");
                 if (header.length() > 0) {
-                    TextView chip = text(activity, header + (ask.multi ? " · 可多选" : ""), 12, secondary);
+                    TextView chip = text(activity, header + (ask.multi ? " · 可多选" : ""), 12, M3.primary);
+                    chip.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
                     chip.setPadding(0, 0, 0, dp(density, 2));
                     page.addView(chip);
                 } else if (ask.multi) {
                     page.addView(text(activity, "可多选", 12, secondary));
                 }
-                TextView title = text(activity, ask.question, 17, primary);
+                TextView title = text(activity, ask.question, 22, primary);
                 title.setPadding(0, dp(density, 2), 0, dp(density, 8));
                 page.addView(title);
                 JSONArray options = item.getJSONArray("options");
                 for (int j = 0; j < options.length(); j++) {
                     JSONObject option = options.getJSONObject(j);
-                    final CompoundButton button = ask.multi ? new CheckBox(activity) : new RadioButton(activity);
+                    final CompoundButton button = ask.multi ? new com.google.android.material.checkbox.MaterialCheckBox(activity)
+                            : new com.google.android.material.radiobutton.MaterialRadioButton(activity);
                     button.setButtonTintList(ColorStateList.valueOf(accent));
                     button.setClickable(false);
                     ask.labels.add(option.getString("label")); ask.buttons.add(button);
                     LinearLayout label = new LinearLayout(activity);
                     label.setOrientation(LinearLayout.VERTICAL);
-                    label.addView(text(activity, option.getString("label"), 15, primary));
+                    label.addView(text(activity, option.getString("label"), 16, primary));
                     String detail = option.optString("description", "");
-                    if (detail.length() > 0) label.addView(text(activity, detail, 13, secondary));
+                    if (detail.length() > 0) label.addView(text(activity, detail, 14, secondary));
                     final LinearLayout row = new LinearLayout(activity);
                     row.setOrientation(LinearLayout.HORIZONTAL);
                     row.setGravity(Gravity.CENTER_VERTICAL);
-                    row.setPadding(dp(density, 6), dp(density, 8), dp(density, 12), dp(density, 8));
+                    row.setPadding(dp(density, 8), dp(density, 10), dp(density, 16), dp(density, 10));
+                    row.setMinimumHeight(dp(density, 56));
                     row.setBackground(choiceBackground(density, false));
                     row.addView(button, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                     row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -143,13 +147,12 @@ public final class QuestionDialog {
                         }
                     });
                     LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    rowLp.topMargin = dp(density, 6);
+                    rowLp.topMargin = dp(density, 2);
                     page.addView(row, rowLp);
                 }
-                ask.custom = new EditText(activity);
-                ask.custom.setHint("其他（直接写你的答案）"); ask.custom.setTextSize(14); ask.custom.setSingleLine(false); ask.custom.setMaxLines(3);
-                ask.custom.setBackgroundResource(R.drawable.bg_input);
-                ask.custom.setPadding(dp(density, 14), dp(density, 10), dp(density, 14), dp(density, 10));
+                com.google.android.material.textfield.TextInputLayout customField = M3.field(activity, "其他（直接写你的答案）");
+                ask.custom = customField.getEditText();
+                ask.custom.setSingleLine(false); ask.custom.setMaxLines(3);
                 ask.custom.addTextChangedListener(new TextWatcher() {
                     @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
                     @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
@@ -158,8 +161,8 @@ public final class QuestionDialog {
                     @Override public void afterTextChanged(Editable s) { refresh[0].run(); }
                 });
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.topMargin = dp(density, 10);
-                page.addView(ask.custom, lp);
+                lp.topMargin = dp(density, 12);
+                page.addView(customField, lp);
                 ask.page = page;
                 asks.add(ask);
             }
@@ -171,12 +174,13 @@ public final class QuestionDialog {
         LinearLayout sheet = new LinearLayout(activity);
         sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setBackgroundResource(R.drawable.bg_sheet);
-        sheet.setPadding(dp(density, 20), 0, dp(density, 20), dp(density, 20));
+        sheet.setPadding(dp(density, 24), 0, dp(density, 24), dp(density, 24));
         View handle = new View(activity);
         handle.setBackgroundResource(R.drawable.bg_sheet_handle);
-        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(dp(density, 36), dp(density, 4));
+        handle.setAlpha(0.4f);
+        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(dp(density, 32), dp(density, 4));
         handleLp.gravity = Gravity.CENTER_HORIZONTAL;
-        handleLp.topMargin = dp(density, 10); handleLp.bottomMargin = dp(density, 14);
+        handleLp.topMargin = dp(density, 16); handleLp.bottomMargin = dp(density, 16);
         sheet.addView(handle, handleLp);
 
         // 多题时顶部一行「‹ 1/3 ›」，两边按钮平滑切换。
@@ -226,10 +230,10 @@ public final class QuestionDialog {
         actions.setPadding(0, dp(density, 16), 0, 0);
         final TextView skip = pill(activity, density, "跳过", false, SKIP);
         final TextView ok = pill(activity, density, "确定", true, OK);
-        actions.addView(skip, new LinearLayout.LayoutParams(0, dp(density, 46), 1f));
+        actions.addView(skip, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         View gap = new View(activity);
-        actions.addView(gap, new LinearLayout.LayoutParams(dp(density, 10), 1));
-        actions.addView(ok, new LinearLayout.LayoutParams(0, dp(density, 46), 1f));
+        actions.addView(gap, new LinearLayout.LayoutParams(dp(density, 8), 1));
+        actions.addView(ok, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         sheet.addView(actions);
 
         // 焦点先放在面板上，打开时不让「其他」输入框抢焦点弹出键盘。
@@ -258,7 +262,6 @@ public final class QuestionDialog {
                         ((View) button.getParent()).setBackground(choiceBackground(density, button.isChecked()));
                 }
                 ok.setEnabled(all);
-                ok.setAlpha(all ? 1f : 0.4f);
                 int at = pager.getCurrentItem();
                 counter.setText((at + 1) + "/" + asks.size());
                 prev.setEnabled(at > 0); prev.setAlpha(at > 0 ? 1f : 0.3f);
@@ -298,27 +301,25 @@ public final class QuestionDialog {
 
     private static GradientDrawable choiceBackground(float density, boolean selected) {
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(selected ? 0xFFE3ECFD : 0xFFF5F5F7);
-        bg.setCornerRadius(12 * density);
+        bg.setColor(selected ? M3.secondaryContainer : M3.containerHigh);
+        bg.setCornerRadius(16 * density);
         return bg;
     }
 
+    /** M3 标准图标按钮：40dp 圆形触控区，按下出现状态层。 */
     private static TextView navButton(Activity activity, float density, String glyph, String tag) {
-        TextView button = text(activity, glyph, 22, activity.getResources().getColor(R.color.text_primary));
+        TextView button = text(activity, glyph, 22, M3.onSurfaceVariant);
         button.setGravity(Gravity.CENTER);
         button.setContentDescription(tag);
         button.setMinWidth(dp(density, 40)); button.setMinHeight(dp(density, 40));
+        button.setBackground(M3.ripple(null, M3.onSurface, 20 * density));
         return button;
     }
 
+    /** 底部两个操作：确定是 M3 填充按钮，跳过是描边按钮。 */
     private static TextView pill(Activity activity, float density, String label, boolean primary, String tag) {
-        TextView button = text(activity, label, 16, primary ? Color.WHITE : activity.getResources().getColor(R.color.text_primary));
-        button.setGravity(Gravity.CENTER);
+        TextView button = M3.button(activity, primary ? M3.FILLED : M3.OUTLINED, label);
         button.setContentDescription(tag);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(primary ? activity.getResources().getColor(R.color.accent) : 0xFFF0F0F3);
-        bg.setCornerRadius(23 * density);
-        button.setBackground(bg);
         return button;
     }
 

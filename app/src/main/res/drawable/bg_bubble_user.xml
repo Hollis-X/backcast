@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 用户消息：浅蓝胶囊，和灰色代码块、白色顶栏区分开。 -->
+<!-- 用户消息：M3 primaryContainer，右下角收小，表示从右边发出。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/bubble_user"/>
-    <corners android:radius="18dp"/>
+    <solid android:color="@color/md_primary_container"/>
+    <corners android:topLeftRadius="20dp" android:topRightRadius="20dp"
+        android:bottomLeftRadius="20dp" android:bottomRightRadius="6dp"/>
 </shape>

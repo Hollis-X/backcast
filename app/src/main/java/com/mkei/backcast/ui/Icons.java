@@ -74,6 +74,17 @@ public final class Icons {
         if (tv == null) {
             return;
         }
+        if (tv instanceof com.google.android.material.button.MaterialButton) {
+            // M3 按钮自带图标位：颜色跟随按钮文字（填充按钮 onPrimary，色调按钮 onSecondaryContainer）。
+            com.google.android.material.button.MaterialButton button = (com.google.android.material.button.MaterialButton) tv;
+            Drawable icon = tinted(tv.getContext(), res, 0xFFFFFFFF, sizePx);
+            icon.clearColorFilter();
+            button.setIcon(icon);
+            button.setIconSize(sizePx);
+            button.setIconTint(button.getTextColors());
+            button.setIconGravity(com.google.android.material.button.MaterialButton.ICON_GRAVITY_TEXT_START);
+            return;
+        }
         left(tv, res, color, sizePx);
         tv.setGravity(Gravity.CENTER);
         tv.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> centerContent(tv, sizePx));

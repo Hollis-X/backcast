@@ -20,7 +20,6 @@ public final class WorkTimeline extends LinearLayout {
     }
     private final Actions actions;
     private final List<Row> rows = new ArrayList<Row>();
-    private static final int INK = 0xFF252528, MUTED = 0xFF77777D;
 
     public WorkTimeline(Context context, Actions actions) {
         super(context);
@@ -58,7 +57,7 @@ public final class WorkTimeline extends LinearLayout {
         final TurnTrace.Piece piece;
         final LinearLayout root, content, notes;
         final TextView marker, title, state, brief, retry;
-        final ProgressBar progress;
+        final com.google.android.material.progressindicator.CircularProgressIndicator progress;
         final View line;
         String renderedSummary = null;
         String renderedArgs = null, renderedResult = null;
@@ -72,14 +71,23 @@ public final class WorkTimeline extends LinearLayout {
             rail.setOrientation(VERTICAL);
             rail.setGravity(Gravity.CENTER_HORIZONTAL);
             FrameLayout dot = new FrameLayout(getContext());
-            marker = label(13, MUTED);
+            marker = label(11, M3.onSecondaryContainer);
             marker.setGravity(Gravity.CENTER);
-            progress = new ProgressBar(getContext());
+            // M3：每一步一个 secondaryContainer 小圆点；运行中换成圆形进度指示器。
+            android.graphics.drawable.GradientDrawable dotBg = new android.graphics.drawable.GradientDrawable();
+            dotBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            dotBg.setColor(M3.secondaryContainer);
+            marker.setBackground(dotBg);
+            progress = new com.google.android.material.progressindicator.CircularProgressIndicator(getContext());
+            progress.setIndeterminate(true);
+            progress.setIndicatorSize(px(16));
+            progress.setTrackThickness(px(2));
+            progress.setIndicatorColor(M3.primary);
             dot.addView(marker, new FrameLayout.LayoutParams(px(20), px(20)));
             dot.addView(progress, new FrameLayout.LayoutParams(px(18), px(18), Gravity.CENTER));
             rail.addView(dot, new LayoutParams(px(20), px(24)));
             line = new View(getContext());
-            line.setBackgroundColor(0xFFE8E8EB);
+            line.setBackgroundColor(M3.outlineVariant);
             LayoutParams railLine = new LayoutParams(px(1), 0, 1f);
             railLine.topMargin = px(5);
             rail.addView(line, railLine);
@@ -89,15 +97,16 @@ public final class WorkTimeline extends LinearLayout {
             content = new LinearLayout(getContext());
             content.setOrientation(VERTICAL);
             content.setPadding(0, 0, 0, px(22));
-            title = label(16, INK);
-            state = label(12, MUTED);
+            title = label(16, M3.onSurface);
+            state = label(12, M3.onSurfaceVariant);
             state.setPadding(0, px(3), 0, px(6));
-            brief = label(13, MUTED);
+            brief = label(13, M3.onSurfaceVariant);
             brief.setLineSpacing(px(3), 1f);
             brief.setMaxLines(3);
             notes = new LinearLayout(getContext());
             notes.setOrientation(VERTICAL);
-            retry = label(13, INK);
+            retry = label(14, M3.primary);
+            retry.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             retry.setText("重试摘要");
             retry.setPadding(0, px(6), 0, px(6));
             retry.setOnClickListener(new OnClickListener() {
@@ -124,7 +133,9 @@ public final class WorkTimeline extends LinearLayout {
             marker.setVisibility(active ? GONE : VISIBLE);
             marker.setText(thinking ? (piece.sealed ? "\u2713" : "\u2022")
                     : piece.step.done ? (failed(piece.step) ? "!" : "\u2713") : "\u2022");
-            marker.setTextColor(!thinking && failed(piece.step) ? 0xFFB44438 : MUTED);
+            boolean bad = !thinking && failed(piece.step);
+            marker.setTextColor(bad ? M3.onErrorContainer : M3.onSecondaryContainer);
+            ((android.graphics.drawable.GradientDrawable) marker.getBackground()).setColor(bad ? M3.errorContainer : M3.secondaryContainer);
             if (thinking && raw) {
                 bindRaw(active);
                 return;
@@ -151,11 +162,11 @@ public final class WorkTimeline extends LinearLayout {
                         JSONArray entries = new JSONArray(piece.summary);
                         for (int i = 0; i < entries.length(); i++) {
                             JSONObject entry = entries.getJSONObject(i);
-                            TextView heading = label(14, INK);
+                            TextView heading = label(14, M3.onSurface);
                             heading.setText(entry.optString("title"));
                             heading.setPadding(0, i == 0 ? 0 : px(12), 0, px(4));
                             notes.addView(heading, width());
-                            TextView text = label(14, MUTED);
+                            TextView text = label(14, M3.onSurfaceVariant);
                             text.setText(entry.optString("text"));
                             text.setLineSpacing(px(4), 1f);
                             notes.addView(text, width());
@@ -207,8 +218,8 @@ public final class WorkTimeline extends LinearLayout {
         if (delta == null) return text;
         android.text.SpannableStringBuilder out = new android.text.SpannableStringBuilder(text);
         if (out.length() > 0) out.append(" ");
-        appendChip(out, " +" + delta[0] + " ", 0xFF1E7B3C, 0xFFDDF3E4);
-        appendChip(out, " -" + delta[1] + " ", 0xFFC0392B, 0xFFFBE0DD);
+        appendChip(out, " +" + delta[0] + " ", M3.onSuccessContainer, M3.successContainer);
+        appendChip(out, " -" + delta[1] + " ", M3.onErrorContainer, M3.errorContainer);
         return out;
     }
 
@@ -268,10 +279,10 @@ public final class WorkTimeline extends LinearLayout {
             final int pad = (int) (8 * context.getResources().getDisplayMetrics().density);
             heading = new TextView(context);
             heading.setTextSize(17);
-            heading.setTextColor(INK);
+            heading.setTextColor(M3.onSurface);
             state = new TextView(context);
             state.setTextSize(12);
-            state.setTextColor(MUTED);
+            state.setTextColor(M3.onSurfaceVariant);
             state.setPadding(0, pad / 2, 0, pad);
             addView(heading);
             addView(state);
@@ -283,7 +294,7 @@ public final class WorkTimeline extends LinearLayout {
                     TextView text = recycled instanceof TextView ? (TextView) recycled : new TextView(context);
                     text.setText(chunks.get(at));
                     text.setTextSize(13);
-                    text.setTextColor(INK);
+                    text.setTextColor(M3.onSurface);
                     text.setTypeface(Typeface.MONOSPACE);
                     text.setTextIsSelectable(true);
                     text.setLineSpacing(pad / 2, 1f);

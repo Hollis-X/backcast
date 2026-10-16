@@ -31,7 +31,7 @@ final class BackgroundAccess {
 
     /** 说明为什么要放行，按钮直接打开系统设置。 */
     static void show(final Activity activity, boolean offerDecline) {
-        AlertDialog.Builder dialog = new AlertDialog.Builder(activity)
+        AlertDialog.Builder dialog = new com.google.android.material.dialog.MaterialAlertDialogBuilder(activity)
                 .setTitle(R.string.background_title)
                 .setMessage(unrestricted(activity) ? R.string.background_message_ok : R.string.background_message)
                 .setPositiveButton(unrestricted(activity) ? R.string.background_open_app : R.string.background_allow,

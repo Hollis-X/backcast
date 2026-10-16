@@ -52,6 +52,7 @@ import com.mkei.backcast.agent.PromptGuard;
 import com.mkei.backcast.agent.TokenMeter;
 import com.mkei.backcast.ui.ContextMeter;
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.ui.M3;
 import com.mkei.backcast.ui.Markdown;
 import com.mkei.backcast.ui.MarkdownRenderQueue;
 import com.mkei.backcast.ui.MessageActions;
@@ -302,7 +303,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private View topBar;
     private View inputBar;
     private ImageView statusFrost;
-    private Bitmap frostBitmap;
+    private Boolean frostLifted;
+    private android.animation.ValueAnimator frostFade;
     private boolean frostQueued;
     private boolean frosting;
     /** 正在往里追加的那一段正文。下一轮模型请求开始时卸掉引用，视图留在对话里。 */
@@ -332,6 +334,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        M3.load(this);
         setContentView(R.layout.activity_main);
 
         configureSystemBars();
@@ -369,9 +372,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         composerDock = findViewById(R.id.composer_dock);
         latestButton = (ImageView) findViewById(R.id.scroll_latest);
         if (latestButton != null) {
-            latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, 0xFF3C3C43, dp(20)));
+            latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, M3.onSurfaceVariant, dp(20)));
             latestButton.setRotation(180f);
-            latestDots = new com.mkei.backcast.ui.DotsDrawable(0xFF3C3C43, dp(20));
+            latestDots = new com.mkei.backcast.ui.DotsDrawable(M3.onSurfaceVariant, dp(20));
             latestButton.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { jumpToLatest(); }
             });
@@ -398,7 +401,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         goalClear = (ImageView) findViewById(R.id.goal_clear);
         goalToggle = (ImageView) findViewById(R.id.goal_toggle);
         if (goalClear != null) {
-            goalClear.setImageDrawable(Icons.tinted(this, Icons.UNDO, 0xFF3C3C43, dp(16)));
+            goalClear.setImageDrawable(Icons.tinted(this, Icons.UNDO, M3.onSurfaceVariant, dp(16)));
             goalClear.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -407,7 +410,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             });
         }
         if (goalEdit != null) {
-            goalEdit.setImageDrawable(Icons.tinted(this, Icons.PENCIL, 0xFF3C3C43, dp(16)));
+            goalEdit.setImageDrawable(Icons.tinted(this, Icons.PENCIL, M3.onSurfaceVariant, dp(16)));
             goalEdit.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -416,7 +419,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             });
         }
         if (goalToggle != null) {
-            goalToggle.setImageDrawable(Icons.tinted(this, Icons.PLAY, 0xFF3C3C43, dp(16)));
+            goalToggle.setImageDrawable(Icons.tinted(this, Icons.PLAY, M3.onSurfaceVariant, dp(16)));
             goalToggle.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -440,7 +443,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         mountIcon((TextView) findViewById(R.id.action_more), Icons.MORE);
         mountIcon(plus, Icons.PLUS);
         if (modelChip != null) {
-            Icons.right(modelChip, Icons.CHEVRON_DOWN, 0xFF8E8E93, dp(13));
+            Icons.right(modelChip, Icons.CHEVRON_DOWN, M3.onSurfaceVariant, dp(13));
         }
         paintStop();
         if (contextMeter != null) {
@@ -463,7 +466,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         mountIcon((TextView) findViewById(R.id.drawer_settings), Icons.SETTINGS);
         TextView chatButton = (TextView) findViewById(R.id.drawer_chat);
         if (chatButton != null) {
-            Icons.left(chatButton, Icons.PLUS, 0xFFFFFFFF, dp(18));
+            Icons.left(chatButton, Icons.NEW_CHAT, M3.onPrimaryContainer, dp(24));
+            chatButton.setCompoundDrawablePadding(dp(12));
         }
         bindEdgeToEdge();
 
@@ -812,7 +816,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         try {
             String name = request.source == null ? "" : RunHub.get(this).agentName(request.source);
             String title = name.length() == 0 ? toolName : name + " · " + toolName;
-            request.dialog = new AlertDialog.Builder(this)
+            request.dialog = new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                     .setTitle(getString(R.string.approve_title, title))
                     .setMessage(getString(R.string.approve_body, prettyArgs(args)))
                     .setPositiveButton(R.string.approve_run, new android.content.DialogInterface.OnClickListener() {
@@ -865,10 +869,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             res = R.string.access_strict;
         }
         accessChip.setText(res);
-        // 完全访问下工具会直接执行、不再拦，标黄提醒；另外两档有拦截，保持灰色。
-        accessChip.setTextColor(ApprovalGate.ACCESS_FULL.equals(level)
-                ? getResources().getColor(R.color.warn_text)
-                : getResources().getColor(R.color.text_secondary));
+        // M3 色调芯片：完全访问下工具会直接执行、不再拦，用警示容器色提醒；另外两档有拦截，用 secondaryContainer。
+        boolean full = ApprovalGate.ACCESS_FULL.equals(level);
+        accessChip.setTextColor(full ? M3.onWarningContainer : M3.onSecondaryContainer);
+        accessChip.setBackground(M3.ripple(M3.fill(full ? M3.warningContainer : M3.secondaryContainer, dp(M3.S)),
+                M3.onSurface, dp(M3.S)));
     }
 
     /** 权限选择：三档，改完立刻保存。 */
@@ -898,9 +903,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
         TextView title = new TextView(this);
         title.setText(R.string.access_title);
-        title.setTextSize(20);
-        title.setTextColor(getResources().getColor(R.color.text_primary));
-        title.setPadding(0, 0, 0, dp(4));
+        sheetTitle(title);
         body.addView(title, fullWidth());
 
         String current = settings.accessLevel();
@@ -909,6 +912,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
             row.setPadding(0, dp(12), 0, dp(12));
+            sheetItem(row, level.equals(current));
             row.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -922,17 +926,19 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             TextView name = new TextView(this);
             name.setText(getString(labels[i]));
             name.setTextSize(16);
-            name.setTextColor(getResources().getColor(
-                    level.equals(current) ? R.color.accent : R.color.text_primary));
+            name.setTextColor(level.equals(current) ? M3.onSecondaryContainer : M3.onSurface);
+            if (level.equals(current)) name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             row.addView(name, fullWidth());
 
             TextView note = new TextView(this);
             note.setText(getString(notes[i]));
-            note.setTextSize(13);
-            note.setTextColor(getResources().getColor(R.color.text_secondary));
+            note.setTextSize(14);
+            note.setTextColor(level.equals(current) ? M3.onSecondaryContainer : M3.onSurfaceVariant);
             note.setLineSpacing(dp(2), 1f);
             row.addView(note, fullWidth());
-            body.addView(row, fullWidth());
+            LinearLayout.LayoutParams rowLp = fullWidth();
+            rowLp.bottomMargin = dp(2);
+            body.addView(row, rowLp);
         }
 
         showSheet();
@@ -952,9 +958,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
         TextView title = new TextView(this);
         title.setText(R.string.more_title);
-        title.setTextSize(20);
-        title.setTextColor(getResources().getColor(R.color.text_primary));
-        title.setPadding(0, 0, 0, dp(4));
+        sheetTitle(title);
         body.addView(title, fullWidth());
 
         body.addView(sheetRow(R.string.more_new_chat, Icons.NEW_CHAT, null,
@@ -1000,20 +1004,36 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         showSheet();
     }
 
+    /** 底部面板标题：M3 Title Large，和列表行的文字左对齐。 */
+    private void sheetTitle(TextView title) {
+        title.setTextSize(22);
+        title.setTextColor(M3.onSurface);
+        title.setPadding(dp(16), 0, dp(16), dp(8));
+    }
+
+    /** 底部面板里可点的一行：M3 列表项，左右 16dp，按下出现圆角状态层；选中时铺 secondaryContainer。 */
+    private void sheetItem(View row, boolean selected) {
+        row.setPadding(dp(16), row.getPaddingTop(), dp(16), row.getPaddingBottom());
+        row.setMinimumHeight(dp(56));
+        row.setBackground(M3.ripple(selected ? M3.fill(M3.secondaryContainer, dp(M3.L)) : null,
+                M3.onSurface, dp(M3.L)));
+    }
+
     /** 菜单里的一行：左侧图标加标题，右侧显示当前值。 */
     private View sheetRow(int labelRes, int iconRes, String value, final Runnable action) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(52));
+        sheetItem(row, false);
 
         TextView label = new TextView(this);
         label.setText(getString(labelRes));
-        label.setTextSize(17);
-        label.setTextColor(getResources().getColor(R.color.text_primary));
+        label.setTextSize(16);
+        label.setTextColor(M3.onSurface);
         label.setGravity(Gravity.CENTER_VERTICAL);
-        label.setMinHeight(dp(52));
-        Icons.left(label, iconRes, 0xFF0D0D0D, dp(20));
+        label.setMinHeight(dp(56));
+        Icons.left(label, iconRes, M3.onSurfaceVariant, dp(24));
+        label.setCompoundDrawablePadding(dp(16));
         row.addView(label, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -1055,16 +1075,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
         TextView title = new TextView(this);
         title.setText(R.string.more_work_dir);
-        title.setTextSize(20);
-        title.setTextColor(getResources().getColor(R.color.text_primary));
+        sheetTitle(title);
         body.addView(title, fullWidth());
 
         TextView scope = new TextView(this);
         scope.setText(R.string.workspace_scope_note);
-        scope.setTextSize(13);
-        scope.setTextColor(getResources().getColor(R.color.text_secondary));
+        scope.setTextSize(14);
+        scope.setTextColor(M3.onSurfaceVariant);
         scope.setLineSpacing(dp(2), 1f);
-        scope.setPadding(0, dp(4), 0, dp(14));
+        scope.setPadding(dp(16), 0, dp(16), dp(16));
         body.addView(scope, fullWidth());
 
         final List<String> dirs = settings.authorizedWorkDirs();
@@ -1084,9 +1103,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             if (history == null) {
                 TextView heading = new TextView(this);
                 heading.setText(R.string.workspace_candidates);
-                heading.setTextSize(13);
-                heading.setTextColor(getResources().getColor(R.color.text_secondary));
-                heading.setPadding(dp(4), dp(20), 0, dp(8));
+                heading.setTextSize(14);
+                heading.setTextColor(M3.primary);
+                heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                heading.setPadding(dp(16), dp(20), 0, dp(8));
                 body.addView(heading, fullWidth());
                 history = dirGroup();
                 body.addView(history, fullWidth());
@@ -1104,17 +1124,18 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         LinearLayout group = new LinearLayout(this);
         group.setOrientation(LinearLayout.VERTICAL);
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-        bg.setColor(0xFFF5F5F7);
-        bg.setCornerRadius(dp(14));
+        bg.setColor(M3.containerHigh);
+        bg.setCornerRadius(dp(M3.L));
         group.setBackground(bg);
+        group.setClipToOutline(true);
         return group;
     }
 
     private View groupDivider() {
         View line = new View(this);
-        line.setBackgroundColor(0xFFE6E6EA);
+        line.setBackgroundColor(M3.outlineVariant);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
-        lp.leftMargin = dp(52);
+        lp.leftMargin = dp(72);
         line.setLayoutParams(lp);
         return line;
     }
@@ -1124,18 +1145,20 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(14), dp(12), dp(10), dp(12));
-        row.setMinimumHeight(dp(60));
+        row.setPadding(dp(16), dp(12), dp(8), dp(12));
+        row.setMinimumHeight(dp(72));
 
         ImageView icon = new ImageView(this);
         icon.setImageDrawable(Icons.tinted(this, Icons.FOLDER,
-                current ? getResources().getColor(R.color.accent) : 0xFF8E8E93, dp(22)));
-        row.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
+                current ? M3.onPrimaryContainer : M3.onSurfaceVariant, dp(24)));
+        icon.setScaleType(ImageView.ScaleType.CENTER);
+        icon.setBackground(M3.fill(current ? M3.primaryContainer : M3.containerHighest, dp(20)));
+        row.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
         LinearLayout text = new LinearLayout(this);
         text.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams textLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        textLp.leftMargin = dp(14);
+        textLp.leftMargin = dp(16);
         textLp.rightMargin = dp(8);
         TextView name = new TextView(this);
         String trimmed = dir.endsWith("/") && dir.length() > 1 ? dir.substring(0, dir.length() - 1) : dir;
@@ -1155,11 +1178,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             TextView badge = new TextView(this);
             badge.setText(current ? R.string.workspace_primary : R.string.workspace_additional);
             badge.setTextSize(11);
-            badge.setTextColor(current ? getResources().getColor(R.color.accent) : 0xFF6E6E76);
-            badge.setPadding(dp(6), dp(1), dp(6), dp(1));
+            badge.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            badge.setTextColor(current ? M3.onSecondaryContainer : M3.onSurfaceVariant);
+            badge.setPadding(dp(8), dp(2), dp(8), dp(2));
             android.graphics.drawable.GradientDrawable chip = new android.graphics.drawable.GradientDrawable();
-            chip.setColor(current ? 0xFFE3ECFD : 0xFFE9E9ED);
-            chip.setCornerRadius(dp(6));
+            chip.setColor(current ? M3.secondaryContainer : M3.containerHighest);
+            chip.setCornerRadius(dp(M3.S));
             badge.setBackground(chip);
             LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1187,18 +1211,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             // 已授权目录的操作收进「⋯」，行里只留目录信息，名字不会被按钮挤没。
             final boolean canPrimary = !current, canRemove = removable;
             final ImageView more = new ImageView(this);
-            more.setImageDrawable(Icons.tinted(this, Icons.MORE, 0xFF6E6E76, dp(20)));
+            more.setImageDrawable(Icons.tinted(this, Icons.MORE, M3.onSurfaceVariant, dp(20)));
             more.setScaleType(ImageView.ScaleType.CENTER);
             more.setContentDescription(getString(R.string.more_title));
-            android.util.TypedValue ripple = new android.util.TypedValue();
-            getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
-            more.setBackgroundResource(ripple.resourceId);
+            more.setBackground(M3.ripple(null, M3.onSurface, dp(20)));
             more.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) {
-                    android.widget.PopupMenu menu = new android.widget.PopupMenu(MainActivity.this, more);
+                    androidx.appcompat.widget.PopupMenu menu = new androidx.appcompat.widget.PopupMenu(MainActivity.this, more);
                     if (canPrimary) menu.getMenu().add(0, 1, 0, R.string.workspace_set_primary);
                     if (canRemove) menu.getMenu().add(0, 2, 1, R.string.workspace_remove);
-                    menu.setOnMenuItemClickListener(new android.widget.PopupMenu.OnMenuItemClickListener() {
+                    menu.setOnMenuItemClickListener(new androidx.appcompat.widget.PopupMenu.OnMenuItemClickListener() {
                         @Override public boolean onMenuItemClick(android.view.MenuItem item) {
                             if (item.getItemId() == 1) settings.setPrimaryWorkDir(dir);
                             else if (!settings.removeAuthorizedWorkDir(dir)) {
@@ -1235,12 +1257,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         TextView add = new TextView(this);
         add.setText(title);
         add.setTextSize(16);
-        add.setTextColor(getResources().getColor(R.color.accent));
+        add.setTextColor(M3.primary);
         add.setGravity(Gravity.CENTER_VERTICAL);
-        add.setMinHeight(dp(52));
-        add.setPadding(dp(14), 0, dp(14), 0);
-        Icons.left(add, icon, getResources().getColor(R.color.accent), dp(22));
-        add.setCompoundDrawablePadding(dp(16));
+        add.setMinHeight(dp(56));
+        add.setPadding(dp(24), 0, dp(16), 0);
+        Icons.left(add, icon, M3.primary, dp(24));
+        add.setCompoundDrawablePadding(dp(24));
+        add.setBackground(M3.ripple(null, M3.onSurface, 0));
         add.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { action.run(); }
         });
@@ -1278,14 +1301,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private TextView pill(int title, final Runnable action) {
         TextView button = new TextView(this);
         button.setText(title);
-        button.setTextSize(13);
-        button.setTextColor(getResources().getColor(R.color.accent));
+        button.setTextSize(14);
+        button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        button.setTextColor(M3.onSecondaryContainer);
         button.setGravity(Gravity.CENTER);
-        button.setPadding(dp(12), 0, dp(12), 0);
-        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-        bg.setColor(0xFFE3ECFD);
-        bg.setCornerRadius(dp(16));
-        button.setBackground(bg);
+        button.setPadding(dp(16), 0, dp(16), 0);
+        button.setBackground(M3.ripple(M3.fill(M3.secondaryContainer, dp(20)), M3.onSecondaryContainer, dp(20)));
         button.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { action.run(); } });
         button.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(32)));
         return button;
@@ -1301,7 +1322,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         input.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_URI);
         input.setSelection(input.getText().length());
 
-        new AlertDialog.Builder(this)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.dir_add)
                 .setView(input)
                 .setPositiveButton(R.string.workspace_add_authorized,
@@ -1346,9 +1367,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
         int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-                | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        // 深色主题下状态栏、导航栏图标用浅色。
+        if (!M3.dark) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         window.getDecorView().setSystemUiVisibility(flags);
     }
 
@@ -1551,7 +1572,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         } else if (!dots && latestButton.getDrawable() == latestDots) {
             latestDots.stop();
             latestButton.setRotation(180f);
-            latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, 0xFF3C3C43, dp(20)));
+            latestButton.setImageDrawable(Icons.tinted(this, Icons.SEND, M3.onSurfaceVariant, dp(20)));
         }
     }
 
@@ -1588,7 +1609,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         stream.setTranslationY(0f);
     }
 
-    /** 模糊层盖住状态栏和整条顶栏，最下面一小段淡出，不画硬分隔线。 */
+    /** M3 顶部应用栏底色层：盖住状态栏和整条顶栏，高度跟顶栏一致。 */
     private void fitFrost() {
         if (statusFrost == null || topBar == null) return;
         int barHeight = topBar.getHeight();
@@ -1596,13 +1617,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             topBar.post(new Runnable() { public void run() { if (topBar.getHeight() > 0) fitFrost(); } });
             return;
         }
-        int height = barHeight + dp(14);
         ViewGroup.LayoutParams lp = statusFrost.getLayoutParams();
-        if (lp.height != height) {
-            lp.height = height;
+        if (lp.height != barHeight) {
+            lp.height = barHeight;
             statusFrost.setLayoutParams(lp);
-            scheduleFrost();
         }
+        scheduleFrost();
     }
 
     private void scheduleFrost() {
@@ -1616,10 +1636,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 frostQueued = false;
                 renderFrost();
             }
-        }, 48);
+        }, 16);
     }
 
-    /** 只模糊状态栏那一条，并向下淡出。底部不走这里。 */
     private void renderFrost() {
         if (frosting || statusFrost == null || scroll == null) {
             return;
@@ -1632,116 +1651,35 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
     }
 
+    /**
+     * M3「滚动时抬升」：会话顶在最上面时顶栏是 surface，内容滚到顶栏下面后换成 surfaceContainer，
+     * 颜色用 150ms 渐变过去。
+     */
     private void drawFrost() {
         if (statusFrost == null || scroll == null) {
             return;
         }
-        int w = statusFrost.getWidth();
-        int h = statusFrost.getHeight();
-        if (w < 8 || h < 8) {
+        final boolean lifted = scroll.getScrollY() > 0;
+        if (frostLifted != null && frostLifted == lifted) {
             return;
         }
-        int bw = Math.max(12, w / 7);
-        int bh = Math.max(6, h / 7);
-        try {
-            Bitmap bmp = frostBitmap;
-            if (bmp == null || bmp.getWidth() != bw || bmp.getHeight() != bh) {
-                bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-                frostBitmap = bmp;
-            }
-            Canvas canvas = new Canvas(bmp);
-            canvas.drawColor(0xFFFFFFFF);
-            canvas.save();
-            canvas.scale(bw / (float) w, bh / (float) h);
-            canvas.clipRect(0, 0, w, h);
-            canvas.translate(scroll.getLeft() - statusFrost.getLeft(),
-                    scroll.getTop() - statusFrost.getTop());
-            scroll.draw(canvas);
-            canvas.restore();
-            softenFrost(bmp);
-            statusFrost.setBackgroundColor(Color.TRANSPARENT);
-            statusFrost.setImageBitmap(bmp);
-        } catch (Exception ignored) {
+        int from = frostLifted == null ? (lifted ? M3.container : M3.surface) : (lifted ? M3.surface : M3.container);
+        int to = lifted ? M3.container : M3.surface;
+        frostLifted = lifted;
+        statusFrost.setImageDrawable(null);
+        if (frostFade != null) frostFade.cancel();
+        if (from == to) {
+            statusFrost.setBackgroundColor(to);
+            return;
         }
-    }
-
-    private static void softenFrost(Bitmap bmp) {
-        int w = bmp.getWidth();
-        int h = bmp.getHeight();
-        int[] px = new int[w * h];
-        bmp.getPixels(px, 0, w, 0, 0, w, h);
-        boxBlur(px, w, h, 1);
-        boxBlur(px, w, h, 1);
-        // 上面约八成保持同样的磨砂，只有最下面一段淡出到透明。
-        int solid = Math.max(1, h * 4 / 5);
-        int last = Math.max(1, h - 1 - solid);
-        for (int y = 0; y < h; y++) {
-            float fade = y < solid ? 1f : 1f - ((y - solid) / (float) last);
-            fade = fade * fade;
-            int veil = (int) (180f * fade);
-            int keep = (int) (236f * fade);
-            int row = y * w;
-            for (int x = 0; x < w; x++) {
-                int c = px[row + x];
-                int r = (c >> 16) & 0xff;
-                int g = (c >> 8) & 0xff;
-                int b = c & 0xff;
-                r = (r * (255 - veil) + 255 * veil) / 255;
-                g = (g * (255 - veil) + 255 * veil) / 255;
-                b = (b * (255 - veil) + 255 * veil) / 255;
-                px[row + x] = (keep << 24) | (r << 16) | (g << 8) | b;
+        frostFade = android.animation.ValueAnimator.ofObject(new android.animation.ArgbEvaluator(), from, to);
+        frostFade.setDuration(150);
+        frostFade.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
+            @Override public void onAnimationUpdate(android.animation.ValueAnimator a) {
+                statusFrost.setBackgroundColor((Integer) a.getAnimatedValue());
             }
-        }
-        bmp.setPixels(px, 0, w, 0, 0, w, h);
-    }
-
-    private static void boxBlur(int[] px, int w, int h, int radius) {
-        int[] tmp = new int[px.length];
-        for (int y = 0; y < h; y++) {
-            int row = y * w;
-            for (int x = 0; x < w; x++) {
-                int a = 0;
-                int r = 0;
-                int g = 0;
-                int b = 0;
-                int n = 0;
-                for (int k = -radius; k <= radius; k++) {
-                    int xx = x + k;
-                    if (xx < 0 || xx >= w) {
-                        continue;
-                    }
-                    int c = px[row + xx];
-                    a += (c >>> 24) & 0xff;
-                    r += (c >> 16) & 0xff;
-                    g += (c >> 8) & 0xff;
-                    b += c & 0xff;
-                    n++;
-                }
-                tmp[row + x] = ((a / n) << 24) | ((r / n) << 16) | ((g / n) << 8) | (b / n);
-            }
-        }
-        for (int x = 0; x < w; x++) {
-            for (int y = 0; y < h; y++) {
-                int a = 0;
-                int r = 0;
-                int g = 0;
-                int b = 0;
-                int n = 0;
-                for (int k = -radius; k <= radius; k++) {
-                    int yy = y + k;
-                    if (yy < 0 || yy >= h) {
-                        continue;
-                    }
-                    int c = tmp[yy * w + x];
-                    a += (c >>> 24) & 0xff;
-                    r += (c >> 16) & 0xff;
-                    g += (c >> 8) & 0xff;
-                    b += c & 0xff;
-                    n++;
-                }
-                px[y * w + x] = ((a / n) << 24) | ((r / n) << 16) | ((g / n) << 8) | (b / n);
-            }
-        }
+        });
+        frostFade.start();
     }
 
     /** 抽屉开关的动画计时，避免连点时旧的延迟任务把新开的抽屉藏掉。 */
@@ -1811,15 +1749,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         modelPopup = new PopupWindow(menu, dp(280), ViewGroup.LayoutParams.WRAP_CONTENT, true);
         modelPopup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         modelPopup.setOutsideTouchable(true);
-        modelPopup.setElevation(dp(12));
+        modelPopup.setElevation(dp(3));
         showIntelligencePage(card);
         card.startAnimation(AnimationUtils.loadAnimation(this, R.anim.popup_in));
     }
 
     private void showIntelligencePage(final LinearLayout card) {
         card.removeAllViews();
-        TextView title = popupText(getString(R.string.popup_intelligence), 13, R.color.text_secondary);
-        title.setPadding(dp(12), dp(4), dp(12), dp(4));
+        TextView title = popupText(getString(R.string.popup_intelligence), 14, R.color.text_secondary);
+        title.setTextColor(M3.primary);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setPadding(dp(12), dp(8), dp(12), dp(8));
         card.addView(title, wrapParams());
         addEffortOption(card, "关闭思考", Settings.EFFORT_OFF);
         addEffortOption(card, "低", Settings.EFFORT_LOW);
@@ -1829,7 +1769,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         addEffortOption(card, "Max", Settings.EFFORT_MAX);
         addEffortOption(card, "Ultra", Settings.EFFORT_ULTRA);
         View divider = new View(this);
-        divider.setBackgroundColor(0xFFE8E8E8);
+        divider.setBackgroundColor(M3.outlineVariant);
         LinearLayout.LayoutParams separator = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
         separator.setMargins(dp(12), dp(4), dp(12), dp(4));
         card.addView(divider, separator);
@@ -1838,10 +1778,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         model.setOrientation(LinearLayout.HORIZONTAL);
         model.setGravity(Gravity.CENTER_VERTICAL);
         model.setPadding(dp(12), dp(8), dp(12), dp(8));
-        model.setMinimumHeight(dp(52));
+        model.setMinimumHeight(dp(56));
+        model.setBackground(M3.ripple(null, M3.onSurface, dp(M3.M)));
         LinearLayout labels = new LinearLayout(this);
         labels.setOrientation(LinearLayout.VERTICAL);
-        labels.addView(popupText(getString(R.string.popup_model), 15, R.color.text_primary), wrapParams());
+        labels.addView(popupText(getString(R.string.popup_model), 14, R.color.text_primary), wrapParams());
         TextView current = popupText(activeModelLabel(), 13, R.color.text_secondary);
         current.setMaxLines(2);
         current.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -1858,13 +1799,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
     private void showModelPage(final LinearLayout card) {
         card.removeAllViews();
-        TextView back = popupText(getString(R.string.popup_model), 17, R.color.text_primary);
+        TextView back = popupText(getString(R.string.popup_model), 16, R.color.text_primary);
+        back.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        back.setBackground(M3.ripple(null, M3.onSurface, dp(M3.M)));
         back.setTag("model-menu-back");
         back.setContentDescription(getString(R.string.popup_model_back));
         back.setMinHeight(dp(48));
         back.setGravity(Gravity.CENTER_VERTICAL);
         back.setPadding(dp(12), 0, dp(12), 0);
-        Icons.left(back, Icons.BACK, 0xFF3C3C43, dp(20));
+        Icons.left(back, Icons.BACK, M3.onSurfaceVariant, dp(20));
         back.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { showIntelligencePage(card); }
         });
@@ -1903,8 +1846,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             List<String> models = savedModels(profile);
             if (models.isEmpty()) continue;
             available = true;
-            TextView provider = popupText(profile.name, 13, R.color.text_secondary);
-            provider.setPadding(dp(8), dp(10), dp(8), dp(3));
+            TextView provider = popupText(profile.name, 14, R.color.text_secondary);
+            provider.setTextColor(M3.primary);
+            provider.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            provider.setPadding(dp(12), dp(12), dp(12), dp(6));
             card.addView(provider, wrapParams());
             for (String model : models) addModelOption(card, profile.id, model);
         }
@@ -1931,15 +1876,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         final long sid = sessionId;
         final AgentLoop target = loop;
         final int token = liveToken;
-        TextView row = popupText(displayModelName(model), 16, R.color.text_primary);
+        TextView row = popupText(displayModelName(model), 14, R.color.text_primary);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinHeight(dp(46));
+        row.setMinHeight(dp(48));
         row.setPadding(dp(12), 0, dp(12), 0);
         Settings.AiProfile active = settings.activeAiProfile();
-        if (providerId.equals(active.id) && model.equals(active.model)) {
-            row.setSelected(true);
-            Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, 0xFF3C3C43, dp(20));
-        }
+        menuItem(row, providerId.equals(active.id) && model.equals(active.model));
         row.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View view) { chooseAiModel(providerId, model, sid, target, token); }
         });
@@ -1971,7 +1913,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             applyAiModelSelection(providerId, model, sid, target, token);
             return;
         }
-        new AlertDialog.Builder(this)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.popup_switch_running_title)
                 .setMessage(getString(R.string.popup_switch_running_body, profile.name, displayModelName(model)))
                 .setNegativeButton(android.R.string.cancel, null)
@@ -2129,7 +2071,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         sessionSub.setVisibility(text == 0 ? View.GONE : View.VISIBLE);
         if (text == 0) return;
         sessionSub.setText(text);
-        sessionSub.setTextColor(failed ? 0xFFB7790A : getResources().getColor(R.color.text_secondary));
+        sessionSub.setTextColor(failed ? M3.warning : getResources().getColor(R.color.text_secondary));
         if (failed) {
             android.graphics.drawable.Drawable warn = getResources().getDrawable(R.drawable.ic_warning);
             warn.setBounds(0, 0, dp(13), dp(13));
@@ -2180,7 +2122,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     }
 
     private void confirmStopChild() {
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(R.string.agent_panel_stop)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.agent_panel_stop)
                 .setMessage(R.string.agent_panel_stop_confirm)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(R.string.agent_panel_stop, new android.content.DialogInterface.OnClickListener() {
@@ -2207,15 +2149,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     }
 
     private void addEffortOption(LinearLayout card, String label, final String effort) {
-        final TextView row = popupText(label, 15, R.color.text_primary);
+        final TextView row = popupText(label, 14, R.color.text_primary);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinHeight(dp(42));
+        row.setMinHeight(dp(48));
         row.setPadding(dp(12), 0, dp(12), 0);
-        if (effort.equals(settings.reasoningEffort())) {
-            row.setSelected(true);
-            row.setBackgroundResource(R.drawable.bg_popup_selected);
-            Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, 0xFF3C3C43, dp(20));
-        }
+        menuItem(row, effort.equals(settings.reasoningEffort()));
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -2228,6 +2166,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             }
         });
         card.addView(row, wrapParams());
+    }
+
+    /** M3 菜单项：48dp 高，按下出现状态层；选中项铺 secondaryContainer 并在右侧打勾。 */
+    private void menuItem(TextView row, boolean selected) {
+        row.setSelected(selected);
+        row.setBackground(M3.ripple(selected ? M3.fill(M3.secondaryContainer, dp(M3.M)) : null,
+                M3.onSurface, dp(M3.M)));
+        if (selected) {
+            row.setTextColor(M3.onSecondaryContainer);
+            Icons.right(row, R.drawable.ic_ds_checkmark_lg_regular_24, M3.onSecondaryContainer, dp(20));
+        }
     }
 
     private TextView popupText(String text, int size, int colorRes) {
@@ -2271,57 +2220,53 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         return out.toString();
     }
 
-    /** 发送键：有字是黑圆，没字是浅灰圆。箭头用图标，不用字符。 */
+    /** 发送键：M3 填充图标按钮（40dp、12dp 圆角）。有字是 primary，没字是禁用态 onSurface 12% / 38%。 */
     private void tintSend(boolean active) {
-        paintRound(send, active ? 0xFF111111 : 0xFFF2F2F2,
-                active ? 0xFFFFFFFF : 0xFFB4B4B8, Icons.SEND, dp(6));
+        paintRound(send, active ? M3.primary : M3.alpha(M3.onSurface, 0.12f),
+                active ? M3.onPrimary : M3.alpha(M3.onSurface, 0.38f), Icons.SEND, dp(10));
     }
 
-    /** 停止是黑圆里的白方块，不用圆环图标。 */
+    /** 停止：同一个填充图标按钮，primary 底上一个 onPrimary 圆角小方块。 */
     private void paintStop() {
         if (stop == null) {
             return;
         }
-        GradientDrawable circle = new GradientDrawable();
-        circle.setShape(GradientDrawable.OVAL);
-        circle.setColor(0xFF111111);
         GradientDrawable square = new GradientDrawable();
         square.setShape(GradientDrawable.RECTANGLE);
-        square.setCornerRadius(dp(2));
-        square.setColor(0xFFFFFFFF);
-        int inset = dp(9);
+        square.setCornerRadius(dp(3));
+        square.setColor(M3.onPrimary);
+        int inset = dp(13);
         LayerDrawable layer = new LayerDrawable(new Drawable[]{
-                circle, new InsetDrawable(square, inset, inset, inset, inset)});
+                M3.fill(M3.primary, dp(M3.M)), new InsetDrawable(square, inset, inset, inset, inset)});
         stop.setText("");
-        stop.setBackgroundDrawable(layer);
+        stop.setBackgroundDrawable(M3.ripple(layer, M3.onPrimary, dp(M3.M)));
     }
 
     private void paintRound(Button button, int fill, int glyph, int kind, int inset) {
         if (button == null) {
             return;
         }
-        GradientDrawable circle = new GradientDrawable();
-        circle.setShape(GradientDrawable.OVAL);
-        circle.setColor(fill);
         // 图标尺寸要扣掉四周内缩，否则会被裁掉。
-        int side = Math.max(dp(12), dp(28) - inset * 2);
+        int side = Math.max(dp(12), dp(40) - inset * 2);
         Drawable icon = Icons.tinted(this, kind, glyph, side);
         LayerDrawable layer = new LayerDrawable(new Drawable[]{
-                circle, new InsetDrawable(icon, inset, inset, inset, inset)});
+                M3.fill(fill, dp(M3.M)), new InsetDrawable(icon, inset, inset, inset, inset)});
         button.setText("");
-        button.setBackgroundDrawable(layer);
+        button.setBackgroundDrawable(M3.ripple(layer, M3.onPrimary, dp(M3.M)));
     }
 
-    /** 顶栏和加号只放图标，不套白圆。 */
+    /** M3 标准图标按钮：24dp 图标居中，按下出现圆形状态层。 */
     private void mountIcon(TextView tv, int res) {
         if (tv == null) {
             return;
         }
         tv.setText("");
-        tv.setBackgroundColor(Color.TRANSPARENT);
-        int inset = dp(9);
-        Drawable icon = Icons.tinted(this, res, 0xFF0D0D0D, dp(22));
-        tv.setBackgroundDrawable(new InsetDrawable(icon, inset, inset, inset, inset));
+        int size = dp(24);
+        Drawable icon = Icons.tinted(this, res, M3.onSurfaceVariant, size);
+        android.graphics.drawable.LayerDrawable centered = new android.graphics.drawable.LayerDrawable(new Drawable[]{icon});
+        centered.setLayerSize(0, size, size);
+        centered.setLayerGravity(0, android.view.Gravity.CENTER);
+        tv.setBackgroundDrawable(M3.ripple(centered, M3.onSurface, dp(24)));
     }
 
     /** 新开会话：旧的留在库里，侧边栏还能点回去。 */
@@ -2507,9 +2452,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (list.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText(R.string.drawer_empty);
-            empty.setTextSize(15);
-            empty.setTextColor(getResources().getColor(R.color.text_secondary));
-            empty.setPadding(0, dp(12), 0, 0);
+            empty.setTextSize(14);
+            empty.setTextColor(M3.onSurfaceVariant);
+            empty.setPadding(dp(16), dp(12), dp(16), 0);
             drawerSessions.addView(empty);
             return;
         }
@@ -2517,14 +2462,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             final ChatStore.Session session = list.get(i);
             TextView row = new TextView(this);
             row.setText(session.title);
-            row.setTextSize(15);
+            // M3 导航抽屉项：56dp 高的胶囊，当前会话铺 secondaryContainer。
+            row.setTextSize(14);
             row.setMaxLines(1);
             row.setEllipsize(TextUtils.TruncateAt.END);
-            row.setTextColor(getResources().getColor(R.color.text_primary));
-            row.setPadding(dp(12), dp(10), dp(12), dp(10));
-            if (session.id == sessionId) {
-                row.setBackgroundResource(R.drawable.bg_popup_selected);
-            }
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setMinHeight(dp(56));
+            boolean current = session.id == sessionId;
+            row.setTextColor(current ? M3.onSecondaryContainer : M3.onSurfaceVariant);
+            row.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            row.setPadding(dp(16), 0, dp(24), 0);
+            row.setBackground(M3.ripple(current ? M3.fill(M3.secondaryContainer, dp(28)) : null, M3.onSurface, dp(28)));
             row.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -2544,13 +2492,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(4);
+            lp.bottomMargin = dp(2);
             drawerSessions.addView(row, lp);
         }
     }
 
     private void confirmDelete(final ChatStore.Session session) {
-        new AlertDialog.Builder(this)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setMessage(R.string.drawer_delete)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(android.R.string.ok,
@@ -3729,14 +3677,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
         TextView title = new TextView(this);
         title.setText(R.string.usage_title);
-        title.setTextSize(20);
-        title.setTextColor(getResources().getColor(R.color.text_primary));
+        sheetTitle(title);
         body.addView(title, fullWidth());
         TextView section = new TextView(this);
         section.setText(R.string.usage_context);
-        section.setTextSize(13);
-        section.setTextColor(getResources().getColor(R.color.text_secondary));
-        section.setPadding(dp(4), dp(14), 0, dp(8));
+        section.setTextSize(14);
+        section.setTextColor(M3.primary);
+        section.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        section.setPadding(dp(16), dp(8), 0, dp(8));
         body.addView(section, fullWidth());
 
         LinearLayout card = dirGroup();
@@ -3746,22 +3694,23 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         head.setGravity(Gravity.CENTER_VERTICAL);
         TextView name = new TextView(this);
         name.setText(R.string.usage_window);
-        name.setTextSize(17);
+        name.setTextSize(16);
+        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         name.setTextColor(getResources().getColor(R.color.text_primary));
         head.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView pct = new TextView(this);
         pct.setText(getString(R.string.usage_percent, Math.round(usage.used * 100f / limit)));
         pct.setTextSize(15);
-        pct.setTextColor(0xFF6E6E76);
+        pct.setTextColor(M3.onSurfaceVariant);
         head.addView(pct);
         card.addView(head, fullWidth());
 
-        final int[] colors = { 0xFF2E6BE6, 0xFFE8663D, 0xFF1EA672, 0xFFE0A21B, 0xFF8A3FC2 };
+        final int[] colors = { M3.primary, M3.tertiary, M3.success, M3.warning, M3.secondary };
         int[] values = { usage.messages, usage.systemTools, usage.mcpTools, system, prompt };
         float[] parts = new float[values.length];
         for (int i = 0; i < values.length; i++) parts[i] = values[i] / (float) limit;
         com.mkei.backcast.ui.UsageBar bar = new com.mkei.backcast.ui.UsageBar(this);
-        bar.setParts(parts, colors, 0xFFE4E4E9);
+        bar.setParts(parts, colors, M3.containerHighest);
         LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8));
         barLp.topMargin = dp(12);
         card.addView(bar, barLp);
@@ -3773,7 +3722,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         card.addView(total, fullWidth());
 
         View line = new View(this);
-        line.setBackgroundColor(0xFFE6E6EA);
+        line.setBackgroundColor(M3.outlineVariant);
         card.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
         int[] labels = { R.string.usage_messages, R.string.usage_system_tools, R.string.usage_mcp_tools,
                 R.string.usage_system_prompt, R.string.usage_user_prompt };
@@ -3784,13 +3733,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             if (i == 4 && prompt == 0) continue;
             legend.addView(usageRow(colors[i], getString(labels[i]), values[i], limit));
         }
-        legend.addView(usageRow(0xFFC9C9CF, getString(R.string.usage_compact_buffer), usage.compactBuffer, limit));
-        legend.addView(usageRow(0xFFEDEDF0, getString(R.string.usage_free), free, limit));
+        legend.addView(usageRow(M3.outline, getString(R.string.usage_compact_buffer), usage.compactBuffer, limit));
+        legend.addView(usageRow(M3.containerHighest, getString(R.string.usage_free), free, limit));
         card.addView(legend, fullWidth());
 
         if (!usage.mcp.isEmpty()) {
             View line2 = new View(this);
-            line2.setBackgroundColor(0xFFE6E6EA);
+            line2.setBackgroundColor(M3.outlineVariant);
             card.addView(line2, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
             card.addView(mcpUsage(usage.mcp, usage.mcpTools), fullWidth());
         }
@@ -3798,8 +3747,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         TextView note = new TextView(this);
         note.setText(R.string.usage_note);
         note.setTextSize(12);
-        note.setTextColor(getResources().getColor(R.color.text_secondary));
-        note.setPadding(dp(4), dp(10), dp(4), 0);
+        note.setTextColor(M3.onSurfaceVariant);
+        note.setPadding(dp(16), dp(12), dp(16), 0);
         body.addView(note, fullWidth());
         showSheet();
     }
@@ -3832,7 +3781,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         TextView share = new TextView(this);
         share.setText(String.format(java.util.Locale.ROOT, "%.1f%%", tokens * 100f / Math.max(1, limit)));
         share.setTextSize(15);
-        share.setTextColor(0xFF6E6E76);
+        share.setTextColor(M3.onSurfaceVariant);
         share.setGravity(Gravity.END);
         row.addView(share, new LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
         return row;
@@ -3854,10 +3803,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         TextView count = new TextView(this);
         count.setText(String.valueOf(tools.size()));
         count.setTextSize(12);
-        count.setTextColor(0xFF4A4A52);
+        count.setTextColor(M3.onSurfaceVariant);
         count.setPadding(dp(8), dp(1), dp(8), dp(2));
         android.graphics.drawable.GradientDrawable chip = new android.graphics.drawable.GradientDrawable();
-        chip.setColor(0xFFE4E4E9);
+        chip.setColor(M3.containerHighest);
         chip.setCornerRadius(dp(10));
         count.setBackground(chip);
         LinearLayout.LayoutParams countLp = new LinearLayout.LayoutParams(
@@ -3871,7 +3820,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         sum.setTextColor(getResources().getColor(R.color.text_primary));
         head.addView(sum);
         final ImageView chevron = new ImageView(this);
-        chevron.setImageDrawable(Icons.tinted(this, Icons.CHEVRON_RIGHT, 0xFF8E8E93, dp(18)));
+        chevron.setImageDrawable(Icons.tinted(this, Icons.CHEVRON_RIGHT, M3.onSurfaceVariant, dp(18)));
         LinearLayout.LayoutParams chevronLp = new LinearLayout.LayoutParams(dp(18), dp(18));
         chevronLp.leftMargin = dp(8);
         head.addView(chevron, chevronLp);
@@ -3894,14 +3843,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                     TextView tool = new TextView(MainActivity.this);
                     tool.setText(tools.get(i)[0]);
                     tool.setTextSize(13);
-                    tool.setTextColor(0xFF4A4A52);
+                    tool.setTextColor(M3.onSurfaceVariant);
                     tool.setSingleLine(true);
                     tool.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
                     row.addView(tool, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
                     TextView n = new TextView(MainActivity.this);
                     n.setText(compactK(Integer.parseInt(tools.get(i)[1])));
                     n.setTextSize(13);
-                    n.setTextColor(0xFF4A4A52);
+                    n.setTextColor(M3.onSurfaceVariant);
                     n.setGravity(Gravity.END);
                     row.addView(n, new LinearLayout.LayoutParams(dp(56), ViewGroup.LayoutParams.WRAP_CONTENT));
                     list.addView(row, fullWidth());
@@ -4006,17 +3955,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         row.setPadding(0, dp(12), 0, dp(12));
         row.setContentDescription("compaction");
         View left = new View(this);
-        left.setBackgroundColor(0xFFE2E2E7);
+        left.setBackgroundColor(M3.outlineVariant);
         row.addView(left, new LinearLayout.LayoutParams(0, Math.max(1, dp(1)), 1f));
         TextView caption = new TextView(this);
         caption.setText(getString(live ? R.string.compacting : R.string.compacted));
         caption.setTextSize(14);
         caption.setIncludeFontPadding(false);
-        caption.setTextColor(0xFF8E8E93);
+        caption.setTextColor(M3.onSurfaceVariant);
         caption.setPadding(dp(12), 0, dp(12), 0);
         row.addView(caption);
         View right = new View(this);
-        right.setBackgroundColor(0xFFE2E2E7);
+        right.setBackgroundColor(M3.outlineVariant);
         row.addView(right, new LinearLayout.LayoutParams(0, Math.max(1, dp(1)), 1f));
         target.addView(row, fullWidth());
         return row;
@@ -4093,7 +4042,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         TextView tv = new TextView(this);
         tv.setText(text);
         tv.setTextSize(16);
-        tv.setTextColor(getResources().getColor(R.color.text_primary));
+        tv.setTextColor(M3.onPrimaryContainer);
         tv.setLineSpacing(dp(2), 1f);
         tv.setBackgroundResource(R.drawable.bg_bubble_user);
         tv.setPadding(dp(16), dp(10), dp(16), dp(10));
@@ -4135,7 +4084,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         head.setTag(trace);
         SweepText header = new SweepText(this);
         header.setTextSize(14);
-        header.setTextColor(0xFF6E6E76);
+        header.setTextColor(M3.onSurfaceVariant);
         header.setIncludeFontPadding(false);
         header.setTag(trace);
         head.addView(header, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -4151,7 +4100,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         activity.setGravity(Gravity.CENTER_VERTICAL);
         TextView caption = new TextView(this);
         caption.setTextSize(13);
-        caption.setTextColor(0xFF8E8E93);
+        caption.setTextColor(M3.onSurfaceVariant);
         caption.setPadding(0, dp(3), dp(8), dp(8));
         activity.addView(caption, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         View rowChevron = makeChevron();
@@ -4353,7 +4302,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         head.setMinimumHeight(dp(40));
         TextView caption = new TextView(this);
         caption.setTextSize(14);
-        caption.setTextColor(0xFF6E6E76);
+        caption.setTextColor(M3.onSurfaceVariant);
         caption.setPadding(0, dp(8), dp(8), dp(8));
         head.addView(caption, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         head.addView(makeChevron());
@@ -4471,7 +4420,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         ImageView chevron = new ImageView(this);
         int size = dp(16);
         chevron.setImageDrawable(
-                Icons.tinted(this, Icons.CHEVRON_RIGHT, 0xFF6E6E76, size));
+                Icons.tinted(this, Icons.CHEVRON_RIGHT, M3.onSurfaceVariant, size));
         chevron.setScaleType(ImageView.ScaleType.FIT_CENTER);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
         lp.gravity = Gravity.CENTER_VERTICAL;
@@ -4648,7 +4597,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         earlierRow = row;
         row.setText(getString(R.string.earlier_messages, Long.valueOf(count)));
         row.setTextSize(14);
-        row.setTextColor(0xFFAEAEB2);
+        row.setTextColor(M3.outline);
         row.setPadding(0, dp(10), 0, dp(8));
         row.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -5312,7 +5261,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         long budget = loop.goalTokenBudget();
         input.setText(budget > 0 ? String.valueOf(budget) : "");
         input.setTextSize(15);
-        new AlertDialog.Builder(this)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.goal_budget_title)
                 .setView(input)
                 .setPositiveButton(android.R.string.ok,
@@ -5343,7 +5292,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         input.setMaxLines(6);
         input.setTextSize(15);
         input.setSelection(input.getText().length());
-        new AlertDialog.Builder(this)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.goal_edit)
                 .setView(input)
                 .setPositiveButton(android.R.string.ok,
@@ -5506,7 +5455,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (goalToggle != null) {
             boolean running = loop.goalActive() && loop.busy();
             goalToggle.setImageDrawable(Icons.tinted(this,
-                    running ? Icons.PAUSE : Icons.PLAY, 0xFF3C3C43, dp(16)));
+                    running ? Icons.PAUSE : Icons.PLAY, M3.onSurfaceVariant, dp(16)));
         }
     }
 

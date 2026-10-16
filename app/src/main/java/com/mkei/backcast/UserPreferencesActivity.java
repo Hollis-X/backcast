@@ -15,6 +15,7 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.ui.M3;
 
 public class UserPreferencesActivity extends AppCompatActivity {
     private static final String[] OUTPUT_VERBOSITY_VALUES = { "default", "low", "medium", "high" };
@@ -32,11 +33,12 @@ public class UserPreferencesActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        M3.load(this);
         setContentView(R.layout.activity_user_preferences);
         androidx.appcompat.widget.Toolbar toolbar = (androidx.appcompat.widget.Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        int mark = (int) (22 * getResources().getDisplayMetrics().density);
-        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, 0xFF0D0D0D, mark));
+        int mark = (int) (24 * getResources().getDisplayMetrics().density);
+        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, M3.onSurface, mark));
         toolbar.setNavigationOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { finish(); }
         });
@@ -136,8 +138,8 @@ public class UserPreferencesActivity extends AppCompatActivity {
         String descriptionAt(int position) { return position >= 0 && position < descriptions.length ? descriptions[position] : ""; }
         @Override public View getView(int position, View convertView, ViewGroup parent) {
             TextView title = (TextView) super.getView(position, convertView, parent);
-            title.setTextColor(getResources().getColor(R.color.text_primary));
-            title.setTextSize(14);
+            title.setTextColor(M3.onSurface);
+            title.setTextSize(16);
             title.setSingleLine(false);
             return title;
         }
@@ -169,7 +171,7 @@ public class UserPreferencesActivity extends AppCompatActivity {
             check = (ImageView) row.findViewById(R.id.choice_check);
             int size = (int) (22 * getResources().getDisplayMetrics().density);
             check.setImageDrawable(Icons.tinted(UserPreferencesActivity.this,
-                    R.drawable.ic_ds_checkmark_lg_regular_24, getResources().getColor(R.color.text_primary), size));
+                    R.drawable.ic_ds_checkmark_lg_regular_24, M3.onSecondaryContainer, size));
         }
     }
 

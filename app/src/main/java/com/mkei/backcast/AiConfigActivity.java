@@ -17,6 +17,7 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.ui.M3;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -42,11 +43,12 @@ public class AiConfigActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        M3.load(this);
         setContentView(R.layout.activity_ai_config);
         androidx.appcompat.widget.Toolbar toolbar = (androidx.appcompat.widget.Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        int mark = (int) (22 * getResources().getDisplayMetrics().density);
-        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, 0xFF0D0D0D, mark));
+        int mark = (int) (24 * getResources().getDisplayMetrics().density);
+        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, M3.onSurface, mark));
         toolbar.setNavigationOnClickListener(v -> finish());
         baseUrl = (EditText) findViewById(R.id.base_url);
         apiKey = (EditText) findViewById(R.id.api_key);
@@ -200,20 +202,17 @@ public class AiConfigActivity extends AppCompatActivity {
         modelList.removeAllViews();
         if (models == null || models.isEmpty()) {
             TextView empty = new TextView(this); empty.setText(R.string.model_empty); empty.setTextSize(12);
-            empty.setTextColor(getResources().getColor(R.color.text_secondary)); empty.setPadding(8, 8, 8, 8);
+            empty.setTextColor(M3.onSurfaceVariant); int pad = Math.round(12 * getResources().getDisplayMetrics().density); empty.setPadding(pad, pad, pad, pad);
             modelList.addView(empty); return;
         }
         for (final String name : new ArrayList<String>(models)) {
             LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
-            final CheckBox choice = new CheckBox(this); choice.setText(name); choice.setTextSize(13);
+            final CheckBox choice = new com.google.android.material.checkbox.MaterialCheckBox(this); choice.setText(name); choice.setTextSize(14);
             choice.setTextColor(getResources().getColor(R.color.text_primary)); choice.setChecked(name.equals(model.getText().toString().trim()));
             choice.setPadding(8, 8, 8, 8); choice.setOnClickListener(v -> { model.setText(name); syncChecks(); });
             row.addView(choice, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-            Button remove = new Button(this); remove.setText(R.string.action_remove_saved_model);
-            remove.setAllCaps(false); remove.setTextColor(getResources().getColor(R.color.text_primary));
-            remove.setBackgroundResource(R.drawable.bg_button_secondary); remove.setStateListAnimator(null);
-            int h40 = Math.round(40 * getResources().getDisplayMetrics().density);
-            remove.setMinHeight(h40); remove.setMinimumHeight(h40);
+            Button remove = M3.button(this, M3.TEXT, getString(R.string.action_remove_saved_model));
+            remove.setTextColor(M3.error);
             remove.setOnClickListener(v -> {
                 previewModels.remove(name); if (name.equals(model.getText().toString().trim())) model.setText("");
                 renderModels(previewModels);

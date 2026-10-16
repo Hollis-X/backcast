@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 计划卡片：白底圆角，灰色细边，配合 elevation 投出灰色阴影。 -->
+<!-- 计划卡片：M3 色调卡片，secondaryContainer、大圆角 16dp。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="#FFFFFF"/>
-    <stroke android:width="1dp" android:color="#E6E6EA"/>
-    <corners android:radius="14dp"/>
+    <solid android:color="@color/md_secondary_container"/>
+    <corners android:radius="16dp"/>
 </shape>

@@ -68,10 +68,10 @@ public class SweepText extends TextView {
             span = w;
         }
         float x0 = getTotalPaddingLeft();
-        // 底是浅灰，扫过的一段是纯黑，短标题上才看得清。
+        // 底是 outlineVariant，扫过的一段是 onSurface，短标题上才看得清。
         LinearGradient band = new LinearGradient(
                 x0, 0f, x0 + span, 0f,
-                new int[]{0xFFC8C8CE, 0xFF000000, 0xFF000000, 0xFFC8C8CE},
+                new int[]{M3.outlineVariant, M3.onSurface, M3.onSurface, M3.outlineVariant},
                 new float[]{0f, 0.28f, 0.72f, 1f},
                 Shader.TileMode.REPEAT);
         shift.setTranslate(phase * span, 0f);
