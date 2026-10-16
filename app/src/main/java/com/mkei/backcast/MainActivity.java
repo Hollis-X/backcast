@@ -303,8 +303,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private View topBar;
     private View inputBar;
     private ImageView statusFrost;
-    private Boolean frostLifted;
-    private android.animation.ValueAnimator frostFade;
+    private Bitmap frostBitmap;
     private boolean frostQueued;
     private boolean frosting;
     /** 正在往里追加的那一段正文。下一轮模型请求开始时卸掉引用，视图留在对话里。 */
@@ -872,8 +871,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         // M3 色调芯片：完全访问下工具会直接执行、不再拦，用警示容器色提醒；另外两档有拦截，用 secondaryContainer。
         boolean full = ApprovalGate.ACCESS_FULL.equals(level);
         accessChip.setTextColor(full ? M3.onWarningContainer : M3.onSecondaryContainer);
-        accessChip.setBackground(M3.ripple(M3.fill(full ? M3.warningContainer : M3.secondaryContainer, dp(M3.S)),
-                M3.onSurface, dp(M3.S)));
+        accessChip.setBackgroundResource(full ? R.drawable.bg_chip_warning : R.drawable.bg_chip_tonal);
+        accessChip.setPadding(dp(12), 0, dp(12), 0);
     }
 
     /** 权限选择：三档，改完立刻保存。 */
@@ -1394,6 +1393,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             composerDock = findViewById(R.id.composer_dock);
         }
         statusFrost = (ImageView) findViewById(R.id.status_frost);
+        if (statusFrost != null) {
+            // 还没采到模糊帧时的兜底：M3 surface 色从上往下淡出。
+            statusFrost.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{
+                    M3.alpha(M3.surface, 0.96f), M3.alpha(M3.surface, 0.9f), M3.alpha(M3.surface, 0f)}));
+        }
         View footer = composerDock != null ? composerDock : inputBar;
         if (footer != null) {
             footer.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
@@ -1609,7 +1613,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         stream.setTranslationY(0f);
     }
 
-    /** M3 顶部应用栏底色层：盖住状态栏和整条顶栏，高度跟顶栏一致。 */
+    /** 模糊层盖住状态栏和整条顶栏，最下面一小段淡出，不画硬分隔线。 */
     private void fitFrost() {
         if (statusFrost == null || topBar == null) return;
         int barHeight = topBar.getHeight();
@@ -1617,12 +1621,13 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             topBar.post(new Runnable() { public void run() { if (topBar.getHeight() > 0) fitFrost(); } });
             return;
         }
+        int height = barHeight + dp(14);
         ViewGroup.LayoutParams lp = statusFrost.getLayoutParams();
-        if (lp.height != barHeight) {
-            lp.height = barHeight;
+        if (lp.height != height) {
+            lp.height = height;
             statusFrost.setLayoutParams(lp);
+            scheduleFrost();
         }
-        scheduleFrost();
     }
 
     private void scheduleFrost() {
@@ -1636,9 +1641,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 frostQueued = false;
                 renderFrost();
             }
-        }, 16);
+        }, 48);
     }
 
+    /** 只模糊状态栏那一条，并向下淡出。底部不走这里。 */
     private void renderFrost() {
         if (frosting || statusFrost == null || scroll == null) {
             return;
@@ -1651,35 +1657,118 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
     }
 
-    /**
-     * M3「滚动时抬升」：会话顶在最上面时顶栏是 surface，内容滚到顶栏下面后换成 surfaceContainer，
-     * 颜色用 150ms 渐变过去。
-     */
     private void drawFrost() {
         if (statusFrost == null || scroll == null) {
             return;
         }
-        final boolean lifted = scroll.getScrollY() > 0;
-        if (frostLifted != null && frostLifted == lifted) {
+        int w = statusFrost.getWidth();
+        int h = statusFrost.getHeight();
+        if (w < 8 || h < 8) {
             return;
         }
-        int from = frostLifted == null ? (lifted ? M3.container : M3.surface) : (lifted ? M3.surface : M3.container);
-        int to = lifted ? M3.container : M3.surface;
-        frostLifted = lifted;
-        statusFrost.setImageDrawable(null);
-        if (frostFade != null) frostFade.cancel();
-        if (from == to) {
-            statusFrost.setBackgroundColor(to);
-            return;
-        }
-        frostFade = android.animation.ValueAnimator.ofObject(new android.animation.ArgbEvaluator(), from, to);
-        frostFade.setDuration(150);
-        frostFade.addUpdateListener(new android.animation.ValueAnimator.AnimatorUpdateListener() {
-            @Override public void onAnimationUpdate(android.animation.ValueAnimator a) {
-                statusFrost.setBackgroundColor((Integer) a.getAnimatedValue());
+        int bw = Math.max(12, w / 7);
+        int bh = Math.max(6, h / 7);
+        try {
+            Bitmap bmp = frostBitmap;
+            if (bmp == null || bmp.getWidth() != bw || bmp.getHeight() != bh) {
+                bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+                frostBitmap = bmp;
             }
-        });
-        frostFade.start();
+            Canvas canvas = new Canvas(bmp);
+            canvas.drawColor(M3.surface);
+            canvas.save();
+            canvas.scale(bw / (float) w, bh / (float) h);
+            canvas.clipRect(0, 0, w, h);
+            canvas.translate(scroll.getLeft() - statusFrost.getLeft(),
+                    scroll.getTop() - statusFrost.getTop());
+            scroll.draw(canvas);
+            canvas.restore();
+            softenFrost(bmp, M3.surface);
+            statusFrost.setBackgroundColor(Color.TRANSPARENT);
+            statusFrost.setImageBitmap(bmp);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 模糊后向 M3 surface 色蒙一层（深色主题下是深色），顶部八成实、底部淡出。 */
+    private static void softenFrost(Bitmap bmp, int tint) {
+        int tr = (tint >> 16) & 0xff, tg = (tint >> 8) & 0xff, tb = tint & 0xff;
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        int[] px = new int[w * h];
+        bmp.getPixels(px, 0, w, 0, 0, w, h);
+        boxBlur(px, w, h, 1);
+        boxBlur(px, w, h, 1);
+        // 上面约八成保持同样的磨砂，只有最下面一段淡出到透明。
+        int solid = Math.max(1, h * 4 / 5);
+        int last = Math.max(1, h - 1 - solid);
+        for (int y = 0; y < h; y++) {
+            float fade = y < solid ? 1f : 1f - ((y - solid) / (float) last);
+            fade = fade * fade;
+            int veil = (int) (180f * fade);
+            int keep = (int) (236f * fade);
+            int row = y * w;
+            for (int x = 0; x < w; x++) {
+                int c = px[row + x];
+                int r = (c >> 16) & 0xff;
+                int g = (c >> 8) & 0xff;
+                int b = c & 0xff;
+                r = (r * (255 - veil) + tr * veil) / 255;
+                g = (g * (255 - veil) + tg * veil) / 255;
+                b = (b * (255 - veil) + tb * veil) / 255;
+                px[row + x] = (keep << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+        bmp.setPixels(px, 0, w, 0, 0, w, h);
+    }
+
+    private static void boxBlur(int[] px, int w, int h, int radius) {
+        int[] tmp = new int[px.length];
+        for (int y = 0; y < h; y++) {
+            int row = y * w;
+            for (int x = 0; x < w; x++) {
+                int a = 0;
+                int r = 0;
+                int g = 0;
+                int b = 0;
+                int n = 0;
+                for (int k = -radius; k <= radius; k++) {
+                    int xx = x + k;
+                    if (xx < 0 || xx >= w) {
+                        continue;
+                    }
+                    int c = px[row + xx];
+                    a += (c >>> 24) & 0xff;
+                    r += (c >> 16) & 0xff;
+                    g += (c >> 8) & 0xff;
+                    b += c & 0xff;
+                    n++;
+                }
+                tmp[row + x] = ((a / n) << 24) | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+            }
+        }
+        for (int x = 0; x < w; x++) {
+            for (int y = 0; y < h; y++) {
+                int a = 0;
+                int r = 0;
+                int g = 0;
+                int b = 0;
+                int n = 0;
+                for (int k = -radius; k <= radius; k++) {
+                    int yy = y + k;
+                    if (yy < 0 || yy >= h) {
+                        continue;
+                    }
+                    int c = tmp[yy * w + x];
+                    a += (c >>> 24) & 0xff;
+                    r += (c >> 16) & 0xff;
+                    g += (c >> 8) & 0xff;
+                    b += c & 0xff;
+                    n++;
+                }
+                px[y * w + x] = ((a / n) << 24) | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+            }
+        }
     }
 
     /** 抽屉开关的动画计时，避免连点时旧的延迟任务把新开的抽屉藏掉。 */

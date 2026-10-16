@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 顶部应用栏底色：M3 surface；内容滚到下面时代码改成 surfaceContainer。 -->
+<!-- 顶栏磨砂层的占位：真正的颜色由代码按 M3 surface 设置（深浅色各自一套）。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/md_surface"/>
+    <solid android:color="@android:color/transparent"/>
 </shape>
