@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 计划步骤：执行中但这一轮已经停下（或是历史版本），不再旋转的加载圆圈：浅色轨道加一段 primary 弧。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp" android:height="18dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#00000000" android:strokeColor="@color/md_outline_variant" android:strokeWidth="2.4"
+        android:pathData="M12,3a9,9 0,1 0,0.001 0z"/>
+    <path android:fillColor="#00000000" android:strokeColor="@color/md_primary" android:strokeWidth="2.4"
+        android:strokeLineCap="round" android:pathData="M12,3A9,9 0,0 1,19.79 16.5"/>
+</vector>

@@ -28,7 +28,17 @@ public final class WorkTimeline extends LinearLayout {
         setPadding(0, px(8), 0, px(12));
     }
 
+    /** 一帧最多新建这么多行；几十段思考、上百次工具一次全建会卡住展开动画，剩下的分帧补上。 */
+    private static final int BATCH = 24;
+    private static final android.os.Handler MAIN = new android.os.Handler(android.os.Looper.getMainLooper());
+    private TurnTrace.Range pendingRange;
+    private boolean pendingLive;
+    private final Runnable more = new Runnable() {
+        public void run() { if (pendingRange != null) bind(pendingRange, pendingLive); }
+    };
+
     public void bind(TurnTrace.Range range, boolean live) {
+        MAIN.removeCallbacks(more);
         int start = Math.max(0, range.start);
         int end = Math.min(range.end, range.trace.order.size());
         List<TurnTrace.Piece> visible = new ArrayList<TurnTrace.Piece>();
@@ -41,16 +51,27 @@ public final class WorkTimeline extends LinearLayout {
         for (int i = 0; !reset && i < rows.size(); i++)
             reset = rows.get(i).piece != visible.get(i);
         if (reset) { rows.clear(); removeAllViews(); }
-        while (rows.size() < count) {
+        int created = 0;
+        while (rows.size() < count && created++ < BATCH) {
             Row row = new Row(visible.get(rows.size()));
             rows.add(row);
             addView(row.root, width());
         }
         for (int i = 0; i < rows.size(); i++) {
             Row row = rows.get(i);
-            row.line.setVisibility(i == rows.size() - 1 ? INVISIBLE : VISIBLE);
+            row.line.setVisibility(i == count - 1 ? INVISIBLE : VISIBLE);
             row.bind(live, range.trace.rawReasoning);
         }
+        pendingRange = rows.size() < count ? range : null;
+        pendingLive = live;
+        // 用主线程 Handler 而不是 View.post：面板还没挂上窗口时 View.post 会一直排着不跑。
+        if (pendingRange != null) MAIN.postDelayed(more, 16);
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        MAIN.removeCallbacks(more);
+        pendingRange = null;
+        super.onDetachedFromWindow();
     }
 
     private final class Row {
@@ -62,6 +83,8 @@ public final class WorkTimeline extends LinearLayout {
         String renderedSummary = null;
         String renderedArgs = null, renderedResult = null;
         int renderedThink = -1;
+        /** 原始思考默认只露 8 行（只排这 8 行，长文本不拖慢展开），点一下看全文。 */
+        boolean rawOpen;
 
         Row(final TurnTrace.Piece piece) {
             this.piece = piece;
@@ -122,6 +145,10 @@ public final class WorkTimeline extends LinearLayout {
                 content.setOnClickListener(new OnClickListener() {
                     public void onClick(View v) { actions.command(piece.step); }
                 });
+            } else {
+                content.setOnClickListener(new OnClickListener() {
+                    public void onClick(View v) { rawOpen = !rawOpen; renderedThink = -1; bindRaw(false); }
+                });
             }
         }
 
@@ -179,7 +206,7 @@ public final class WorkTimeline extends LinearLayout {
             TurnTrace.Step step = piece.step;
             brief.setMaxLines(3);
             title.setText(toolTitle(step));
-            state.setText(withDelta(toolState(step, live), step.done ? com.mkei.backcast.agent.LineDelta.parse(step.result) : null));
+            state.setText(withDelta(toolState(step, live), step.delta()));
             if (renderedArgs != step.args || renderedResult != step.result) {
                 renderedArgs = step.args; renderedResult = step.result;
                 brief.setText(ReasoningSummary.clip(command(step), 160)
@@ -195,12 +222,15 @@ public final class WorkTimeline extends LinearLayout {
             retry.setVisibility(GONE);
             notes.setVisibility(GONE);
             int size = piece.think.length();
-            brief.setMaxLines(Integer.MAX_VALUE);
+            boolean folded = !active && !rawOpen;
+            brief.setMaxLines(folded ? 8 : Integer.MAX_VALUE);
+            brief.setEllipsize(folded ? android.text.TextUtils.TruncateAt.END : null);
             brief.setVisibility(size == 0 ? GONE : VISIBLE);
             if (renderedThink != size) {
                 renderedThink = size;
                 String text = piece.think.toString().trim();
-                if (text.length() > RAW_LIMIT) {
+                if (active && text.length() > RAW_LIMIT) {
+                    // 还在流式输出：只显示末尾一段，跟着最新的字。
                     int from = text.length() - RAW_LIMIT;
                     if (Character.isLowSurrogate(text.charAt(from))) from++;
                     text = "…" + text.substring(from);

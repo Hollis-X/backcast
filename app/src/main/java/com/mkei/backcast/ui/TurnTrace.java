@@ -17,6 +17,18 @@ public class TurnTrace {
         public boolean started;
         /** Streaming arguments are visible before a tool is dispatched. */
         public String phase = "preview";
+        private String deltaOf;
+        private int[] delta;
+
+        /**
+         * 这次调用的增删行数（没有改动返回 null）。结果只解析一次：
+         * 流式刷新每 100ms 会把所有折叠行的合计重算一遍，原来每次都对每条工具结果跑一遍正则，几十上百条工具时明显卡顿。
+         */
+        public int[] delta() {
+            if (!done) return null;
+            if (deltaOf != result) { delta = com.mkei.backcast.agent.LineDelta.parse(result); deltaOf = result; }
+            return delta;
+        }
     }
 
     public static final String PLAN = "update_plan";
@@ -147,7 +159,7 @@ public class TurnTrace {
         int[] total = null;
         for (int i = Math.max(0, from); i < Math.min(to, order.size()); i++) {
             Step step = order.get(i).step;
-            int[] delta = step == null || !step.done ? null : com.mkei.backcast.agent.LineDelta.parse(step.result);
+            int[] delta = step == null ? null : step.delta();
             if (delta == null) continue;
             if (total == null) total = new int[2];
             total[0] += delta[0]; total[1] += delta[1];

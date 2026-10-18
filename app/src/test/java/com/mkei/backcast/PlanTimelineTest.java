@@ -109,15 +109,32 @@ public class PlanTimelineTest {
     }
 
     @Test
-    public void rendersForReview() throws Exception {
+    public void rendersForReview() throws Exception { render(""); }
+
+    @Test
+    @Config(qualifiers = "w411dp-h914dp-night-xxhdpi")
+    public void rendersForReviewDark() throws Exception { render("-dark"); }
+
+    private void render(String suffix) throws Exception {
         String dir = System.getenv("BACKCAST_SCREENSHOTS");
         if (dir == null || dir.length() == 0) return;
         Context context = new android.view.ContextThemeWrapper(RuntimeEnvironment.getApplication(), R.style.AppTheme);
+        com.mkei.backcast.ui.M3.load(context);
         LinearLayout page = new LinearLayout(context);
         page.setOrientation(LinearLayout.VERTICAL);
         int pad = Math.round(16 * context.getResources().getDisplayMetrics().density);
         page.setPadding(pad, pad, pad, pad);
-        page.setBackgroundColor(Color.WHITE);
+        page.setBackgroundColor(com.mkei.backcast.ui.M3.surface);
+        // 目标栏里的改动行数：一个落位，一个正在翻（个位从 7 翻到 8）。
+        com.mkei.backcast.ui.RollingDiff still = new com.mkei.backcast.ui.RollingDiff(context);
+        still.setColors(com.mkei.backcast.ui.M3.success, com.mkei.backcast.ui.M3.error);
+        still.set(31, 0, false);
+        page.addView(still);
+        // 两个计划版本：第 1 版成了历史（收起），第 2 版是最新。
+        PlanCard first = new PlanCard(context);
+        first.bind(plan("梳理现有的子代理逻辑", "in_progress", "把等待改成完成通知", "pending",
+                "补齐发消息唤醒空闲代理", "pending", "更新测试", "pending", "构建并回归", "pending"), true);
+        page.addView(first, PlanCard.layout(context));
         TextView caption = new TextView(context);
         caption.setTextSize(14); caption.setTextColor(0xFF6E6E76);
         caption.setText(WorkTimeline.withDelta("思考 2 段 · 工具 4 次", new int[] { 12, 0 }));
@@ -126,6 +143,7 @@ public class PlanTimelineTest {
         card.bind(plan("梳理现有的子代理逻辑", "completed", "把等待改成完成通知", "completed",
                 "补齐发消息唤醒空闲代理", "in_progress", "更新测试", "pending", "构建并回归", "pending"), true);
         page.addView(card, PlanCard.layout(context));
+        PlanCard.renumber(page);
         TurnTrace trace = new TurnTrace();
         trace.addStep("e", "edit", "{\"path\":\"SubAgentManager.java\"}");
         trace.addStep("w", "write", "{\"path\":\"PlanCard.java\"}");
@@ -136,11 +154,11 @@ public class PlanTimelineTest {
         layout(page);
         Bitmap bitmap = Bitmap.createBitmap(page.getMeasuredWidth(), Math.max(1, page.getMeasuredHeight()), Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
-        canvas.drawColor(Color.WHITE);
+        canvas.drawColor(com.mkei.backcast.ui.M3.surface);
         page.draw(canvas);
         File out = new File(dir);
         out.mkdirs();
-        try (FileOutputStream stream = new FileOutputStream(new File(out, "17-plan-card.png"))) {
+        try (FileOutputStream stream = new FileOutputStream(new File(out, "17-plan-card" + suffix + ".png"))) {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream);
         }
     }

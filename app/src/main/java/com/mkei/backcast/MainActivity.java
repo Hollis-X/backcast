@@ -105,8 +105,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private TextView goalLabel;
     private TextView goalTime;
     private ImageView goalEdit;
-    /** 目标卡片的预算标签。没设预算时留空。 */
-    private TextView goalBudgetLabel;
+    /** 目标栏里本次任务的代码改动行数（+新增 -删除），替换原来的 token 数；长按仍可改 token 预算。 */
+    private com.mkei.backcast.ui.RollingDiff goalDiff;
+    private boolean goalDiffShown;
+    /**
+     * 当前任务（最后一条用户消息之后）的所有工作段。目标栏的增删行数按它们合计。
+     * 往前补加载更早的一页时不算（replayEarlier）。
+     */
+    private final List<TurnTrace> taskTraces = new ArrayList<TurnTrace>();
+    private boolean replayEarlier;
     private ImageView goalClear;
     private ImageView goalToggle;
     private int goalTick;
@@ -252,6 +259,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         boolean bodySeen;
         TurnTrace.Range activeRange;
         Message request;
+        /** 同一个任务里（中间没有新的用户消息）的第一个工作段；自己就是第一个时为 null。只有第一个显示「工作了」。 */
+        Flow top;
 
         Flow(LinearLayout box, LinearLayout rows) {
             this.box = box;
@@ -403,7 +412,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         goalBar = findViewById(R.id.goal_bar);
         goalLabel = (TextView) findViewById(R.id.goal_label);
         goalTime = (TextView) findViewById(R.id.goal_time);
-        goalBudgetLabel = (TextView) findViewById(R.id.goal_budget);
+        goalDiff = (com.mkei.backcast.ui.RollingDiff) findViewById(R.id.goal_diff);
+        if (goalDiff != null) goalDiff.setColors(M3.success, M3.error);
+        // 等宽数字：耗时每秒走字时整栏不会左右晃。
+        if (goalTime != null) goalTime.setFontFeatureSettings("tnum");
         goalEdit = (ImageView) findViewById(R.id.goal_edit);
         goalClear = (ImageView) findViewById(R.id.goal_clear);
         goalToggle = (ImageView) findViewById(R.id.goal_toggle);
@@ -434,9 +446,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 }
             });
         }
-        if (goalBudgetLabel != null) {
-            // 长按预算那一栏改预算：0 或不填表示不设上限，跟 Codex 的可选预算一致。
-            goalBudgetLabel.setOnLongClickListener(new View.OnLongClickListener() {
+        if (goalDiff != null) {
+            // 长按改动行数那一栏改预算：0 或不填表示不设上限，跟 Codex 的可选预算一致。
+            goalDiff.setOnLongClickListener(new View.OnLongClickListener() {
                 @Override
                 public boolean onLongClick(View v) {
                     editGoalBudget();
@@ -2128,6 +2140,12 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         return root == null ? null : hub.subAgents(root);
     }
 
+    /** 子代理页最多画最后这么多条消息，从一条用户消息开始截；再早的不进页面，避免长任务一次画几千个视图。 */
+    private static final int CHILD_TAIL = 240;
+    /** 只在后台读线程里用：上次解析过的历史版本戳和解析结果；戳没变就不再取、不再解析历史。 */
+    private int childParsedStamp;
+    private List<Message> childParsedMessages = new ArrayList<Message>();
+
     /** 读出子代理的历史，有变化才整页重画；还在跑就每秒再看一次。 */
     private void loadChild() {
         if (!childMode || activityDestroyed) return;
@@ -2135,20 +2153,19 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         historyReader.execute(new Runnable() {
             @Override public void run() {
                 SubAgentManager.Record record = null;
-                List<Message> messages = new ArrayList<Message>();
+                List<Message> messages = childParsedMessages;
                 org.json.JSONArray comms = new org.json.JSONArray();
                 try {
                     SubAgentManager manager = childManager();
-                    record = manager == null ? null : manager.find(childId);
+                    // 检查点历史整份替换：版本戳没变就说明没有新消息，只取状态，直接用上次解析的结果。
+                    int stamp = manager == null ? 0 : manager.historyStamp(childId);
+                    boolean changed = stamp != childParsedStamp || childParsedMessages.isEmpty();
+                    record = manager == null ? null : manager.find(childId, changed);
                     if (record != null) comms = manager.communications(childId);
-                    if (record != null) {
-                        for (int i = 0; i < record.history.length(); i++) {
-                            Message m = Message.fromCheckpointJson(record.history.getJSONObject(i));
-                            if (Message.SYSTEM.equals(m.role)) continue;
-                            // 派活和转来的消息只显示原话，不显示给模型看的包装。
-                            if (Message.USER.equals(m.role) && m.delegatedRequest != null) m.content = m.delegatedRequest;
-                            messages.add(m);
-                        }
+                    if (record != null && changed) {
+                        messages = childTail(record.history);
+                        childParsedStamp = stamp;
+                        childParsedMessages = messages;
                     }
                 } catch (Exception error) {
                     recordUiFailure(childRoot, "ui:agent_chat", error);
@@ -2160,10 +2177,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                     @Override public void run() {
                         if (activityDestroyed || isFinishing()) return;
                         if (row == null) {
-                            sessionTitle.setText(R.string.agent_chat_missing);
+                            // 会话还在恢复、一次读失败时不要就此停住：先显示加载中继续重试，连续几次都读不到才说不存在。
+                            childMissing++;
+                            sessionTitle.setText(childMissing >= 5 ? R.string.agent_chat_missing : R.string.history_loading);
                             send.setEnabled(false);
+                            if (slashResumed) stream.postDelayed(childPoll, 800L);
                             return;
                         }
+                        childMissing = 0;
                         showChild(row, page, log);
                         // 运行中每秒刷新；空闲时也慢慢看，别的代理发来消息、对方读到的回执都能跟上。
                         if (slashResumed) stream.postDelayed(childPoll, childBusy ? 1000L : 3000L);
@@ -2173,6 +2194,29 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         });
     }
 
+    /** 解析子代理历史的末尾一段：隐藏系统消息，派活和转来的消息只显示原话。 */
+    private static List<Message> childTail(org.json.JSONArray history) throws Exception {
+        int start = Math.max(0, history.length() - CHILD_TAIL);
+        // 截断点往后挪到一条用户消息上，工具结果不会和它的调用分开。
+        for (int i = start; start > 0 && i < history.length(); i++) {
+            if (Message.USER.equals(history.getJSONObject(i).optString("role"))) { start = i; break; }
+        }
+        List<Message> messages = new ArrayList<Message>();
+        for (int i = start; i < history.length(); i++) {
+            Message m = Message.fromCheckpointJson(history.getJSONObject(i));
+            if (Message.SYSTEM.equals(m.role)) continue;
+            if (Message.USER.equals(m.role) && m.delegatedRequest != null) m.content = m.delegatedRequest;
+            messages.add(m);
+        }
+        return messages;
+    }
+
+    /** 正在画的那一页还没画完时，新到的快照先存着，画完再画最新的一份；不再打断重来。 */
+    private boolean childRendering;
+    private int childRenderToken;
+    private int childMissing;
+    private Object[] childPending;
+
     private void showChild(SubAgentManager.Record row, List<Message> messages, org.json.JSONArray comms) {
         childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status);
         sessionTitle.setText(row.name);
@@ -2181,30 +2225,45 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         prompt.setEnabled(true);
         send.setEnabled(!childSending);
         setBusy(childBusy);
-        // 通信状态（对方读没读到）变了也要重画，所以把通信记录算进签名。
-        String signature = row.id + ":" + row.revision + ":" + messages.size() + ":" + row.status
-                + ":" + comms.toString().hashCode();
+        // 签名只看会改变页面内容的东西：历史（同一份解析结果）、状态和通信记录。
+        // 不看 revision：子代理每次报阶段都会加它，按它重画会让长历史永远画不完，页面一直空白。
+        String signature = row.id + ":" + System.identityHashCode(messages) + ":" + messages.size() + ":" + row.status
+                + ":" + row.error + ":" + comms.toString().hashCode();
         if (signature.equals(childRendered)) return;
+        // 别处换了页（historyToken 变了）时那一页不会再回调，不能一直当它还在画。
+        if (childRendering && childRenderToken == historyToken) {
+            childPending = new Object[] { row, messages, comms };
+            return;
+        }
         childRendered = signature;
+        childRendering = true;
         indexComms(comms);
         historyToken++;
         final int token = historyToken;
+        childRenderToken = token;
         final boolean atEnd = followLatest || stuckAtEnd();
         final int scrollY = scroll.getScrollY();
         final LinearLayout block = new LinearLayout(this);
         block.setOrientation(LinearLayout.VERTICAL);
+        block.setContentDescription("block");
         ChatStore.MessagePage page = new ChatStore.MessagePage(messages, 0, 0, null, "", null,
                 new ArrayList<Message>());
         renderPage(page, block, token, new Runnable() {
             @Override public void run() {
+                childRendering = false;
                 if (token != historyToken) return;
                 releaseLiveViews();
                 stream.removeAllViews();
                 stream.addView(block, fullWidth());
                 if (stream != null && !childBusy) PlanCard.settleAll(stream);
+                PlanCard latestPlan = childBusy ? PlanCard.latest(stream) : null;
+                if (latestPlan != null) latestPlan.relive();
                 if (atEnd) scrollToLatest();
                 else scroll.post(new Runnable() { @Override public void run() { scroll.scrollTo(0, scrollY); } });
                 updateLatestButton();
+                Object[] next = childPending;
+                childPending = null;
+                if (next != null) showChild((SubAgentManager.Record) next[0], (List<Message>) next[1], (org.json.JSONArray) next[2]);
             }
         }, false);
     }
@@ -3275,6 +3334,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                         refreshFoldResults(turnRows);
                         refreshAllFolds(turnFlow);
                         syncSheetTools();
+                        // 文件改动一落地，目标栏的增删行数立刻跟上。
+                        if (goalBar != null && goalBar.getVisibility() == View.VISIBLE) paintGoal();
                     }
                 }
             });
@@ -3549,6 +3610,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (turnFlow != null) turnFlow.request = replayTailRequest;
         markTurn();
         startTick();
+        // 目标续跑开了新的一段：上一段结束时停转的最新计划，执行中的那一步重新转起来。
+        PlanCard latestPlan = PlanCard.latest(stream);
+        if (latestPlan != null && loop != null && loop.busy()) latestPlan.relive();
     }
 
     /** 压缩只占一条分隔线，成功后把中间的文字改为「已压缩」。 */
@@ -3844,6 +3908,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         refreshTurnChrome();
         refreshFoldResults(turnRows);
         refreshAllFolds(turnFlow);
+        liftElapsed(turnFlow, currentTrace);
         if (sessionId >= 0) {
             chatStore.markElapsed(sessionId, currentTrace.elapsedMs, currentTrace.thinkMs);
         }
@@ -4306,7 +4371,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.RIGHT);
         row.setPadding(0, dp(8), 0, dp(8));
+        row.setContentDescription("user");
         row.addView(column);
+        if (!replayEarlier) taskTraces.clear();
 
         host().addView(row, fullWidth());
         autoScroll();
@@ -4363,9 +4430,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         box.addView(rows, fullWidth());
         Flow flow = new Flow(box, rows);
         box.setTag(flow);
+        if (!replayEarlier) taskTraces.add(trace);
+        // 同一任务的续跑（目标续跑、压缩后接着做）不再各画一行「工作了」，总耗时只显示在这个任务最上面那一行。
+        flow.top = runTop(host(), new boolean[1]);
+        if (flow.top != null) head.setVisibility(View.GONE);
         host().addView(box, fullWidth());
         if (live) {
-            workHeader = header; turnChevron = chevron;
+            TextView topHeader = flow.top == null ? null : summaryHeader(flow.top.rows);
+            workHeader = topHeader != null ? topHeader : header; turnChevron = chevron;
             turnRows = rows; turnFlow = flow; turnRendered = 0;
         }
         bindSummary(header, trace);
@@ -4373,6 +4445,33 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         syncWorkChevron(chevron, trace);
         autoScroll();
         return rows;
+    }
+
+    /** 往回找这个任务（上一条用户消息之后）最早的工作段；遇到用户消息就停。回放的整页包在 block 里，要往里找。 */
+    private Flow runTop(ViewGroup parent, boolean[] stop) {
+        for (int i = parent.getChildCount() - 1; i >= 0 && !stop[0]; i--) {
+            View child = parent.getChildAt(i);
+            if ("user".equals(child.getContentDescription())) { stop[0] = true; return null; }
+            if (child.getTag() instanceof Flow) {
+                Flow found = (Flow) child.getTag();
+                stop[0] = true;
+                return found.top != null ? found.top : found;
+            }
+            if ("block".equals(child.getContentDescription()) && child instanceof ViewGroup) {
+                Flow found = runTop((ViewGroup) child, stop);
+                if (stop[0]) return found;
+            }
+        }
+        return null;
+    }
+
+    /** 续跑段结束后，把它的耗时并到任务最上面那一行（耗时是累计的，取较大者）。 */
+    private void liftElapsed(Flow flow, TurnTrace trace) {
+        if (flow == null || flow.top == null || trace == null) return;
+        TurnTrace top = traceOf(flow.top.rows);
+        if (top == null) return;
+        if (trace.elapsedMs > top.elapsedMs) top.elapsedMs = trace.elapsedMs;
+        bindSummary(summaryHeader(flow.top.rows), top);
     }
 
     /** 点「工作了」展开或收起。先把还没画上的思考补进这一行，避免点了没反应。 */
@@ -4436,6 +4535,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         long ms = trace.elapsedMs > 0 ? trace.elapsedMs
                 : (trace == currentTrace ? displayElapsed(trace) : 0L);
         ViewParent parent = header.getParent();
+        Object owner = parent instanceof View && ((View) parent).getParent() instanceof View
+                ? ((View) ((View) parent).getParent()).getTag() : null;
+        if (owner instanceof Flow && ((Flow) owner).top != null && header != workHeader) ms = 0;
         showRowChevron(parent, ms <= 0);
         if (ms <= 0) {
             header.setText("");
@@ -4590,44 +4692,53 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         return flow.body;
     }
 
-    /** 本轮有计划时，在“工作了”折叠行下面放一张卡片，跟着计划原地更新。 */
+    /**
+     * 每次调用 update_plan 是一个计划版本：各画一张卡片，放在调用它的那一段折叠行下面。
+     * 旧版本保留当时的内容，不再拿新计划去改它；最新那张随参数流式生成实时更新（编号和新旧区分见 PlanCard.renumber）。
+     */
     private void syncPlanCard(Flow flow) {
         TurnTrace trace = traceOf(flow.rows);
-        String plan = trace == null ? null : trace.latestPlan();
-        PlanCard card = null;
-        for (int i = 0; i < flow.box.getChildCount(); i++)
-            if (flow.box.getChildAt(i) instanceof PlanCard) { card = (PlanCard) flow.box.getChildAt(i); break; }
-        // 参数还在流式生成、解析不了时先不画，免得出现空卡片。
-        if (plan != null && com.mkei.backcast.tool.PlanTool.normalize(plan) == null) plan = null;
-        if (plan == null) {
-            if (card != null) flow.box.removeView(card);
-            return;
+        if (trace == null) return;
+        boolean live = trace == currentTrace && loop != null && loop.busy();
+        java.util.Map<TurnTrace.Step, PlanCard> cards = new java.util.IdentityHashMap<TurnTrace.Step, PlanCard>();
+        for (int i = 0; i < flow.box.getChildCount(); i++) {
+            View child = flow.box.getChildAt(i);
+            if (child instanceof PlanCard && child.getTag() instanceof TurnTrace.Step)
+                cards.put((TurnTrace.Step) child.getTag(), (PlanCard) child);
         }
-        if (card == null) {
-            // 哪一段第一次调用了计划，卡片就画在那一段折叠行下面；之后的更新原地刷新，不再挪动。
-            View anchor = planAnchor(flow, trace);
-            if (anchor == null) return;
-            card = new PlanCard(this);
-            flow.box.addView(card, flow.box.indexOfChild(anchor) + 1, PlanCard.layout(this));
-        }
-        card.bind(plan, trace == currentTrace && loop != null && loop.busy());
-    }
-
-    /** 找到包含第一次计划调用的折叠行（第一段或正文之后的某一段）。还没画出来就返回 null，下次刷新再放。 */
-    private View planAnchor(Flow flow, TurnTrace trace) {
-        int at = -1;
+        java.util.Map<TurnTrace.Step, Boolean> present = new java.util.IdentityHashMap<TurnTrace.Step, Boolean>();
         for (int i = 0; i < trace.order.size(); i++) {
             TurnTrace.Step step = trace.order.get(i).step;
-            if (step != null && TurnTrace.PLAN.equals(step.name)) { at = i; break; }
+            if (step == null || !TurnTrace.PLAN.equals(step.name)) continue;
+            present.put(step, Boolean.TRUE);
+            PlanCard card = cards.get(step);
+            if (card == null) {
+                // 参数还在流式生成、解析不了时先不画，免得出现空卡片。
+                if (com.mkei.backcast.tool.PlanTool.normalize(step.args) == null) continue;
+                View anchor = rangeView(flow, i);
+                if (anchor == null) continue;
+                int at = flow.box.indexOfChild(anchor) + 1;
+                while (at < flow.box.getChildCount() && flow.box.getChildAt(at) instanceof PlanCard) at++;
+                card = new PlanCard(this);
+                card.setTag(step);
+                flow.box.addView(card, at, PlanCard.layout(this));
+            }
+            card.bind(step.args, live);
         }
-        if (at < 0) return null;
+        // 请求失败撤回的半截预览：对应的卡片一起撤掉。
+        for (java.util.Map.Entry<TurnTrace.Step, PlanCard> entry : cards.entrySet())
+            if (!present.containsKey(entry.getKey())) flow.box.removeView(entry.getValue());
+    }
+
+    /** 包含第 index 条思考 / 工具的折叠行（第一段或正文之后的某一段）。还没画出来就返回 null，下次刷新再放。 */
+    private View rangeView(Flow flow, int index) {
         for (int i = 0; i < flow.box.getChildCount(); i++) {
             View child = flow.box.getChildAt(i);
             Object tag = child == flow.box.getChildAt(0) ? null : child.getTag();
             if (child == flow.rows) tag = flow.rows.getTag();
             if (tag instanceof TurnTrace.Range) {
                 TurnTrace.Range range = (TurnTrace.Range) tag;
-                if (range.start <= at && at < range.end) return child;
+                if (range.start <= index && index < range.end) return child;
             }
         }
         return null;
@@ -4712,6 +4823,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         earlierRow = null;
         earlierBeforeId = 0;
         renderHost = null;
+        taskTraces.clear();
+        goalDiffShown = false;
         replayTailRequest = null;
         followLatest = true;
         cancelLatestJumpAnimation();
@@ -4726,6 +4839,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (page.earlierCount > 0) addEarlierRow(page.earlierCount);
         final LinearLayout block = new LinearLayout(this);
         block.setOrientation(LinearLayout.VERTICAL);
+        block.setContentDescription("block");
         renderPage(page, block, token, new Runnable() {
             @Override public void run() {
                 stream.addView(block, fullWidth());
@@ -4775,6 +4889,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 if (token != historyToken || isFinishing()) return;
                 LinearLayout previous = renderHost;
                 renderHost = block;
+                replayEarlier = !latest;
                 try {
                     if (next == 0 && page.leadingAssistant != null) {
                         seedReplayTools(cursor, page.leadingAssistant);
@@ -4793,6 +4908,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                     }
                 } finally {
                     renderHost = previous;
+                    replayEarlier = false;
                 }
                 if (next < messages.size()) stream.postOnAnimation(this);
                 else {
@@ -4874,6 +4990,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                             if (token != historyToken || sid != sessionId || row != earlierRow) return;
                             final LinearLayout block = new LinearLayout(MainActivity.this);
                             block.setOrientation(LinearLayout.VERTICAL);
+                            block.setContentDescription("block");
                             renderPage(page, block, token, new Runnable() {
                                 @Override public void run() {
                                     insertEarlierPage(row, block, page);
@@ -5090,6 +5207,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         refreshFoldResults(rows);
         bindSummary(summaryHeader(rows), turn);
         syncWorkChevron(summaryChevron(rows), turn);
+        liftElapsed(flowOf(rows), turn);
     }
 
     /** 盒子里第 index 个孩子是折叠段就返回它，否则 null。 */
@@ -5487,17 +5605,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
     }
     /** 目标卡片的预算标签：没设预算就不占位置。 */
-    private String budgetText() {
-        if (loop == null) {
-            return "";
+    /** 当前任务里 edit / write 的增删行数合计（每条结果只解析一次，见 TurnTrace.Step.delta）。 */
+    private int[] taskDiff() {
+        int[] total = new int[2];
+        for (TurnTrace trace : taskTraces) {
+            int[] delta = trace.lineDelta(0, trace.order.size());
+            if (delta != null) { total[0] += delta[0]; total[1] += delta[1]; }
         }
-        long used = loop.goalTokensUsed();
-        long budget = loop.goalTokenBudget();
-        if (budget > 0) {
-            return used + " / " + budget;
-        }
-        return used > 0 ? String.valueOf(used) : "";
+        return total;
     }
+
     /**
      * 长按预算那一栏改预算。
      *
@@ -5702,8 +5819,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (goalTime != null) {
             goalTime.setText(loop.goalElapsed() <= 0 ? "" : Goal.clock(loop.goalElapsed()));
         }
-        if (goalBudgetLabel != null) {
-            goalBudgetLabel.setText(budgetText());
+        if (goalDiff != null) {
+            int[] diff = taskDiff();
+            // 第一次显示直接落位；之后数字一变，变了的那几位像时钟一样翻过去。
+            goalDiff.set(diff[0], diff[1], goalDiffShown);
+            goalDiffShown = true;
         }
         if (goalToggle != null) {
             boolean running = loop.goalActive() && loop.busy();

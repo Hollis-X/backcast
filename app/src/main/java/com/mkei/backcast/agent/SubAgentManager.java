@@ -855,8 +855,43 @@ public final class SubAgentManager {
         persist(owner);
     }
 
-    public Record find(String id) throws Exception {
-        synchronized (lock) { Record copy = copy(requireSlot(id).task); copy.path = pathLocked(id); return copy; }
+    public Record find(String id) throws Exception { return find(id, true); }
+
+    /**
+     * 返回独立副本。withHistory=false 时不带检查点历史（界面轮询状态用，history / forkHistory 为空数组）。
+     * 历史在锁外深拷贝：锁里只拿到数组引用（检查点整体替换、从不原地修改），不在全局锁里序列化几 MB 的历史。
+     */
+    public Record find(String id, boolean withHistory) throws Exception {
+        JSONArray history, fork; String light, path;
+        synchronized (lock) {
+            Record task = requireSlot(id).task;
+            history = task.history; fork = task.forkHistory; light = lightJsonLocked(task); path = pathLocked(id);
+        }
+        Record copy = Record.fromJson(new JSONObject(light));
+        copy.history = withHistory ? new JSONArray(history.toString()) : new JSONArray();
+        copy.forkHistory = withHistory ? new JSONArray(fork.toString()) : new JSONArray();
+        copy.path = path;
+        return copy;
+    }
+
+    /** 检查点历史的版本戳：每次检查点整份替换数组，戳就会变。O(1)，界面据此决定要不要重新取历史。 */
+    public int historyStamp(String id) {
+        synchronized (lock) {
+            JSONArray history = requireSlot(id).task.history;
+            return System.identityHashCode(history) * 31 + history.length();
+        }
+    }
+
+    /**
+     * 检查点历史（history / forkHistory）只会整体替换、从不原地修改，复制时直接引用同一个数组。
+     * 锁里只序列化其余的小字段：原来每次保存和读取都在全局锁里把几 MB 的历史整份序列化，
+     * 子代理跑久了，列表页、详情页和主会话都会卡在这把锁上。
+     */
+    private static String lightJsonLocked(Record task) throws Exception {
+        JSONArray history = task.history, fork = task.forkHistory;
+        task.history = new JSONArray(); task.forkHistory = new JSONArray();
+        try { return task.toJson().toString(); }
+        finally { task.history = history; task.forkHistory = fork; }
     }
 
     /** Readable address such as /main/research/parser. */
@@ -1459,8 +1494,13 @@ public final class SubAgentManager {
     private void persist(String id) throws Exception {
         if (store == null) return;
         synchronized (persistence) {
-            Record task;
-            synchronized (lock) { task = copy(requireSlot(id).task); }
+            JSONArray history, fork; String light;
+            synchronized (lock) {
+                Record live = requireSlot(id).task;
+                history = live.history; fork = live.forkHistory; light = lightJsonLocked(live);
+            }
+            Record task = Record.fromJson(new JSONObject(light));
+            task.history = history; task.forkHistory = fork;
             store.save(task);
         }
     }
