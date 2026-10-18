@@ -12,7 +12,7 @@ import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** One chronological level. Raw reasoning never enters an Android text layout. */
+/** One chronological level. Reasoning shows its summary, or the original text when summaries are off. */
 public final class WorkTimeline extends LinearLayout {
     public interface Actions {
         void summarize(TurnTrace.Piece piece, boolean retry);
@@ -20,7 +20,6 @@ public final class WorkTimeline extends LinearLayout {
     }
     private final Actions actions;
     private final List<Row> rows = new ArrayList<Row>();
-    private static final int INK = 0xFF252528, MUTED = 0xFF77777D;
 
     public WorkTimeline(Context context, Actions actions) {
         super(context);
@@ -35,7 +34,7 @@ public final class WorkTimeline extends LinearLayout {
         List<TurnTrace.Piece> visible = new ArrayList<TurnTrace.Piece>();
         for (int i = start; i < end; i++) {
             TurnTrace.Piece piece = range.trace.order.get(i);
-            if (range.trace.showReasoning || piece.think == null) visible.add(piece);
+            visible.add(piece);
         }
         int count = visible.size();
         boolean reset = rows.size() > count;
@@ -50,7 +49,7 @@ public final class WorkTimeline extends LinearLayout {
         for (int i = 0; i < rows.size(); i++) {
             Row row = rows.get(i);
             row.line.setVisibility(i == rows.size() - 1 ? INVISIBLE : VISIBLE);
-            row.bind(live);
+            row.bind(live, range.trace.rawReasoning);
         }
     }
 
@@ -58,10 +57,11 @@ public final class WorkTimeline extends LinearLayout {
         final TurnTrace.Piece piece;
         final LinearLayout root, content, notes;
         final TextView marker, title, state, brief, retry;
-        final ProgressBar progress;
+        final com.google.android.material.progressindicator.CircularProgressIndicator progress;
         final View line;
         String renderedSummary = null;
         String renderedArgs = null, renderedResult = null;
+        int renderedThink = -1;
 
         Row(final TurnTrace.Piece piece) {
             this.piece = piece;
@@ -71,14 +71,23 @@ public final class WorkTimeline extends LinearLayout {
             rail.setOrientation(VERTICAL);
             rail.setGravity(Gravity.CENTER_HORIZONTAL);
             FrameLayout dot = new FrameLayout(getContext());
-            marker = label(13, MUTED);
+            marker = label(11, M3.onSecondaryContainer);
             marker.setGravity(Gravity.CENTER);
-            progress = new ProgressBar(getContext());
+            // M3：每一步一个 secondaryContainer 小圆点；运行中换成圆形进度指示器。
+            android.graphics.drawable.GradientDrawable dotBg = new android.graphics.drawable.GradientDrawable();
+            dotBg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
+            dotBg.setColor(M3.secondaryContainer);
+            marker.setBackground(dotBg);
+            progress = new com.google.android.material.progressindicator.CircularProgressIndicator(getContext());
+            progress.setIndeterminate(true);
+            progress.setIndicatorSize(px(16));
+            progress.setTrackThickness(px(2));
+            progress.setIndicatorColor(M3.primary);
             dot.addView(marker, new FrameLayout.LayoutParams(px(20), px(20)));
             dot.addView(progress, new FrameLayout.LayoutParams(px(18), px(18), Gravity.CENTER));
             rail.addView(dot, new LayoutParams(px(20), px(24)));
             line = new View(getContext());
-            line.setBackgroundColor(0xFFE8E8EB);
+            line.setBackgroundColor(M3.outlineVariant);
             LayoutParams railLine = new LayoutParams(px(1), 0, 1f);
             railLine.topMargin = px(5);
             rail.addView(line, railLine);
@@ -88,15 +97,16 @@ public final class WorkTimeline extends LinearLayout {
             content = new LinearLayout(getContext());
             content.setOrientation(VERTICAL);
             content.setPadding(0, 0, 0, px(22));
-            title = label(16, INK);
-            state = label(12, MUTED);
+            title = label(16, M3.onSurface);
+            state = label(12, M3.onSurfaceVariant);
             state.setPadding(0, px(3), 0, px(6));
-            brief = label(13, MUTED);
+            brief = label(13, M3.onSurfaceVariant);
             brief.setLineSpacing(px(3), 1f);
             brief.setMaxLines(3);
             notes = new LinearLayout(getContext());
             notes.setOrientation(VERTICAL);
-            retry = label(13, INK);
+            retry = label(14, M3.primary);
+            retry.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             retry.setText("重试摘要");
             retry.setPadding(0, px(6), 0, px(6));
             retry.setOnClickListener(new OnClickListener() {
@@ -115,7 +125,7 @@ public final class WorkTimeline extends LinearLayout {
             }
         }
 
-        void bind(boolean live) {
+        void bind(boolean live, boolean raw) {
             boolean thinking = piece.think != null;
             boolean active = thinking ? live && !piece.sealed
                     : live && !piece.step.done;
@@ -123,8 +133,16 @@ public final class WorkTimeline extends LinearLayout {
             marker.setVisibility(active ? GONE : VISIBLE);
             marker.setText(thinking ? (piece.sealed ? "\u2713" : "\u2022")
                     : piece.step.done ? (failed(piece.step) ? "!" : "\u2713") : "\u2022");
-            marker.setTextColor(!thinking && failed(piece.step) ? 0xFFB44438 : MUTED);
+            boolean bad = !thinking && failed(piece.step);
+            marker.setTextColor(bad ? M3.onErrorContainer : M3.onSecondaryContainer);
+            ((android.graphics.drawable.GradientDrawable) marker.getBackground()).setColor(bad ? M3.errorContainer : M3.secondaryContainer);
+            if (thinking && raw) {
+                bindRaw(active);
+                return;
+            }
             if (thinking) {
+                renderedThink = -1;
+                brief.setMaxLines(3);
                 if (piece.sealed) actions.summarize(piece, false);
                 title.setText(piece.sealed ? "推理摘要" : "正在思考");
                 String caption = active ? "思考中" : piece.sealed ? "思考结束" : "思考未完成";
@@ -144,11 +162,11 @@ public final class WorkTimeline extends LinearLayout {
                         JSONArray entries = new JSONArray(piece.summary);
                         for (int i = 0; i < entries.length(); i++) {
                             JSONObject entry = entries.getJSONObject(i);
-                            TextView heading = label(14, INK);
+                            TextView heading = label(14, M3.onSurface);
                             heading.setText(entry.optString("title"));
                             heading.setPadding(0, i == 0 ? 0 : px(12), 0, px(4));
                             notes.addView(heading, width());
-                            TextView text = label(14, MUTED);
+                            TextView text = label(14, M3.onSurfaceVariant);
                             text.setText(entry.optString("text"));
                             text.setLineSpacing(px(4), 1f);
                             notes.addView(text, width());
@@ -159,14 +177,56 @@ public final class WorkTimeline extends LinearLayout {
             }
             retry.setVisibility(GONE);
             TurnTrace.Step step = piece.step;
+            brief.setMaxLines(3);
             title.setText(toolTitle(step));
-            state.setText(toolState(step, live));
+            state.setText(withDelta(toolState(step, live), step.done ? com.mkei.backcast.agent.LineDelta.parse(step.result) : null));
             if (renderedArgs != step.args || renderedResult != step.result) {
                 renderedArgs = step.args; renderedResult = step.result;
                 brief.setText(ReasoningSummary.clip(command(step), 160)
-                        + (step.done && step.result.length() > 0 ? "\n" + ReasoningSummary.clip(step.result, 180) : ""));
+                        + (step.done && step.result.length() > 0 ? "\n" + ReasoningSummary.clip(com.mkei.backcast.agent.LineDelta.strip(step.result), 180) : ""));
             }
         }
+
+        private void bindRaw(boolean active) {
+            title.setText(piece.sealed ? "思考" : "正在思考");
+            String caption = active ? "思考中" : piece.sealed ? "思考结束" : "思考未完成";
+            if (piece.thinkMs > 0) caption += " · " + ((piece.thinkMs + 999) / 1000) + "s";
+            state.setText(caption);
+            retry.setVisibility(GONE);
+            notes.setVisibility(GONE);
+            int size = piece.think.length();
+            brief.setMaxLines(Integer.MAX_VALUE);
+            brief.setVisibility(size == 0 ? GONE : VISIBLE);
+            if (renderedThink != size) {
+                renderedThink = size;
+                String text = piece.think.toString().trim();
+                if (text.length() > RAW_LIMIT) {
+                    int from = text.length() - RAW_LIMIT;
+                    if (Character.isLowSurrogate(text.charAt(from))) from++;
+                    text = "…" + text.substring(from);
+                }
+                brief.setText(text);
+            }
+        }
+    }
+
+    /** 原始思考只取末尾一段，避免超长文本拖慢排版。 */
+    private static final int RAW_LIMIT = 4000;
+
+    /** 在文字后面接上绿色 +增 红色 -删，带浅色底。delta 为 null 时原样返回。 */
+    public static CharSequence withDelta(CharSequence text, int[] delta) {
+        if (delta == null) return text;
+        android.text.SpannableStringBuilder out = new android.text.SpannableStringBuilder(text);
+        if (out.length() > 0) out.append(" ");
+        appendChip(out, " +" + delta[0] + " ", M3.onSuccessContainer, M3.successContainer);
+        appendChip(out, " -" + delta[1] + " ", M3.onErrorContainer, M3.errorContainer);
+        return out;
+    }
+
+    private static void appendChip(android.text.SpannableStringBuilder out, String chip, int ink, int fill) {
+        int start = out.length();
+        out.append(chip.trim());
+        out.setSpan(new ChipSpan(ink, fill), start, out.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     public static String toolState(TurnTrace.Step step, boolean live) {
@@ -183,6 +243,8 @@ public final class WorkTimeline extends LinearLayout {
     }
 
     public static String command(TurnTrace.Step step) {
+        // 计划的完整清单画在会话卡片上，这里只写一句进度，不摊开原始 JSON。
+        if (TurnTrace.PLAN.equals(step.name)) return TurnTrace.planView(step.args)[0];
         try {
             JSONObject args = new JSONObject(step.args);
             return "shell".equals(step.name) ? args.optString("command", step.args)
@@ -191,9 +253,11 @@ public final class WorkTimeline extends LinearLayout {
     }
 
     public static String toolTitle(TurnTrace.Step step) {
+        if (TurnTrace.PLAN.equals(step.name)) return "更新任务计划";
+        if (TurnTrace.ASK.equals(step.name)) return "询问用户";
         if ("shell".equals(step.name)) return "执行命令";
         if ("read".equals(step.name)) return "读取文件";
-        if ("edit".equals(step.name)) return "编辑文件";
+        if ("edit".equals(step.name)) return "修改文件";
         if ("write".equals(step.name)) return "写入文件";
         if ("update_goal".equals(step.name)) return "更新目标";
         return step.name;
@@ -215,10 +279,10 @@ public final class WorkTimeline extends LinearLayout {
             final int pad = (int) (8 * context.getResources().getDisplayMetrics().density);
             heading = new TextView(context);
             heading.setTextSize(17);
-            heading.setTextColor(INK);
+            heading.setTextColor(M3.onSurface);
             state = new TextView(context);
             state.setTextSize(12);
-            state.setTextColor(MUTED);
+            state.setTextColor(M3.onSurfaceVariant);
             state.setPadding(0, pad / 2, 0, pad);
             addView(heading);
             addView(state);
@@ -230,7 +294,7 @@ public final class WorkTimeline extends LinearLayout {
                     TextView text = recycled instanceof TextView ? (TextView) recycled : new TextView(context);
                     text.setText(chunks.get(at));
                     text.setTextSize(13);
-                    text.setTextColor(INK);
+                    text.setTextColor(M3.onSurface);
                     text.setTypeface(Typeface.MONOSPACE);
                     text.setTextIsSelectable(true);
                     text.setLineSpacing(pad / 2, 1f);

@@ -80,11 +80,11 @@ public final class MultipleWorkspaceRegressionTest {
         File source = temporary.resolveTemporary("result.txt"); Files.write(source.toPath(), "result".getBytes("UTF-8"));
         ToolchainStore store = new ToolchainStore(new File(fixture, "toolchains"), null, "", 0);
         File target = new File(extra, "delivery/result.txt");
-        ToolkitExport.copy(primary.getPath(), temporary, store, source.getPath(), target.getPath(), "deliverable", false, LIVE);
+        ToolkitExport.copy(primary.getPath(), temporary, store, source.getPath(), target.getPath(), "deliverable", false, false, LIVE);
         check(target.isFile(), "Extra project export was not published");
         for (File root : new File[]{primary, extra}) {
             boolean rejected = false;
-            try { ToolkitExport.copy(primary.getPath(), temporary, store, source.getPath(), root.getPath(), "deliverable", true, LIVE); }
+            try { ToolkitExport.copy(primary.getPath(), temporary, store, source.getPath(), root.getPath(), "deliverable", true, false, LIVE); }
             catch (IllegalArgumentException expected) { rejected = true; }
             check(rejected, "Export targeted an entire authorized project root");
         }

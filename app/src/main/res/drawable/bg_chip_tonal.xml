@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 权限芯片（受限 / 限制访问）：M3 色调芯片，secondaryContainer 填充。 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="#1F3E4759">
+    <item>
+        <shape>
+            <solid android:color="@color/md_secondary_container"/>
+            <stroke android:width="1dp" android:color="@color/md_outline_variant"/>
+            <corners android:radius="8dp"/>
+        </shape>
+    </item>
+</ripple>

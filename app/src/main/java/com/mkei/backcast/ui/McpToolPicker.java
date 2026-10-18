@@ -1,7 +1,6 @@
 package com.mkei.backcast.ui;
 
 import android.content.Context;
-import android.content.Intent;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -12,7 +11,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import com.mkei.backcast.ChatStore;
-import com.mkei.backcast.McpConfigActivity;
 import com.mkei.backcast.RunHub;
 import com.mkei.backcast.agent.Diagnostics;
 import com.mkei.backcast.mcp.McpCatalog;
@@ -63,10 +61,8 @@ public final class McpToolPicker {
     public void append(List<SlashMenuPopup.Item> items, String prefix) {
         final long owner = host.context();
         final int mine = generation;
-        if (catalog == null) {
-            items.add(new SlashMenuPopup.Item("正在读取 MCP 工具列表…", "", null));
-            return;
-        }
+        // 还没读到或没有 MCP 服务时不占位，菜单只显示指令。
+        if (catalog == null) return;
         List<McpCatalog.Server> servers = catalog;
         String query = prefix.toLowerCase(Locale.ROOT);
         if (query.equals("mcp")) query = "";
@@ -91,11 +87,6 @@ public final class McpToolPicker {
 
         }
         if (omitted > 0) items.add(new SlashMenuPopup.Item("还有 " + omitted + " 个匹配工具", "继续输入工具名或服务名筛选", null));
-        if (servers.isEmpty() && (query.length() == 0 || matches("mcp", query)))
-            items.add(new SlashMenuPopup.Item("配置 MCP 服务", "尚无已启用服务", () -> {
-                if (!current(mine, owner)) return;
-                host.hideMenu(); context.startActivity(new Intent(context, McpConfigActivity.class));
-            }));
     }
 
     private static boolean matches(String value, String query) {
@@ -259,7 +250,7 @@ public final class McpToolPicker {
         content.addView(arguments, new LinearLayout.LayoutParams(-1, -2));
         final TextView error = addText(content, "仅填入草稿；发送后由模型调用，继续遵守现有工具权限。", 13);
         ScrollView scroll = new ScrollView(context); scroll.addView(content);
-        final AlertDialog panel = new AlertDialog.Builder(context).setTitle("选择 MCP 工具")
+        final AlertDialog panel = new com.google.android.material.dialog.MaterialAlertDialogBuilder(context).setTitle("选择 MCP 工具")
                 .setView(scroll).setNegativeButton("取消", null).setPositiveButton("填入草稿", null).create();
         dialog = panel;
         panel.setOnDismissListener(ignored -> { if (dialog == panel) dialog = null; });
@@ -378,7 +369,7 @@ public final class McpToolPicker {
         if (dialog != null) { AlertDialog previous = dialog; dialog = null; previous.dismiss(); }
     }
     private TextView addText(LinearLayout content, String value, int size) {
-        TextView text = new TextView(context); text.setText(value); text.setTextSize(size); text.setTextColor(0xFF3C3C43);
+        TextView text = new TextView(context); text.setText(value); text.setTextSize(size); text.setTextColor(M3.onSurfaceVariant);
         text.setPadding(0, dp(6), 0, dp(6)); content.addView(text, new LinearLayout.LayoutParams(-1, -2)); return text;
     }
     private int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }

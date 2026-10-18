@@ -3,6 +3,7 @@ package com.mkei.backcast.agent;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import org.json.JSONArray;
@@ -25,6 +26,8 @@ public final class SubAgentManager {
     private static final int MAX_TEXT = 32000;
     private static final int RESULT_BATCH_CHARS = 60000;
     private static final long MAX_WAIT_MS = 60000L;
+    /** 通信记录里一条消息的送达状态：在收件箱里待读、已被对方读进上下文、对方停止前没读到。 */
+    public static final String MAIL_PENDING = "pending", MAIL_READ = "read", MAIL_DROPPED = "dropped";
 
     public interface Factory {
         AgentLoop create(Record task, AgentLoop.Listener listener, SubAgentManager manager) throws Exception;
@@ -45,7 +48,7 @@ public final class SubAgentManager {
     }
 
     public static final class Record {
-        public String id, parentId, name, task, status, result = "", error = "", inFlight = "";
+        public String id, parentId, name, task, status, result = "", error = "", inFlight = "", path = "";
         public String phase = QUEUED, activeTool = "", progress = "";
         public String inFlightRequest = "", inFlightReference = "";
         public long sessionId, revision, tokensUsed, collectedRevision, acknowledgedRevision;
@@ -65,7 +68,7 @@ public final class SubAgentManager {
         public boolean resume, inFlightStarted, managerCancelled;
 
         public JSONObject toJson() throws Exception {
-            return new JSONObject().put("id", id).put("parentId", parentId).put("name", name)
+            return new JSONObject().put("id", id).put("parentId", parentId).put("name", name).put("path", path)
                     .put("task", task).put("status", status).put("result", result).put("error", error)
                     .put("inFlight", inFlight).put("sessionId", sessionId).put("revision", revision)
                     .put("tokensUsed", tokensUsed).put("collectedRevision", collectedRevision)
@@ -86,7 +89,8 @@ public final class SubAgentManager {
         public static Record fromJson(JSONObject json) throws Exception {
             Record task = new Record();
             task.id = json.getString("id"); task.parentId = json.optString("parentId", ROOT);
-            task.name = json.optString("name", task.id); task.task = json.optString("task", "");
+            task.name = json.optString("name", task.id); task.path = json.optString("path", "");
+            task.task = json.optString("task", "");
             task.status = json.optString("status", IDLE); task.result = json.optString("result", "");
             task.error = json.optString("error", ""); task.inFlight = json.optString("inFlight", "");
             task.sessionId = json.optLong("sessionId", 1L); task.revision = json.optLong("revision", 0L);
@@ -110,10 +114,6 @@ public final class SubAgentManager {
             if (task.acknowledgedChildren == null) task.acknowledgedChildren = new JSONObject();
             task.deliveredInbox = json.optJSONArray("deliveredInbox");
             if (task.deliveredInbox == null) task.deliveredInbox = new JSONArray();
-            if (IDLE.equals(task.status) && task.error.length() == 0 && PromptGuard.REFUSAL.equals(task.result)) {
-                task.status = FAILED; task.phase = FAILED; task.activeTool = "";
-                task.error = PromptGuard.REFUSAL; task.result = ""; task.revision++;
-            }
             task.currentTaskId = json.optString("currentTaskId", "");
             task.tasks = array(json, "tasks"); task.results = array(json, "results"); task.events = array(json, "events");
             task.forkHistory = array(json, "forkHistory"); task.forkConfig = object(json, "forkConfig");
@@ -121,35 +121,6 @@ public final class SubAgentManager {
             task.acknowledgedResults = object(json, "acknowledgedResults");
             task.rootWakeAllowed = json.optBoolean("rootWakeAllowed", false);
             task.userRestartOnly = json.optBoolean("userRestartOnly", false);
-            // Preserve the one legacy outcome without fabricating unavailable earlier attempts.
-            if (!ROOT.equals(task.id) && task.tasks.length() == 0
-                    && (task.task.length() > 0 || task.pending.length() > 0 || task.inFlight.length() > 0)) {
-                task.currentTaskId = "task_" + task.id + "_legacy";
-                JSONObject attempt = new JSONObject().put("taskId", task.currentTaskId).put("request", task.task)
-                        .put("status", task.status).put("phase", task.phase).put("progress", task.progress)
-                        .put("partial", "").put("error", task.error).put("createdAt", task.lastActivityAt);
-                task.tasks.put(attempt);
-                for (int i = 0; i < task.pending.length(); i++) {
-                    JSONObject pending = task.pending.getJSONObject(i);
-                    // A queued legacy message is its own assignment, never another outcome for the in-flight task.
-                    boolean firstUnstarted = i == 0 && task.inFlight.length() == 0
-                            && task.result.length() == 0 && task.error.length() == 0;
-                    String pendingId = firstUnstarted ? task.currentTaskId : "task_" + task.id + "_legacy_pending_" + i;
-                    pending.put("kind", "task").put("taskId", pendingId);
-                    if (firstUnstarted) attempt.put("request", pending.optString("text", task.task)).put("status", QUEUED).put("phase", QUEUED);
-                    else task.tasks.put(new JSONObject().put("taskId", pendingId).put("request", pending.optString("text", ""))
-                            .put("status", QUEUED).put("phase", QUEUED).put("progress", "").put("partial", "")
-                            .put("error", "").put("createdAt", task.lastActivityAt));
-                }
-                if (task.result.length() > 0 || task.error.length() > 0) {
-                    String resultId = "result_" + task.id + "_legacy";
-                    attempt.put("resultId", resultId);
-                    task.results.put(new JSONObject().put("resultId", resultId).put("taskId", task.currentTaskId)
-                            .put("status", task.error.length() == 0 ? "completed" : task.status)
-                            .put("content", task.result).put("error", task.error).put("partial", "")
-                            .put("createdAt", task.lastActivityAt));
-                }
-            }
             return task;
         }
 
@@ -206,7 +177,7 @@ public final class SubAgentManager {
                     copy.inbox = restoredMail; copy.deliveredInbox = new JSONArray();
                 }
                 if (ROOT.equals(copy.id)) { slots.put(ROOT, new Slot(copy)); continue; }
-                if (copy.id.length() == 0 || slots.containsKey(copy.id)) throw new IllegalStateException("重复或无效子任务登记。");
+                if (copy.id.length() == 0 || slots.containsKey(copy.id)) throw new IllegalStateException("重复或无效子代理登记。");
                 if (RUNNING.equals(copy.status) || WAITING.equals(copy.status)) {
                     copy.status = QUEUED; copy.resume = copy.history.length() > 0;
                     copy.phase = QUEUED; copy.activeTool = "";
@@ -215,7 +186,7 @@ public final class SubAgentManager {
             }
             int open = 0;
             for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id) && !CLOSED.equals(slot.task.status)) open++;
-            if (open > MAX_AGENTS) throw new IllegalStateException("已登记子任务超过并发管理上限，不能静默忽略任务。");
+            if (open > MAX_AGENTS) throw new IllegalStateException("已登记子代理超过并发管理上限，不能静默忽略任务。");
         }
         cancelled = slots.get(ROOT).task.managerCancelled;
     }
@@ -253,6 +224,8 @@ public final class SubAgentManager {
             cancelled = false;
             Record root = slots.get(ROOT).task;
             root.managerCancelled = false; root.userRestartOnly = false; root.revision++;
+            // Work restarted on main's behalf reports back by waking it, even if main's turn ends first.
+            root.rootWakeAllowed = true;
         }
         persistQuietly(ROOT);
         synchronized (lock) { schedulingEnabled = true; scheduleLocked(); }
@@ -306,6 +279,8 @@ public final class SubAgentManager {
 
     public JSONObject spawn(String owner, String name, String task, boolean fork) throws Exception {
         requireText(task);
+        if (!ROOT.equals(owner))
+            throw new IllegalStateException("子代理不能再派子代理。需要更多帮手时，用 send_message 告诉 main，由主会话来派。");
         long lease = taskUsageLease(owner, false);
         AgentLoop source;
         synchronized (lock) { source = requireOwner(owner).loop; }
@@ -321,9 +296,9 @@ public final class SubAgentManager {
             requireOwner(owner);
             int open = 0;
             for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id) && !CLOSED.equals(slot.task.status)) open++;
-            if (open >= MAX_AGENTS) throw new IllegalStateException("子 agent 数量已达上限，请复用空闲子任务或关闭不再需要的子任务。");
+            if (open >= MAX_AGENTS) throw new IllegalStateException("子 agent 数量已达上限，请复用空闲子代理或关闭不再需要的子代理。");
             record.id = "agent_" + UUID.randomUUID().toString(); record.parentId = owner;
-            record.name = name == null || name.trim().length() == 0 ? record.id : name.trim();
+            record.name = uniqueNameLocked(owner, name);
             record.task = task; record.status = QUEUED;
             record.phase = QUEUED; record.lastActivityAt = System.currentTimeMillis(); record.progressRevision = 1L;
             record.sessionId = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
@@ -348,6 +323,25 @@ public final class SubAgentManager {
         return send(owner, target, message, kind, false);
     }
 
+    /**
+     * The model-facing message. A running or queued agent gets it in its inbox before its next request; an agent
+     * that has finished (or failed) is resumed with the message as its next task, like continuing a finished
+     * subagent. Closed or user-stopped agents refuse it. main only ever receives mail.
+     */
+    public JSONObject sendMessage(String owner, String target, String message) throws Exception {
+        String kind = "message";
+        synchronized (lock) {
+            String id = resolveLocked(owner, target);
+            if (!ROOT.equals(id)) {
+                Slot slot = requireSlot(id);
+                String status = slot.task.status;
+                if (!slot.executing && !slot.stop && (IDLE.equals(status) || FAILED.equals(status))) kind = "task";
+            }
+            target = id;
+        }
+        return send(owner, target, message, kind, false);
+    }
+
     /** Called only by the user-facing child conversation; never exposed as a model tool. */
     public JSONObject sendFromUser(String target, String message, String kind) throws Exception {
         if (ROOT.equals(target)) throw new IllegalArgumentException("请选择一个子 agent。");
@@ -355,7 +349,17 @@ public final class SubAgentManager {
     }
 
     private JSONObject send(String owner, String target, String message, String kind, boolean fromUser) throws Exception {
+        return send(owner, target, message, kind, fromUser, null, null);
+    }
+
+    /**
+     * eventKind / eventText 让阶段汇报以 progress、partial、error 记进通信记录，原文不带给模型看的包装；
+     * 收发两边各记一条，带同一个 mailId，送达状态之后两边一起更新。
+     */
+    private JSONObject send(String owner, String target, String message, String kind, boolean fromUser,
+            String eventKind, String eventText) throws Exception {
         requireText(message);
+        synchronized (lock) { target = resolveLocked(owner, target); }
         if (!"message".equals(kind) && !"task".equals(kind)) throw new IllegalArgumentException("kind 必须是 message 或 task。");
         boolean assignment = "task".equals(kind);
         if (assignment && ROOT.equals(target)) throw new IllegalArgumentException("主会话只能接收协作消息，不能隐式追加用户任务。");
@@ -367,13 +371,20 @@ public final class SubAgentManager {
             boolean trustedRunningMessage = fromUser && ROOT.equals(owner) && !assignment && rootState.userRestartOnly
                     && slot.executing && !slot.stop;
             if (trustedRestart || trustedRunningMessage) requireSlot(owner); else requireOwner(owner);
-            if (CLOSED.equals(slot.task.status)) throw new IllegalStateException("子任务已关闭。");
-            if (slot.stop && slot.executing) throw new IllegalStateException("子任务仍在停止，请等待清理完成后复用。");
+            if (CLOSED.equals(slot.task.status)) {
+                // 主会话关掉的子代理，用户在它的会话页里明确派新任务时可以重新打开，沿用原上下文。
+                if (!(fromUser && ROOT.equals(owner) && assignment)) throw new IllegalStateException("子代理已关闭。");
+                if (slot.executing) throw new IllegalStateException("子代理仍在停止，请等待清理完成后复用。");
+                int open = 0;
+                for (Slot other : slots.values()) if (!ROOT.equals(other.task.id) && !CLOSED.equals(other.task.status)) open++;
+                if (open >= MAX_AGENTS) throw new IllegalStateException("子 agent 数量已达上限，请先关闭不再需要的子代理。");
+            }
+            if (slot.stop && slot.executing) throw new IllegalStateException("子代理仍在停止，请等待清理完成后复用。");
             if (!assignment && (slot.stop || FAILED.equals(slot.task.status) || STOPPED.equals(slot.task.status)))
                 throw new IllegalStateException("任务已停止或失败。普通消息不会重新启动它；需明确派发新的 task。");
             JSONArray queue = assignment ? slot.task.pending : slot.task.inbox;
             if (queue.length() >= MAX_MAIL) throw new IllegalStateException("待处理消息已达上限，请先等待现有任务完成。");
-            JSONObject entry = assignment ? newTaskLocked(slot.task, owner, message) : mail(owner, message).put("kind", "message");
+            JSONObject entry = assignment ? newTaskLocked(slot.task, owner, message) : mailLocked(owner, message).put("kind", "message");
             if (trustedRestart) {
                 entry.put("userRestartOnly", true);
                 for (int i = 0; i < slot.task.tasks.length(); i++) {
@@ -383,7 +394,15 @@ public final class SubAgentManager {
             }
             queue.put(entry.put("usageLease", trustedRestart ? DETACHED_USAGE_LEASE : lease)); slot.task.revision++;
             if (queue == slot.task.inbox) slot.task.inboxRevision++;
-            if (!assignment) eventLocked(slot.task, "message", message, owner, target);
+            String logKind = eventKind == null ? "message" : eventKind, logText = eventText == null ? message : eventText;
+            JSONObject received;
+            if (assignment) received = slot.task.events.getJSONObject(slot.task.events.length() - 1);
+            else {
+                eventLocked(slot.task, logKind, logText, owner, target);
+                received = slot.task.events.getJSONObject(slot.task.events.length() - 1)
+                        .put("mailId", entry.getString("id")).put("status", MAIL_PENDING);
+            }
+            if (fromUser) received.put("fromUser", true);
             if (assignment) {
                 slot.stop = false;
                 if (trustedRestart) {
@@ -394,7 +413,13 @@ public final class SubAgentManager {
             if (assignment && !slot.executing && !QUEUED.equals(slot.task.status)) {
                 slot.task.status = QUEUED; slot.task.phase = QUEUED; slot.task.activeTool = ""; slot.ready = false;
             }
-            if (!ROOT.equals(owner)) eventLocked(requireSlot(owner).task, "message", message, owner, target);
+            if (!ROOT.equals(owner) && !owner.equals(target)) {
+                Record sender = requireSlot(owner).task;
+                eventLocked(sender, assignment ? "task" : logKind, logText, owner, target);
+                JSONObject sent = sender.events.getJSONObject(sender.events.length() - 1);
+                if (assignment) sent.put("taskId", entry.getString("taskId"));
+                else sent.put("mailId", entry.getString("id")).put("status", MAIL_PENDING);
+            }
             lock.notifyAll();
         }
         try { persist(target); }
@@ -402,7 +427,7 @@ public final class SubAgentManager {
             synchronized (lock) {
                 Slot slot = requireSlot(target);
                 if (!slot.executing && !ROOT.equals(target)) {
-                    slot.task.status = FAILED; slot.task.error = "子任务消息保存失败：" + error.getMessage();
+                    slot.task.status = FAILED; slot.task.error = "子代理消息保存失败：" + error.getMessage();
                     slot.task.revision++;
                 }
             }
@@ -440,7 +465,91 @@ public final class SubAgentManager {
         if (record.currentTaskId.length() == 0) record.currentTaskId = id;
         eventLocked(record, "task", request, owner, record.id);
         record.events.getJSONObject(record.events.length() - 1).put("taskId", id);
-        return mail(owner, request).put("kind", "task").put("taskId", id);
+        return mailLocked(owner, request).put("kind", "task").put("taskId", id);
+    }
+
+    /** 收件方这一侧的事件是送达状态的唯一来源；发件方那条按 mailId 回查，不用跨记录同步保存。 */
+    private static void markMailLocked(Record receiver, JSONArray mails, String status) throws Exception {
+        if (mails == null || mails.length() == 0) return;
+        java.util.Set<String> ids = new java.util.HashSet<String>();
+        for (int i = 0; i < mails.length(); i++) {
+            JSONObject mail = mails.optJSONObject(i);
+            if (mail != null && mail.optString("id").length() > 0) ids.add(mail.optString("id"));
+        }
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < receiver.events.length(); i++) {
+            JSONObject event = receiver.events.optJSONObject(i);
+            if (event != null && ids.contains(event.optString("mailId")) && receiver.id.equals(event.optString("to"))
+                    && !MAIL_READ.equals(event.optString("status"))) event.put("status", status).put("statusAt", now);
+        }
+    }
+
+    /**
+     * 某个子代理的完整通信记录，按发生先后：派给它的任务、它收到和发出的消息、阶段汇报、最终结果。
+     * 每条带发送方、接收方的名字和路径，以及当前状态（消息看收件方是否读到，任务看执行状态，结果看 main 是否收下）。
+     */
+    public JSONArray communications(String id) throws Exception {
+        synchronized (lock) {
+            Record record = requireSlot(id).task;
+            JSONArray out = new JSONArray();
+            java.util.Set<String> seen = new java.util.HashSet<String>();
+            JSONObject previous = null;
+            for (int i = 0; i < record.events.length(); i++) {
+                JSONObject event = record.events.optJSONObject(i);
+                if (event == null || !seen.add(event.optString("id", "#" + i))) continue;
+                String kind = event.optString("kind"), from = event.optString("from"), to = event.optString("to");
+                // 旧版本的阶段汇报会再记一条同内容的 message，显示时并掉。
+                if ("message".equals(kind) && previous != null && event.optString("text").startsWith("子代理阶段汇报（")
+                        && isReport(previous.optString("kind")) && from.equals(previous.optString("from"))
+                        && to.equals(previous.optString("to")) && event.optString("text").endsWith(previous.optString("text"))) continue;
+                JSONObject view = new JSONObject(event.toString())
+                        .put("fromName", nameLocked(from)).put("fromPath", pathLocked(from))
+                        .put("toName", nameLocked(to)).put("toPath", pathLocked(to))
+                        .put("outgoing", id.equals(from)).put("status", statusLocked(record, event));
+                out.put(view);
+                previous = event;
+            }
+            return out;
+        }
+    }
+
+    private static boolean isReport(String kind) {
+        return "progress".equals(kind) || "partial".equals(kind) || "error".equals(kind);
+    }
+
+    private String nameLocked(String id) {
+        if (ROOT.equals(id)) return ROOT;
+        Slot slot = slots.get(id);
+        return slot == null ? id : slot.task.name;
+    }
+
+    private String statusLocked(Record owner, JSONObject event) {
+        String kind = event.optString("kind"), to = event.optString("to");
+        Slot receiver = slots.get(to);
+        if ("task".equals(kind)) {
+            if (receiver == null) return "";
+            for (int i = 0; i < receiver.task.tasks.length(); i++) {
+                JSONObject attempt = receiver.task.tasks.optJSONObject(i);
+                if (attempt != null && event.optString("taskId").equals(attempt.optString("taskId")))
+                    return attempt.optString("status", QUEUED);
+            }
+            return "";
+        }
+        String mailId = event.optString("mailId");
+        if (mailId.length() > 0) {
+            if (receiver != null && receiver.task != owner) for (int i = 0; i < receiver.task.events.length(); i++) {
+                JSONObject copy = receiver.task.events.optJSONObject(i);
+                if (copy != null && mailId.equals(copy.optString("mailId")) && to.equals(copy.optString("to")))
+                    return copy.optString("status", MAIL_PENDING);
+            }
+            return event.optString("status", "");
+        }
+        String resultId = event.optString("resultId");
+        if (resultId.length() > 0 && receiver != null) {
+            if (receiver.task.acknowledgedResults.has(resultId)) return MAIL_READ;
+            return MAIL_PENDING;
+        }
+        return "";
     }
 
     private void eventLocked(Record record, String kind, String text, String from, String to) throws Exception {
@@ -460,16 +569,17 @@ public final class SubAgentManager {
             Slot slot = requireOwner(owner); JSONObject task = currentTaskLocked(slot.task);
             if (task == null || !slot.executing) throw new IllegalStateException("当前没有运行中的任务。");
             if ("progress".equals(kind)) {
-                slot.task.progress = clipped(text, 600); task.put("progress", text);
+                slot.task.progress = Text.clip(text, 600); task.put("progress", text);
                 if (phase != null && phase.length() > 0) { slot.task.phase = phase; task.put("phase", phase); }
             } else task.put(kind, text);
-            eventLocked(slot.task, kind, text, owner, slot.task.parentId); lock.notifyAll();
+            slot.task.revision++; lock.notifyAll();
         }
         persist(owner);
         String parent;
         synchronized (lock) { parent = requireSlot(owner).task.parentId; }
-        send(owner, parent, "子任务阶段汇报（" + kind + "）" + (phase == null || phase.length() == 0 ? "" : "，阶段 " + phase)
-                + "：\n" + text, "message");
+        // 汇报只在 send 里记一次（收发两边各一条），不再另记一条同内容的 message。
+        send(owner, parent, "子代理阶段汇报（" + kind + "）" + (phase == null || phase.length() == 0 ? "" : "，阶段 " + phase)
+                + "：\n" + text, "message", false, kind, text);
         notifyWorkChanged();
         return new JSONObject().put("saved", true).put("kind", kind);
     }
@@ -504,40 +614,52 @@ public final class SubAgentManager {
     public void acknowledgeInbox(String owner, JSONArray messageIds) throws Exception {
         synchronized (lock) {
             Record receiver = requireSlot(owner).task;
-            JSONArray retained = new JSONArray(); boolean changed = false;
+            JSONArray retained = new JSONArray(), read = new JSONArray(); boolean changed = false;
             for (int i = 0; i < receiver.inbox.length(); i++) {
                 JSONObject entry = receiver.inbox.getJSONObject(i); boolean acknowledged = false;
                 for (int j = 0; j < messageIds.length(); j++) if (entry.optString("id").equals(messageIds.optString(j))) {
                     acknowledged = true; break;
                 }
-                if (acknowledged) changed = true; else retained.put(entry);
+                if (acknowledged) { changed = true; read.put(entry); } else retained.put(entry);
             }
             if (!changed) return;
-            receiver.inbox = retained; receiver.revision++; lock.notifyAll();
+            receiver.inbox = retained; markMailLocked(receiver, read, MAIL_READ); receiver.revision++; lock.notifyAll();
         }
         persist(owner);
     }
 
     public JSONObject list(String owner, int cursor) throws Exception {
+        return list(owner, cursor, "");
+    }
+
+    /** Every live agent in the session tree, optionally limited to a path prefix such as /main/research. */
+    public JSONObject list(String owner, int cursor, String pathPrefix) throws Exception {
         synchronized (lock) {
             requireSlot(owner);
+            String prefix = pathPrefix == null ? "" : pathPrefix.trim();
+            while (prefix.length() > 1 && prefix.endsWith("/")) prefix = prefix.substring(0, prefix.length() - 1);
             JSONArray agents = new JSONArray(); int index = 0, bytes = 0, next = -1;
             int start = Math.max(0, cursor);
             for (Slot slot : slots.values()) {
                 if (ROOT.equals(slot.task.id)) continue;
+                if (prefix.length() > 0) {
+                    String path = pathLocked(slot.task.id);
+                    if (!path.equals(prefix) && !path.startsWith(prefix + "/")) continue;
+                }
                 if (index++ < start) continue;
                 JSONObject view = view(slot); int size = view.toString().length();
                 if (bytes + size > RESULT_BATCH_CHARS) { next = index - 1; break; }
                 agents.put(view); bytes += size;
             }
-            return new JSONObject().put("agents", agents).put("inbox", inboxPreview(requireSlot(owner).task.inbox))
+            return new JSONObject().put("self", pathLocked(owner)).put("agents", agents)
+                    .put("inbox", inboxPreview(requireSlot(owner).task.inbox))
                     .put("pending", pendingLocked(owner, null)).put("cancelled", cancelled)
                     .put("nextCursor", next < 0 ? JSONObject.NULL : Integer.valueOf(next))
                     .put("totalAgents", slots.size() - 1);
         }
     }
 
-    /** Wait for descendants to finish, yielding the caller's execution slot. */
+    /** Wait for the children to finish, yielding the caller's execution slot. */
     public JSONObject waitFor(String owner, String target, long timeoutMs) throws Exception {
         return waitInternal(owner, target, timeoutMs, false, -1L);
     }
@@ -552,20 +674,20 @@ public final class SubAgentManager {
         Slot caller;
         synchronized (lock) {
             caller = ROOT.equals(owner) ? requireSlot(owner) : requireOwner(owner);
-            if (owner.equals(target)) throw new IllegalArgumentException("子任务不能等待自身。");
-            if (target != null && target.length() > 0) requireSlot(target);
-            if (!ROOT.equals(owner) && target != null && target.length() > 0
-                    && !descendantLocked(target, owner)) throw new IllegalArgumentException("子任务只可等待自己的后代，不能等待父任务或互相等待。");
+            if (target != null && target.trim().length() > 0) target = resolveLocked(owner, target);
+            if (owner.equals(target)) throw new IllegalArgumentException("子代理不能等待自身。");
+            // The model-facing wait also covers peers; internal settlement only watches the children main owns.
+            final boolean wide = updates;
             String key = target == null ? "" : target;
             long observed = cursor >= 0 ? cursor : caller.observedProgress.containsKey(key)
-                    ? caller.observedProgress.get(key).longValue() : progressCursorLocked(owner, target);
+                    ? caller.observedProgress.get(key).longValue() : progressCursorLocked(owner, target, wide);
             if (caller.executing && !caller.suspended) {
                 caller.suspended = true; caller.task.status = WAITING; active--; scheduleLocked();
                 updateProgressLocked(caller, "waiting", "", null);
             }
             try {
-                while (!cancelled && !caller.stop && pendingLocked(owner, target)
-                        && (!updates || (!hasInbox(owner) && progressCursorLocked(owner, target) <= observed))
+                while (!cancelled && !caller.stop && pendingLocked(owner, target, wide)
+                        && (!updates || (!hasInbox(owner) && progressCursorLocked(owner, target, wide) <= observed))
                         && System.currentTimeMillis() < deadline) {
                     lock.wait(Math.max(1L, deadline - System.currentTimeMillis()));
                 }
@@ -582,18 +704,16 @@ public final class SubAgentManager {
                     }
                 }
             }
-            long next = progressCursorLocked(owner, target);
+            long next = progressCursorLocked(owner, target, wide);
             caller.observedProgress.put(key, Long.valueOf(next));
-            return snapshotLocked(owner, target).put("cursor", next);
+            return snapshotLocked(owner, target, wide).put("cursor", next);
         }
     }
 
-    private long progressCursorLocked(String owner, String target) {
+    private long progressCursorLocked(String owner, String target, boolean wide) {
         // Waiting changes the caller's phase; only received mail and other tasks may wake it.
         long cursor = requireSlot(owner).task.inboxRevision;
-        for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id) && !owner.equals(slot.task.id)
-                && (target == null || target.length() == 0 || target.equals(slot.task.id))
-                && (ROOT.equals(owner) || descendantLocked(slot.task.id, owner))) cursor += slot.task.revision;
+        for (Slot slot : slots.values()) if (inScopeLocked(owner, slot, target, wide)) cursor += slot.task.revision;
         return cursor;
     }
 
@@ -617,8 +737,8 @@ public final class SubAgentManager {
         synchronized (lock) {
             Slot caller = requireSlot(owner);
             if (caller.task.inbox.length() > 0) return true;
-            for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id)
-                    && (ROOT.equals(owner) || descendantLocked(slot.task.id, owner))) {
+            if (!ROOT.equals(owner)) return false;
+            for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id)) {
                 for (int i = 0; i < slot.task.results.length(); i++) {
                     JSONObject result = slot.task.results.optJSONObject(i);
                     if (result != null && caller.task.deliveredResults.optInt(result.optString("resultId"), 0)
@@ -640,6 +760,7 @@ public final class SubAgentManager {
         boolean pending;
         int bytes = 0;
         synchronized (lock) {
+            if (target != null && target.trim().length() > 0) target = resolveLocked(owner, target);
             Slot root = requireSlot(owner);
             inbox = new JSONArray(); JSONArray retained = new JSONArray();
             for (int i = 0; i < root.task.inbox.length(); i++) {
@@ -653,9 +774,10 @@ public final class SubAgentManager {
             }
             root.task.inbox = retained;
             if (inbox.length() > 0) { root.task.revision++; changed.add(owner); }
+            boolean named = target != null && target.length() > 0;
             for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id)
-                    && (target == null || target.length() == 0 || target.equals(slot.task.id))
-                    && (ROOT.equals(owner) || descendantLocked(slot.task.id, owner))) {
+                    && (!named || target.equals(slot.task.id))
+                    && (named || ROOT.equals(owner))) {
                 for (int i = 0; i < slot.task.results.length(); i++) {
                     JSONObject result = slot.task.results.getJSONObject(i);
                     String resultId = result.getString("resultId");
@@ -699,6 +821,7 @@ public final class SubAgentManager {
         try {
             synchronized (lock) {
                 Slot caller = requireSlot(owner);
+                markMailLocked(caller.task, caller.task.deliveredInbox, MAIL_READ);
                 caller.task.deliveredInbox = new JSONArray();
                 caller.task.acknowledgedChildren = new JSONObject(caller.task.deliveredChildren.toString());
                 // A truncated chunk is not confirmation of the unseen remainder.
@@ -733,12 +856,18 @@ public final class SubAgentManager {
     }
 
     public Record find(String id) throws Exception {
-        synchronized (lock) { return copy(requireSlot(id).task); }
+        synchronized (lock) { Record copy = copy(requireSlot(id).task); copy.path = pathLocked(id); return copy; }
+    }
+
+    /** Readable address such as /main/research/parser. */
+    public String path(String id) {
+        synchronized (lock) { return pathLocked(id); }
     }
 
     public JSONObject readResult(String owner, String target, String resultId, int offset, int limit) throws Exception {
         JSONObject chunk;
         synchronized (lock) {
+            target = resolveLocked(owner, target);
             Record receiver = requireSlot(owner).task, task = requireSlot(target).task;
             JSONObject result = null;
             for (int i = task.results.length() - 1; i >= 0; i--) {
@@ -762,7 +891,7 @@ public final class SubAgentManager {
     /** Stable archived identities remain discoverable after model context compaction. Indexing is not delivery. */
     public JSONObject resultIndex(String owner, String target, int cursor) throws Exception {
         synchronized (lock) {
-            requireSlot(owner); Record record = requireSlot(target).task;
+            requireSlot(owner); target = resolveLocked(owner, target); Record record = requireSlot(target).task;
             int start = Math.min(record.results.length(), Math.max(0, cursor));
             int end = Math.min(record.results.length(), start + 20); JSONArray rows = new JSONArray();
             for (int i = start; i < end; i++) {
@@ -772,7 +901,7 @@ public final class SubAgentManager {
                     if (taskId.equals(task.optString("taskId"))) { request = task.optString("request"); break; }
                 }
                 rows.put(new JSONObject().put("taskId", taskId).put("resultId", result.getString("resultId"))
-                        .put("status", result.optString("status")).put("request", clipped(request, 160))
+                        .put("status", result.optString("status")).put("request", Text.clip(request, 160))
                         .put("contentLength", result.optString("content").length()).put("partialLength", partialStream(result).length())
                         .put("errorLength", result.optString("error").length()).put("createdAt", result.optLong("createdAt")));
             }
@@ -807,7 +936,7 @@ public final class SubAgentManager {
         return new JSONObject().put("id", agentId).put("taskId", result.getString("taskId"))
                 .put("resultId", result.getString("resultId")).put("status", result.optString("status"))
                 .put("stream", partialPart ? "partial" : "content")
-                .put("result", partialPart ? "" : text.substring(local, endLocal)).put("error", clipped(result.optString("error"), 2000))
+                .put("result", partialPart ? "" : text.substring(local, endLocal)).put("error", Text.clip(result.optString("error"), 2000))
                 .put("errorTruncated", result.optString("error").length() > 2000)
                 .put("partial", partialPart ? text.substring(local, endLocal) : "").put("offset", start).put("endOffset", end)
                 .put("totalLength", total).put("contentLength", content.length()).put("partialLength", partial.length())
@@ -839,12 +968,12 @@ public final class SubAgentManager {
             childLease = caller.usageLease;
             root = slots.get(ROOT).loop;
             if (!reportOnly && !fromUser && requireSlot(ROOT).task.userRestartOnly)
-                throw new IllegalStateException("主会话已停止，仅允许用户明确派发的新子任务；模型不能继续派活。");
+                throw new IllegalStateException("主会话已停止，仅允许用户明确派发的新子代理；模型不能继续派活。");
             detached = requireSlot(ROOT).task.userRestartOnly && (reportOnly || fromUser);
         }
         if (!reportOnly && root != null && !(fromUser ? root.delegationBudgetAllowsWork() : root.delegationAllowed()))
-            throw new IllegalStateException(fromUser ? "主任务预算已用尽，不能追加子任务。请先在主会话补充预算。"
-                    : "当前没有派发子任务的授权：只有 ultra 可以主动派活，其他思考程度需要用户明确要求；目标预算用尽时也不能继续派活。");
+            throw new IllegalStateException(fromUser ? "主任务预算已用尽，不能追加子代理。请先在主会话补充预算。"
+                    : "当前没有派发子代理的授权：只有 ultra 可以主动派活，其他思考程度需要用户明确要求；目标预算用尽时也不能继续派活。");
         return detached ? DETACHED_USAGE_LEASE : ROOT.equals(owner) ? (root == null ? -1L : root.goalUsageLease()) : childLease;
     }
 
@@ -852,26 +981,27 @@ public final class SubAgentManager {
         synchronized (lock) { return pendingLocked(ROOT, null); }
     }
 
+    /** main is woken for results that are waiting for it, not merely because children are still running. */
     public boolean needsSettlement() {
-        synchronized (lock) { return !cancelled && (pendingLocked(ROOT, null) || hasUncollectedResults()); }
+        synchronized (lock) { return !cancelled && hasUncollectedResults(); }
     }
 
     public JSONObject close(String owner, String target) throws Exception {
         AgentLoop loop;
         synchronized (lock) {
-            if (ROOT.equals(owner)) requireSlot(owner); else requireOwner(owner);
+            if (!ROOT.equals(owner)) throw new IllegalArgumentException("只有主会话可以关闭子代理。");
+            requireSlot(owner);
+            target = resolveLocked(owner, target);
             Slot slot = requireSlot(target);
-            if (ROOT.equals(target) || (!ROOT.equals(owner) && !owner.equals(slot.task.parentId)
-                    && !owner.equals(target))) throw new IllegalArgumentException("只能关闭自己的子任务。");
+            if (ROOT.equals(target)) throw new IllegalArgumentException("不能关闭主会话。");
             if (slot.executing || QUEUED.equals(slot.task.status) || RUNNING.equals(slot.task.status)
-                    || WAITING.equals(slot.task.status) || pendingLocked(target, null))
-                throw new IllegalStateException("任务或后代仍在运行，不能用关闭跳过等待和成果收集。请先完成任务，或由用户明确停止。");
+                    || WAITING.equals(slot.task.status))
+                throw new IllegalStateException("任务仍在运行，不能用关闭跳过等待和成果收集。请先完成任务，或由用户明确停止。");
             slot.stop = true; slot.task.status = CLOSED; slot.task.pending = new JSONArray();
             slot.task.phase = CLOSED; slot.task.activeTool = ""; slot.task.progressRevision++;
             slot.task.revision++; loop = slot.loop; lock.notifyAll();
         }
         if (loop != null) loop.cancel();
-        closeDescendants(target);
         persist(target);
         JSONObject result;
         synchronized (lock) { result = view(requireSlot(target)); }
@@ -885,10 +1015,8 @@ public final class SubAgentManager {
         List<AgentLoop> loops = new ArrayList<AgentLoop>(); List<String> changed = new ArrayList<String>();
         synchronized (lock) {
             requireSlot(target);
-            for (Slot slot : slots.values()) if (target.equals(slot.task.id) || descendantLocked(slot.task.id, target)) {
-                if (CLOSED.equals(slot.task.status)) continue;
-                stopSlotLocked(slot, "用户已停止任务。", loops); changed.add(slot.task.id);
-            }
+            Slot slot = slots.get(target);
+            if (!CLOSED.equals(slot.task.status)) { stopSlotLocked(slot, "用户已停止任务。", loops); changed.add(slot.task.id); }
             lock.notifyAll();
         }
         for (AgentLoop loop : loops) loop.cancel();
@@ -918,7 +1046,7 @@ public final class SubAgentManager {
             for (Slot slot : slots.values()) {
                 if (ROOT.equals(slot.task.id) || slot.stop) continue;
                 if (!slot.executing && !QUEUED.equals(slot.task.status)) continue;
-                stopSlotLocked(slot, stopManager ? "子任务已取消。" : "目标已更新，旧任务已停止。", loops);
+                stopSlotLocked(slot, stopManager ? "子代理已取消。" : "目标已更新，旧任务已停止。", loops);
                 changed.add(slot.task.id);
             }
             lock.notifyAll();
@@ -929,23 +1057,9 @@ public final class SubAgentManager {
         notifyWorkChanged();
     }
 
-    /** A child's own cancellation affects descendants without cancelling its peers or parent. */
-    public void abortOwned(String owner) {
-        if (ROOT.equals(owner)) { cancelAll(); return; }
-        List<AgentLoop> loops = new ArrayList<AgentLoop>(); List<String> changed = new ArrayList<String>();
-        synchronized (lock) {
-            for (Slot slot : slots.values()) if (descendantLocked(slot.task.id, owner) && !slot.stop
-                    && (slot.executing || QUEUED.equals(slot.task.status))) {
-                stopSlotLocked(slot, "父子任务已停止。", loops); changed.add(slot.task.id);
-            }
-            lock.notifyAll();
-        }
-        for (AgentLoop loop : loops) loop.cancel();
-        for (String id : changed) persistQuietly(id);
-        notifyWorkChanged();
-    }
-
     private void stopSlotLocked(Slot slot, String reason, List<AgentLoop> loops) {
+        try { markMailLocked(slot.task, slot.task.inbox, MAIL_DROPPED); }
+        catch (Exception error) { persistenceError = error.toString(); }
         slot.stop = true; slot.task.pending = new JSONArray(); slot.task.inbox = new JSONArray(); slot.task.inFlight = "";
         slot.task.status = STOPPED; slot.task.error = reason; slot.task.phase = STOPPED; slot.task.activeTool = "";
         slot.task.progressRevision++; slot.task.resume = false;
@@ -968,16 +1082,8 @@ public final class SubAgentManager {
                 .put("partial", attempt.optString("partial")).put("createdAt", now));
         eventLocked(record, "completed".equals(status) ? "final" : "error", "completed".equals(status) ? content : error,
                 record.id, record.parentId);
-        record.events.getJSONObject(record.events.length() - 1).put("taskId", attempt.getString("taskId"));
-    }
-
-    private void closeDescendants(String parent) throws Exception {
-        List<String> children = new ArrayList<String>();
-        synchronized (lock) {
-            for (Slot slot : slots.values()) if (parent.equals(slot.task.parentId)
-                    && !CLOSED.equals(slot.task.status)) children.add(slot.task.id);
-        }
-        for (String id : children) close(ROOT, id);
+        record.events.getJSONObject(record.events.length() - 1).put("taskId", attempt.getString("taskId"))
+                .put("resultId", resultId);
     }
 
     private void scheduleLocked() {
@@ -1029,7 +1135,7 @@ public final class SubAgentManager {
                         reportProgress(slot, "generating_tool", name == null ? "" : name, null);
                     }
                     @Override public void onToolStart(int gen, String name, String args) {
-                        reportProgress(slot, "wait_agent".equals(name) || "wait_agents".equals(name) ? "waiting" : "tool", name, null);
+                        reportProgress(slot, "tool", name, null);
                     }
                     @Override public void onToolEnd(int gen, String name, String result) { reportProgress(slot, "reviewing", "", null); }
                     @Override public void onCompactStart(int gen) { reportProgress(slot, "compacting", "", null); }
@@ -1069,7 +1175,8 @@ public final class SubAgentManager {
                 if (input.length() == 0 && slot.task.pending.length() > 0) {
                     JSONObject mail = slot.task.pending.getJSONObject(0);
                     slot.task.pending = tail(slot.task.pending);
-                    input = "Message from " + mail.optString("from", ROOT) + ":\n" + mail.getString("text");
+                    input = "You are agent " + pathLocked(slot.task.id) + ". " + rosterLocked(slot.task.id) + "Message from "
+                            + mail.optString("fromPath", mail.optString("from", ROOT)) + ":\n" + mail.getString("text");
                     request = mail.getString("text");
                     slot.task.currentTaskId = mail.getString("taskId");
                     slot.task.task = request;
@@ -1096,13 +1203,11 @@ public final class SubAgentManager {
             else if (!resume) slot.loop.submitDelegated(request, reference, slot.task.currentTaskId,
                     slot.task.sessionId, slot.loop.generation(), ++slot.uiToken);
             if (slot.loop.wasRefused()) synchronized (lock) { slot.task.error = PromptGuard.REFUSAL; }
-            while (!slot.stop && !cancelled && slot.task.error.length() == 0
-                    && (pendingForOwner(slot.task.id) || hasUncollectedResults(slot.task.id))) {
-                waitFor(slot.task.id, null, MAX_WAIT_MS);
-                if (slot.stop || cancelled) break;
+            // Mail that reached this agent while it was finishing is handled before the final answer.
+            while (!slot.stop && !cancelled && slot.task.error.length() == 0 && hasInbox(slot.task.id)) {
                 JSONObject collected = collectResults(slot.task.id, null);
-                if (collected.getJSONArray("agents").length() > 0 || collected.getJSONArray("inbox").length() > 0) {
-                    slot.loop.submitDelegated("Verify the delegated results and finish your assigned task before the final answer.",
+                if (collected.getJSONArray("inbox").length() > 0) {
+                    slot.loop.submitDelegated("Handle the new messages from other agents, then finish your assigned task before the final answer.",
                             collected.toString(), slot.task.currentTaskId,
                             slot.task.sessionId, slot.loop.generation(), ++slot.uiToken);
                 }
@@ -1154,7 +1259,7 @@ public final class SubAgentManager {
         Record task = slot.task;
         if (phase.equals(task.phase) && tool.equals(task.activeTool) && summary == null) return;
         task.phase = phase; task.activeTool = tool;
-        if (summary != null) task.progress = clipped(summary, 600);
+        if (summary != null) task.progress = Text.clip(summary, 600);
         task.lastActivityAt = System.currentTimeMillis(); task.progressRevision++; task.revision++;
         try {
             JSONObject attempt = currentTaskLocked(task);
@@ -1198,25 +1303,35 @@ public final class SubAgentManager {
             synchronized (lock) { slot.task.history = history; slot.task.revision++; }
             persist(slot.task.id);
         } catch (Exception error) {
-            synchronized (lock) { slot.task.error = "子任务状态保存失败：" + error.getMessage(); }
+            synchronized (lock) { slot.task.error = "子代理状态保存失败：" + error.getMessage(); }
             loop.cancel();
         }
     }
 
     private boolean pendingLocked(String owner, String target) {
+        return pendingLocked(owner, target, false);
+    }
+
+    private boolean pendingLocked(String owner, String target, boolean wide) {
         for (Slot slot : slots.values()) {
-            if (ROOT.equals(slot.task.id) || owner.equals(slot.task.id)) continue;
-            if (target != null && target.length() > 0 && !target.equals(slot.task.id)) continue;
-            if ((target == null || target.length() == 0) && !ROOT.equals(owner)
-                    && !descendantLocked(slot.task.id, owner)) continue;
+            if (!inScopeLocked(owner, slot, target, wide)) continue;
             if (slot.executing || QUEUED.equals(slot.task.status)) return true;
         }
         return false;
     }
 
-    private boolean pendingForOwner(String owner) { synchronized (lock) { return pendingLocked(owner, null); } }
+    /**
+     * An explicit target is always in scope. Without one, main sees every agent; a child only sees
+     * its peers while a model-facing wait is in progress ({@code wide}).
+     */
+    private boolean inScopeLocked(String owner, Slot slot, String target, boolean wide) {
+        String id = slot.task.id;
+        if (ROOT.equals(id) || owner.equals(id)) return false;
+        if (target != null && target.length() > 0) return target.equals(id);
+        return ROOT.equals(owner) || wide;
+    }
 
-    private JSONObject snapshotLocked(String owner, String target) throws Exception {
+    private JSONObject snapshotLocked(String owner, String target, boolean wide) throws Exception {
         JSONArray agents = new JSONArray(); int chars = 0;
         for (Slot slot : slots.values()) {
             if (ROOT.equals(slot.task.id)) continue;
@@ -1229,27 +1344,107 @@ public final class SubAgentManager {
         Slot caller = requireSlot(owner);
         JSONArray inbox = inboxPreview(caller.task.inbox);
         return new JSONObject().put("agents", agents).put("inbox", inbox)
-                .put("pending", pendingLocked(owner, target)).put("cancelled", cancelled)
+                .put("pending", pendingLocked(owner, target, wide)).put("cancelled", cancelled)
                 .put("persistenceError", persistenceError.length() == 0 ? JSONObject.NULL : persistenceError);
     }
 
     private JSONObject view(Slot slot) throws Exception {
         Record task = slot.task;
-        return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", clipped(task.name, 256))
-                .put("task", clipped(task.task, 2000)).put("status", task.status)
+        return new JSONObject().put("id", task.id).put("parentId", task.parentId).put("name", Text.clip(task.name, 256))
+                .put("path", pathLocked(task.id)).put("task", Text.clip(task.task, 2000)).put("status", task.status)
                 .put("taskId", task.currentTaskId).put("taskCount", task.tasks.length()).put("resultCount", task.results.length())
                 .put("phase", task.phase).put("activeTool", task.activeTool).put("progress", task.progress)
                 .put("lastActivityAt", task.lastActivityAt).put("progressRevision", task.progressRevision)
-                .put("result", slot.executing || QUEUED.equals(task.status) ? "" : clipped(task.result, 8000))
+                .put("result", slot.executing || QUEUED.equals(task.status) ? "" : Text.clip(task.result, 8000))
                 .put("resultTruncated", !slot.executing && !QUEUED.equals(task.status) && task.result.length() > 8000)
                 .put("taskTruncated", task.task.length() > 2000)
-                .put("error", task.error.length() == 0 ? JSONObject.NULL : clipped(task.error, 2000))
+                .put("error", task.error.length() == 0 ? JSONObject.NULL : Text.clip(task.error, 2000))
                 .put("pendingMessages", task.pending.length() + task.inbox.length()).put("revision", task.revision).put("tokensUsed", task.tokensUsed);
+    }
+
+    private static String segment(String name, String fallback) {
+        String value = name == null ? "" : name.trim().replaceAll("[\\s/]+", "_");
+        return value.length() == 0 ? fallback : value;
+    }
+
+    /** /main/<name>/<name>: names are unique among siblings, so a path names exactly one agent. */
+    private String pathLocked(String id) {
+        StringBuilder path = new StringBuilder();
+        Slot slot = slots.get(id);
+        for (int guard = MAX_AGENTS + 2; slot != null && guard > 0; guard--) {
+            if (ROOT.equals(slot.task.id)) return "/" + ROOT + path;
+            path.insert(0, "/" + segment(slot.task.name, slot.task.id));
+            slot = slots.get(slot.task.parentId);
+        }
+        return path.toString();
+    }
+
+    private String uniqueNameLocked(String parent, String requested) {
+        String base = segment(requested, "agent");
+        String candidate = base;
+        for (int n = 2; ; n++) {
+            boolean taken = false;
+            for (Slot slot : slots.values()) if (parent.equals(slot.task.parentId)
+                    && segment(slot.task.name, slot.task.id).equalsIgnoreCase(candidate)) { taken = true; break; }
+            if (!taken) return candidate;
+            candidate = base + "_" + n;
+        }
+    }
+
+    /**
+     * Accepts an id, main, parent, an absolute path (/main/a/b), a path relative to the caller, or a
+     * bare name. Bare names prefer the caller's children, then its siblings, then anyone in the tree.
+     */
+    private String resolveLocked(String owner, String target) {
+        String key = target == null ? "" : target.trim();
+        if (key.length() == 0) throw new IllegalArgumentException("目标不能为空。请填写子代理名字、路径或 id，先用 list_agents 查看。");
+        if (slots.containsKey(key)) return key;
+        String lower = key.toLowerCase(Locale.ROOT);
+        if ("root".equals(lower) || "/root".equals(lower) || ("/" + ROOT).equals(lower)) return ROOT;
+        if ("parent".equals(lower) || "..".equals(lower)) {
+            Slot caller = requireSlot(owner);
+            if (ROOT.equals(owner) || caller.task.parentId.length() == 0) throw new IllegalArgumentException("主会话没有上级。");
+            return caller.task.parentId;
+        }
+        while (key.length() > 1 && key.endsWith("/")) key = key.substring(0, key.length() - 1);
+        List<String> found = new ArrayList<String>();
+        if (key.startsWith("/")) {
+            for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id) && pathLocked(slot.task.id).equalsIgnoreCase(key))
+                found.add(slot.task.id);
+        } else {
+            String parent = requireSlot(owner).task.parentId;
+            for (int tier = 0; tier < 3 && found.isEmpty(); tier++) {
+                for (Slot slot : slots.values()) {
+                    if (ROOT.equals(slot.task.id) || owner.equals(slot.task.id)) continue;
+                    if (tier == 0 && !owner.equals(slot.task.parentId)) continue;
+                    if (tier == 1 && !parent.equals(slot.task.parentId)) continue;
+                    String path = pathLocked(slot.task.id);
+                    if (segment(slot.task.name, slot.task.id).equalsIgnoreCase(key)
+                            || slot.task.name.trim().equalsIgnoreCase(key)
+                            || path.toLowerCase(Locale.ROOT).endsWith("/" + key.toLowerCase(Locale.ROOT))) found.add(slot.task.id);
+                }
+            }
+        }
+        if (found.size() == 1) return found.get(0);
+        if (found.isEmpty()) throw new IllegalArgumentException("找不到子代理“" + key + "”。先用 list_agents 查看可用的名字和路径。");
+        StringBuilder names = new StringBuilder();
+        for (String id : found) names.append(names.length() == 0 ? "" : "、").append(pathLocked(id));
+        throw new IllegalArgumentException("“" + key + "”对应多个子代理：" + names + "。请改用完整路径。");
+    }
+
+    /** Who a starting agent can reach with send_message: main and its open peers, by path. */
+    private String rosterLocked(String self) {
+        StringBuilder roster = new StringBuilder();
+        for (Slot slot : slots.values()) {
+            if (ROOT.equals(slot.task.id) || self.equals(slot.task.id) || CLOSED.equals(slot.task.status)) continue;
+            roster.append(roster.length() == 0 ? "" : ", ").append(pathLocked(slot.task.id));
+        }
+        return "You can send_message to: " + ROOT + (roster.length() == 0 ? "" : ", " + roster) + ". ";
     }
 
     private Slot requireSlot(String id) {
         Slot slot = slots.get(id);
-        if (slot == null) throw new IllegalArgumentException("子任务不存在：" + id);
+        if (slot == null) throw new IllegalArgumentException("子代理不存在：" + id);
         return slot;
     }
 
@@ -1259,16 +1454,6 @@ public final class SubAgentManager {
                 || STOPPED.equals(slot.task.status) || ROOT.equals(id) && slot.task.userRestartOnly)
             throw new IllegalStateException("当前任务已停止。普通消息或模型派活不会重新启动它。");
         return slot;
-    }
-
-    private boolean descendantLocked(String child, String ancestor) {
-        int remaining = MAX_AGENTS + 1;
-        Slot slot = slots.get(child);
-        while (slot != null && !ROOT.equals(slot.task.id) && remaining-- > 0) {
-            if (ancestor.equals(slot.task.parentId)) return true;
-            slot = slots.get(slot.task.parentId);
-        }
-        return false;
     }
 
     private void persist(String id) throws Exception {
@@ -1286,16 +1471,10 @@ public final class SubAgentManager {
     }
 
     private static Record copy(Record task) throws Exception { return Record.fromJson(new JSONObject(task.toJson().toString())); }
-    private static String clipped(String text, int limit) {
-        if (text.length() <= limit) return text;
-        int end = limit;
-        if (end > 0 && Character.isHighSurrogate(text.charAt(end - 1)) && Character.isLowSurrogate(text.charAt(end))) end--;
-        return text.substring(0, end);
-    }
     private static JSONObject mailPreview(JSONObject original) throws Exception {
         JSONObject mail = new JSONObject(original.toString()); String text = mail.optString("text", "");
         mail.remove("usageLease");
-        return mail.put("text", clipped(text, 4000)).put("truncated", text.length() > 4000);
+        return mail.put("text", Text.clip(text, 4000)).put("truncated", text.length() > 4000);
     }
     private static JSONArray inboxPreview(JSONArray source) throws Exception {
         JSONArray preview = new JSONArray(); int chars = 0;
@@ -1309,8 +1488,9 @@ public final class SubAgentManager {
     private static void requireText(String text) {
         if (text == null || text.trim().length() == 0 || text.length() > MAX_TEXT) throw new IllegalArgumentException("任务消息不能为空或超过 " + MAX_TEXT + " 字符。");
     }
-    private static JSONObject mail(String from, String text) throws Exception {
-        return new JSONObject().put("from", from).put("text", text).put("id", UUID.randomUUID().toString());
+    private JSONObject mailLocked(String from, String text) throws Exception {
+        return new JSONObject().put("from", from).put("fromPath", pathLocked(from))
+                .put("text", text).put("id", UUID.randomUUID().toString());
     }
     private static JSONArray tail(JSONArray array) throws Exception {
         JSONArray result = new JSONArray(); for (int i = 1; i < array.length(); i++) result.put(array.get(i)); return result;

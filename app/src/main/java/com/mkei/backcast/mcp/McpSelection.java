@@ -1,7 +1,7 @@
 package com.mkei.backcast.mcp;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import com.mkei.backcast.agent.Text;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -79,12 +79,7 @@ public final class McpSelection {
     }
 
     private static String digest(String value) {
-        try {
-            byte[] bytes = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder();
-            for (byte item : bytes) hex.append(String.format(java.util.Locale.US, "%02x", item & 255));
-            return hex.toString();
-        } catch (Exception invalid) { throw new IllegalStateException("MCP 身份编码失败", invalid); }
+        return Text.sha256Hex(value);
     }
 
     /** Object key order is not schema identity. Array order remains meaningful. */

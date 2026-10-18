@@ -16,12 +16,6 @@ public final class ToolchainInstaller {
 
     private ToolchainInstaller() { }
 
-    static String hex(byte[] bytes) {
-        StringBuilder result = new StringBuilder();
-        for (byte value : bytes) { int v = value & 255; if (v < 16) result.append('0'); result.append(Integer.toHexString(v)); }
-        return result.toString();
-    }
-
     private static final class Link {
         final File destination, target;
         Link(File destination, File target) { this.destination = destination; this.target = target; }

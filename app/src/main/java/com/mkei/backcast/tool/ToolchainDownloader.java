@@ -1,5 +1,6 @@
 package com.mkei.backcast.tool;
 
+import com.mkei.backcast.agent.Text;
 import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
@@ -180,7 +181,7 @@ public final class ToolchainDownloader {
                                     if (read == 0) continue;
                                     sha.update(buffer, 0, read); left -= read;
                                 }
-                                if (!artifact.prefixDigest.equals(ToolchainInstaller.hex(sha.digest()))) throw new IOException("probe_sha256_mismatch");
+                                if (!artifact.prefixDigest.equals(Text.hex(sha.digest()))) throw new IOException("probe_sha256_mismatch");
                                 session.check(); return new Probe(source, null);
                             } finally { reply.close(); }
                         } finally { session.release(exchange); }
@@ -235,7 +236,7 @@ public final class ToolchainDownloader {
                                 if (read == 0) continue;
                                 output.write(buffer, 0, read); sha.update(buffer, 0, read); received += read;
                             }
-                            if (!artifact.chunks[index].equals(ToolchainInstaller.hex(sha.digest()))) throw new IOException("chunk_sha256_mismatch:" + index);
+                            if (!artifact.chunks[index].equals(Text.hex(sha.digest()))) throw new IOException("chunk_sha256_mismatch:" + index);
                         } catch (Exception failure) { output.setLength(verified); throw failure; }
                         output.getFD().sync(); verified += wanted;
                         listener.update("downloading", verified, artifact.bytes);
@@ -274,7 +275,7 @@ public final class ToolchainDownloader {
                     cancellation.check(); int read = input.read(buffer, 0, (int) Math.min((long) buffer.length, length - consumed));
                     if (read < 0) break; sha.update(buffer, 0, read); consumed += read;
                 }
-                if (consumed != length || !artifact.chunks[i].equals(ToolchainInstaller.hex(sha.digest()))) break;
+                if (consumed != length || !artifact.chunks[i].equals(Text.hex(sha.digest()))) break;
                 verified += length;
             }
             input.setLength(verified); return verified;
@@ -292,7 +293,7 @@ public final class ToolchainDownloader {
             byte[] buffer = new byte[32768]; int read;
             while ((read = input.read(buffer)) >= 0) { cancellation.check(); if (read > 0) sha.update(buffer, 0, read); }
         } finally { input.close(); }
-        cancellation.check(); return ToolchainInstaller.hex(sha.digest());
+        cancellation.check(); return Text.hex(sha.digest());
     }
     private static File safe(File file, File directory) throws IOException {
         File absolute = file.getAbsoluteFile(), canonical = file.getCanonicalFile();

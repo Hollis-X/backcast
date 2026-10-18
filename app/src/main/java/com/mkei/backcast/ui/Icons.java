@@ -5,6 +5,9 @@ import android.graphics.Bitmap;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.Gravity;
 import android.widget.TextView;
 
 import com.mkei.backcast.R;
@@ -64,6 +67,45 @@ public final class Icons {
         }
         tv.setCompoundDrawables(tinted(tv.getContext(), res, color, sizePx), null, null, null);
         tv.setCompoundDrawablePadding(Math.max(2, sizePx / 4));
+    }
+
+    /** 图标放左侧，并与文字作为一组在按钮内水平居中。 */
+    public static void leftCentered(TextView tv, int res, int color, int sizePx) {
+        if (tv == null) {
+            return;
+        }
+        if (tv instanceof com.google.android.material.button.MaterialButton) {
+            // M3 按钮自带图标位：颜色跟随按钮文字（填充按钮 onPrimary，色调按钮 onSecondaryContainer）。
+            com.google.android.material.button.MaterialButton button = (com.google.android.material.button.MaterialButton) tv;
+            Drawable icon = tinted(tv.getContext(), res, 0xFFFFFFFF, sizePx);
+            icon.clearColorFilter();
+            button.setIcon(icon);
+            button.setIconSize(sizePx);
+            button.setIconTint(button.getTextColors());
+            button.setIconGravity(com.google.android.material.button.MaterialButton.ICON_GRAVITY_TEXT_START);
+            return;
+        }
+        left(tv, res, color, sizePx);
+        tv.setGravity(Gravity.CENTER);
+        tv.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> centerContent(tv, sizePx));
+        tv.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable s) { centerContent(tv, sizePx); }
+        });
+    }
+
+    private static void centerContent(TextView tv, int sizePx) {
+        int width = tv.getWidth();
+        if (width <= 0) {
+            return;
+        }
+        int text = (int) Math.ceil(tv.getPaint().measureText(String.valueOf(tv.getText())));
+        int content = sizePx + tv.getCompoundDrawablePadding() + text;
+        int side = Math.max(sizePx, (width - content) / 2);
+        if (tv.getPaddingLeft() != side || tv.getPaddingRight() != side) {
+            tv.setPadding(side, tv.getPaddingTop(), side, tv.getPaddingBottom());
+        }
     }
 
     /** 图标放 TextView 右侧。 */

@@ -95,22 +95,21 @@ public class LlmClient {
             return b;
         }
 
-        /** 允许只填域名，自动补成 chat/completions。 */
+        /** 允许只填域名，自动补成 chat/completions；路径里已有版本段（/v1、/v4、/api/v3、/v1beta/openai）时不再补 /v1。 */
         static String normalize(String base) {
-            String b = root(base);
-            if (b.endsWith("/v1")) {
-                return b + "/chat/completions";
-            }
-            return b + "/v1/chat/completions";
+            return versioned(root(base)) + "/chat/completions";
         }
 
         /** 模型列表端点。 */
         public String modelsUrl() {
-            String b = root(baseUrl);
-            if (b.endsWith("/v1")) {
-                return b + "/models";
-            }
-            return b + "/v1/models";
+            return versioned(root(baseUrl)) + "/models";
+        }
+
+        private static String versioned(String root) {
+            int scheme = root.indexOf("://");
+            int path = root.indexOf('/', scheme < 0 ? 0 : scheme + 3);
+            String tail = path < 0 ? "" : root.substring(path).toLowerCase(java.util.Locale.ROOT);
+            return tail.matches(".*/v\\d+[a-z0-9]*(/.*)?") ? root : root + "/v1";
         }
     }
 
@@ -323,13 +322,7 @@ public class LlmClient {
     }
 
     public static String credentialFingerprint(String credential) {
-        try {
-            byte[] bytes = java.security.MessageDigest.getInstance("SHA-256")
-                    .digest((credential == null ? "" : credential).getBytes("UTF-8"));
-            StringBuilder result = new StringBuilder();
-            for (byte value : bytes) result.append(String.format(java.util.Locale.US, "%02x", value & 255));
-            return result.toString();
-        } catch (Exception impossible) { throw new IllegalStateException("无法校验模型授权身份。", impossible); }
+        return Text.sha256Hex(credential == null ? "" : credential);
     }
 
     /** 断开正在进行的请求。用户点停止时调用。 */

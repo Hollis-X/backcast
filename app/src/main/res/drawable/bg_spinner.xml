@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M3 下拉框（描边样式）：4dp 圆角细边，右侧向下箭头。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <solid android:color="@android:color/transparent"/>
+            <stroke android:width="1dp" android:color="@color/md_outline"/>
+            <corners android:radius="4dp"/>
+        </shape>
+    </item>
+    <item android:width="20dp" android:height="20dp" android:gravity="end|center_vertical" android:end="14dp">
+        <bitmap android:src="@drawable/ic_ds_chevron_down_sm_regular_24" android:tint="@color/md_on_surface_variant"/>
+    </item>
+</layer-list>

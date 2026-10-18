@@ -1,19 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 弹出菜单：白底 + 底部 3dp 淡影，不用 elevation。 -->
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <item>
-        <shape>
-            <solid android:color="@color/shadow_mid"/>
-            <corners android:radius="26dp"/>
-        </shape>
-    </item>
-
-    <item android:bottom="3dp">
-        <shape>
-            <solid android:color="@color/surface"/>
-            <corners android:radius="26dp"/>
-        </shape>
-    </item>
-
-</layer-list>
+<!-- M3 菜单：surfaceContainer，圆角 16dp，阴影由 elevation 给出。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/md_surface_container"/>
+    <corners android:radius="16dp"/>
+</shape>

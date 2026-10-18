@@ -1,9 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 状态栏还没采到模糊帧时的兜底：顶上乳白，向下淡出。 -->
+<!-- 顶栏磨砂层的占位：真正的颜色由代码按 M3 surface 设置（深浅色各自一套）。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <gradient
-        android:angle="270"
-        android:startColor="#F4FFFFFF"
-        android:centerColor="#8CFFFFFF"
-        android:endColor="#00FFFFFF"/>
+    <solid android:color="@android:color/transparent"/>
 </shape>

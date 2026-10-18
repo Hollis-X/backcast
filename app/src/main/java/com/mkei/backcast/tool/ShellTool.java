@@ -103,7 +103,9 @@ public class ShellTool implements Tool {
             }
             // The launcher reaper belongs to the same cleanup attempt as its
             // descendants. Repeated kill/finally must not start another wait.
-            deadlineNanos = tree.cleanupDeadlineNanos();
+            // Killing the tree can use up its whole deadline; reaping the launcher
+            // still gets a short budget of its own so it is not reported as stuck.
+            deadlineNanos = Math.max(tree.cleanupDeadlineNanos(), System.nanoTime() + 2000000000L);
         }
         try (CleanupBudget budget = new CleanupBudget(deadlineNanos)) {
             try { process.getInputStream().close(); } catch (Exception ignored) { }

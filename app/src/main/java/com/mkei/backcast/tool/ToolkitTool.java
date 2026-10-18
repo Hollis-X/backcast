@@ -80,7 +80,7 @@ public final class ToolkitTool implements Tool {
             if ("list".equals(action)) return listing().toString();
             if ("export".equals(action)) {
                 return ToolkitExport.copy(workDir, temporary, store, args.optString("source", ""),
-                        args.optString("target", ""), args.optString("purpose", ""), args.optBoolean("overwrite", false),
+                        args.optString("target", ""), args.optString("purpose", ""), args.optBoolean("overwrite", false), allowRootCleanup,
                         new ToolchainInstaller.Cancellation() {
                             @Override public void check() throws Exception {
                                 if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("导出已取消。");

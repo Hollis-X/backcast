@@ -23,7 +23,6 @@ import android.widget.EditText;
 public class SlashInput extends EditText {
 
     /** 块的底色。浅灰，和输入栏里的其它元素同一档。 */
-    private static final int CHIP_BG = 0xFFEFEFF2;
 
     private boolean chipped;
     /** 块结束的位置。后面的字不进块。-1 表示当前没有块。 */
@@ -300,7 +299,7 @@ public class SlashInput extends EditText {
 
         @Override
         public void updateDrawState(TextPaint tp) {
-            tp.bgColor = CHIP_BG;
+            tp.bgColor = M3.containerHighest;
         }
     }
 }

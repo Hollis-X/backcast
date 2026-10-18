@@ -1,6 +1,9 @@
+import com.mkei.backcast.agent.AgentLoop;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
 import com.mkei.backcast.agent.ResponsePreferences;
+import com.mkei.backcast.agent.Tool;
+import com.mkei.backcast.agent.ToolRegistry;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -541,6 +544,47 @@ public final class LlmUsageRegressionTest {
         }
     }
 
+    /**
+     * DeepSeek 思考模式下的工具调用：流式 reasoning_content 存进 assistant 消息，
+     * 同一轮里执行完工具后的下一次请求要把它原样带回去，否则接口会拒绝。
+     */
+    private static void deepSeekReasoningRoundTripsThroughToolTurn() throws Exception {
+        String first = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先列出目录，\"}}]}\n\n"
+                + "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"再回答。\"}}]}\n\n"
+                + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-ds\",\"type\":\"function\","
+                + "\"function\":{\"name\":\"fixture_tool\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                + "data: [DONE]\n\n";
+        String second = "data: {\"choices\":[{\"delta\":{\"content\":\"目录里有 3 个文件。\"},\"finish_reason\":\"stop\"}]}\n\n"
+                + "data: [DONE]\n\n";
+        Server server = new Server(new Response(200, "text/event-stream", first), new Response(200, "text/event-stream", second));
+        try {
+            ToolRegistry tools = new ToolRegistry();
+            tools.register(new Tool() {
+                @Override public String name() { return "fixture_tool"; }
+                @Override public String description() { return "Local fixture"; }
+                @Override public JSONObject parameters() { return new JSONObject().put("type", "object").put("properties", new JSONObject()); }
+                @Override public String run(JSONObject args) { return "a.txt b.txt c.txt"; }
+                @Override public void abort() { }
+            });
+            AgentLoop loop = new AgentLoop(server.client("high"), tools, new AgentLoop.Quiet());
+            loop.bindSession(1);
+            loop.reset("system fixture");
+            loop.submit("列一下目录", 1, loop.generation(), 1, null);
+            check(server.requests.size() >= 2, "Tool turn did not continue after the tool result");
+            JSONArray wire = server.request(1).getJSONArray("messages");
+            JSONObject assistant = null;
+            for (int i = 0; i < wire.length(); i++) {
+                JSONObject message = wire.getJSONObject(i);
+                if ("assistant".equals(message.optString("role")) && message.has("tool_calls")) assistant = message;
+            }
+            check(assistant != null, "Tool-call message missing from the follow-up request");
+            check("先列出目录，再回答。".equals(assistant.optString("reasoning_content")),
+                    "DeepSeek reasoning_content was not sent back in the tool turn: " + assistant);
+        } finally {
+            server.stop();
+        }
+    }
+
     public static void main(String[] args) {
         String[] tests = { "requestsUsageAndParsesFinalSseUsageChunk",
                 "unsupportedStreamOptionsWaitsForManualRequestAndCaches", "unknownIncludeUsageWaitsForManualRequestAndCaches",
@@ -551,7 +595,7 @@ public final class LlmUsageRegressionTest {
                 "usageThenVerbosityRequireThreeManualRequests", "verbosityThenUsageRequireThreeManualRequests",
                 "rejectedVerbosityNeverAutomaticallyRetries", "unrelatedVerbosityErrorDoesNotRetry",
                 "cancellationBeforeAttemptDoesNotStartHttp", "xhighMaxAndUltraReachTheWireUnchanged",
-                "officialSdkFetchesCompatibleModelListsWithoutRetry" };
+                "officialSdkFetchesCompatibleModelListsWithoutRetry", "deepSeekReasoningRoundTripsThroughToolTurn" };
         for (String name : tests) run(name);
         if (failures != 0) throw new AssertionError(failures + " usage tests failed");
         System.out.println(tests.length + " usage tests passed");

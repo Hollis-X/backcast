@@ -10,6 +10,8 @@ import android.widget.ScrollView;
 /** ScrollView with an explicit stop for a user's jump to the latest message. */
 public class TranscriptScrollView extends ScrollView {
     private Runnable touchStart;
+    private boolean touching;
+    private long releasedAt;
 
     public TranscriptScrollView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -21,8 +23,20 @@ public class TranscriptScrollView extends ScrollView {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
-        if (event.getActionMasked() == MotionEvent.ACTION_DOWN && touchStart != null) touchStart.run();
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            touching = true;
+            if (touchStart != null) touchStart.run();
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            touching = false;
+            releasedAt = SystemClock.uptimeMillis();
+        }
         return super.dispatchTouchEvent(event);
+    }
+
+    /** 这次滚动是不是用户手指带起来的（按着，或刚松手还在惯性滑）。内容变长、键盘弹起引起的滚动不算。 */
+    public boolean isUserScroll() {
+        return touching || SystemClock.uptimeMillis() - releasedAt < 1500;
     }
 
     public void stopScroll() {

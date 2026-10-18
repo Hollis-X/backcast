@@ -40,6 +40,8 @@ public class AgentService extends Service {
     });
     private final Handler main = new Handler(Looper.getMainLooper());
     private PowerManager.WakeLock wakeLock;
+    /** 熄屏后 Wi-Fi 会进入省电休眠，长请求和流式输出会断；有任务时一直保持。 */
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
     private int latestStartId;
     private boolean recovering, foreground, stopping, exitChecked, wakeFailureReported;
     private volatile boolean destroyed;
@@ -183,6 +185,18 @@ public class AgentService extends Service {
             if (!wakeFailureReported) recordAsync(this, "wake_lock_failed", "后台运行唤醒锁获取失败", error);
             wakeFailureReported = true;
         }
+        if (wifiLock != null && wifiLock.isHeld()) return;
+        try {
+            android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager) getApplicationContext()
+                    .getSystemService(WIFI_SERVICE);
+            if (wifi != null) {
+                wifiLock = wifi.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "backcast:run");
+                wifiLock.setReferenceCounted(false);
+                wifiLock.acquire();
+            }
+        } catch (RuntimeException error) {
+            recordAsync(this, "wifi_lock_failed", "后台运行 Wi-Fi 锁获取失败", error);
+        }
     }
 
     private void releaseWake() {
@@ -190,6 +204,10 @@ public class AgentService extends Service {
         wakeLock = null;
         try { if (previous != null && previous.isHeld()) previous.release(); }
         catch (RuntimeException error) { recordAsync(this, "wake_lock_release_failed", "后台运行唤醒锁释放失败", error); }
+        android.net.wifi.WifiManager.WifiLock wifi = wifiLock;
+        wifiLock = null;
+        try { if (wifi != null && wifi.isHeld()) wifi.release(); }
+        catch (RuntimeException error) { recordAsync(this, "wifi_lock_release_failed", "后台运行 Wi-Fi 锁释放失败", error); }
     }
 
     private static JSONObject evidence(String event, Throwable error) {

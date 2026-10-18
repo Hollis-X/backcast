@@ -1,5 +1,6 @@
 package com.mkei.backcast.tool;
 
+import com.mkei.backcast.agent.Text;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -247,7 +248,7 @@ public final class EmbeddedToolchain {
             progress.advance(bytes);
         }
         void verify() throws IOException {
-            if (expectedDigest.length() > 0 && (count != expectedBytes || !expectedDigest.equals(ToolchainInstaller.hex(sha.digest())))) {
+            if (expectedDigest.length() > 0 && (count != expectedBytes || !expectedDigest.equals(Text.hex(sha.digest())))) {
                 throw new IOException("工具包解压后的 TAR SHA-256 校验失败。");
             }
         }

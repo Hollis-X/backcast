@@ -110,6 +110,12 @@ public final class SubAgentLoopIntegrationTest {
             return childId;
         }
         void submit() { root.submit("finish the requested work", 1L, root.generation(), 1, null); }
+        void settleChildren() throws Exception { manager.waitFor("main", null, 5000L); }
+        /** What RunHub does when children finish after the parent's turn ended: wake it until nothing is waiting. */
+        void wakeUntilSettled() throws Exception {
+            settleChildren();
+            for (int i = 0; i < 4 && manager.shouldWakeRoot(); i++) root.resumeForChildEvents(1L, -1);
+        }
     }
 
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
@@ -127,7 +133,7 @@ public final class SubAgentLoopIntegrationTest {
         return count;
     }
 
-    private static void prematureParentFinalWaitsAndReceivesExactlyOneChildResult() throws Exception {
+    private static void parentFinalEndsTheTurnAndTheChildResultWakesItExactlyOnce() throws Exception {
         final Fixture f = new Fixture(); f.childStarted = new CountDownLatch(1); f.childRelease = new CountDownLatch(1);
         f.client.script = new Script() {
             @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
@@ -135,22 +141,22 @@ public final class SubAgentLoopIntegrationTest {
                 if (f.client.calls.get() == 2) {
                     await(f.childStarted);
                     check(f.manager.hasPendingWork(), "Fixture child was already settled before premature answer");
-                    f.childRelease.countDown(); return text("premature parent answer");
+                    f.childRelease.countDown(); return text("children are running, I will report when they finish");
                 }
                 check(f.client.calls.get() == 3 && resultNotes(messages) == 1,
-                        "Parent did not receive a unique child result before its final answer");
-                check(!f.manager.hasPendingWork(), "Parent final was requested before child cleanup completed");
+                        "Parent did not receive a unique child result when it was woken");
+                check(!f.manager.hasPendingWork(), "Parent was woken before child cleanup completed");
                 return text("parent verified child result and finished");
             }
         };
         f.submit();
+        check(f.errors.isEmpty() && f.client.calls.get() == 2 && !f.root.busy(), "Parent did not end its turn with a child running: " + f.errors);
+        f.wakeUntilSettled();
         check(f.errors.isEmpty() && f.client.calls.get() == 3 && f.childCalls.get() == 1 && !f.root.needsResume(),
-                "Parent final handoff failed: " + f.errors);
-        check(!f.manager.hasUncollectedResults(), "Parent final left a duplicate result delivery");
-        check(f.visibleAnswers.equals(java.util.Arrays.asList("parent verified child result and finished")),
-                "Parent streamed a final answer before delegated evidence: " + f.visibleAnswers);
-        for (Message message : f.root.historySnapshot()) check(!message.content.contains("premature parent answer"),
-                "A provisional parent final was retained as a delivered answer");
+                "Parent wake handoff failed: " + f.errors);
+        check(!f.manager.hasUncollectedResults(), "Parent wake left a duplicate result delivery");
+        check(f.visibleAnswers.equals(java.util.Arrays.asList("children are running, I will report when they finish",
+                "parent verified child result and finished")), "Parent answers were shown wrongly: " + f.visibleAnswers);
     }
 
     private static void parentRunsIndependentToolsWhileItsChildIsWorking() throws Exception {
@@ -176,19 +182,21 @@ public final class SubAgentLoopIntegrationTest {
                 }
                 if (f.client.calls.get() == 3) {
                     check(checks.get() == 1, "Parent did not execute its own tool");
-                    f.childRelease.countDown(); return text("unverified provisional final");
+                    f.childRelease.countDown(); return text("integration checked, child still running");
                 }
                 check(f.client.calls.get() == 4 && resultNotes(messages) == 1 && !f.manager.hasPendingWork(),
-                        "Parent did not wait for and collect its child's evidence");
+                        "Parent was not woken with its child's evidence");
                 return text("parent and child evidence verified");
             }
         };
         try {
             f.submit();
+            check(f.client.calls.get() == 3 && !f.root.busy(), "Parent did not end its turn after its own integration work");
+            f.wakeUntilSettled();
             check(f.errors.isEmpty() && checks.get() == 1 && f.client.calls.get() == 4,
                     "Parallel parent integration failed: " + f.errors);
-            check(f.visibleAnswers.equals(java.util.Arrays.asList("checking integration", "parent and child evidence verified")),
-                    "Parent commentary or final ordering was wrong: " + f.visibleAnswers);
+            check(f.visibleAnswers.equals(java.util.Arrays.asList("checking integration", "integration checked, child still running",
+                    "parent and child evidence verified")), "Parent commentary or final ordering was wrong: " + f.visibleAnswers);
         } finally { f.childRelease.countDown(); f.root.cancel(); }
     }
 
@@ -281,20 +289,21 @@ public final class SubAgentLoopIntegrationTest {
         record.name = "restored"; record.task = "resume evidence"; record.status = SubAgentManager.QUEUED; record.sessionId = 90L;
         record.pending.put(new JSONObject().put("from", "main").put("text", "resume evidence")); saved.add(record);
         final Fixture f = new Fixture(new SubAgentManager.Store() {
-            @Override public List<SubAgentManager.Record> load() { return saved; }
+            @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(saved); }
             @Override public void save(SubAgentManager.Record task) { }
         });
         List<Message> parentHistory = new ArrayList<Message>(); parentHistory.add(Message.user("resume the requested work"));
         f.root.loadHistory("fixture trusted policy", parentHistory);
         f.client.script = new Script() {
             @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
-                if (f.client.calls.get() == 1 && resultNotes(messages) == 0) return text("parent provisional recovery answer");
+                if (f.client.calls.get() == 1 && resultNotes(messages) == 0) return text("recovering, the saved child is running");
                 check(resultNotes(messages) == 1 && f.childCalls.get() == 1, "Parent resume never started and collected the saved child task");
                 return text("recovered parent final");
             }
         };
         check(f.childCalls.get() == 0, "Child recovery ran before parent resume");
         f.root.resume(1L, 1);
+        f.wakeUntilSettled();
         check(f.errors.isEmpty() && f.childCalls.get() == 1 && !f.root.needsResume(), "Parent recovery did not settle its child work");
     }
 
@@ -345,7 +354,7 @@ public final class SubAgentLoopIntegrationTest {
                 if (f.client.calls.get() == 2) return call("spawn_agent", "{\"name\":\"new\",\"task\":\"new delegated work\",\"fork\":false}");
                 if (f.client.calls.get() == 3) {
                     await(f.childStarted); newParentStarted.countDown(); await(newParentRelease);
-                    return text("new provisional answer");
+                    return text("new answer while the child runs");
                 }
                 check(resultNotes(messages) == 1, "New parent lost its child result after old cleanup");
                 return text("new final with evidence");
@@ -360,8 +369,10 @@ public final class SubAgentLoopIntegrationTest {
             check(!old.isAlive() && f.manager.hasPendingWork()
                     && !f.manager.list("main", 0).getBoolean("cancelled"), "Old parent cleanup cancelled new delegated work");
             newParentRelease.countDown(); f.childRelease.countDown(); current.join(2000L);
-            check(!current.isAlive() && f.errors.isEmpty() && f.client.calls.get() == 4,
+            check(!current.isAlive() && f.errors.isEmpty() && f.client.calls.get() == 3,
                     "New parent failed to finish after old parent exit: " + f.errors);
+            f.wakeUntilSettled();
+            check(f.errors.isEmpty() && f.client.calls.get() == 4, "New parent was not woken with its child result: " + f.errors);
         } finally {
             oldRelease.countDown(); newParentRelease.countDown(); f.childRelease.countDown(); f.root.cancel();
             old.join(2000L); current.join(2000L);
@@ -411,7 +422,7 @@ public final class SubAgentLoopIntegrationTest {
             } else { task.status = SubAgentManager.IDLE; task.result = "child_verified_result"; }
             saved.add(task);
             final Fixture f = new Fixture(new SubAgentManager.Store() {
-                @Override public List<SubAgentManager.Record> load() { return saved; }
+                @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(saved); }
                 @Override public void save(SubAgentManager.Record record) { }
             });
             List<Message> history = new ArrayList<Message>(); history.add(Message.user("finish delegated work"));
@@ -424,8 +435,15 @@ public final class SubAgentLoopIntegrationTest {
                     return text("recovered final after saved child evidence");
                 }
             };
-            check(f.root.needsResume(), "A premature stored assistant answer hid saved child settlement work");
-            f.root.resume(1L, 1);
+            if (variant == 0) {
+                // dormant queued work is not a reason to ask the model again; RunHub's recovery restarts it and wakes main
+                check(!f.root.needsResume(), "Dormant queued child work made the parent ask the model again");
+                f.manager.resumePending(); f.root.armRecoveredChildEvents();
+                f.wakeUntilSettled();
+            } else {
+                check(f.root.needsResume(), "A premature stored assistant answer hid a saved child result");
+                f.root.resume(1L, 1);
+            }
             check(f.errors.isEmpty() && !f.root.needsResume() && !f.manager.needsSettlement(),
                     "Parent recovery did not durably settle its saved child work: " + f.errors);
         }
@@ -437,7 +455,7 @@ public final class SubAgentLoopIntegrationTest {
         task.name = "strict"; task.task = "requires approved write"; task.status = SubAgentManager.QUEUED; task.sessionId = 80L;
         task.pending.put(new JSONObject().put("from", "main").put("text", task.task)); saved.add(task);
         final Fixture f = new Fixture(new SubAgentManager.Store() {
-            @Override public List<SubAgentManager.Record> load() { return saved; }
+            @Override public List<SubAgentManager.Record> load() { return RecordFixtures.modern(saved); }
             @Override public void save(SubAgentManager.Record record) { }
         });
         f.childAttemptsWrite = true; f.manager.setMaxParallel(3); Thread.sleep(50L);
@@ -451,7 +469,7 @@ public final class SubAgentLoopIntegrationTest {
                 return text("parent verified child permissions");
             }
         };
-        f.submit();
+        f.submit(); f.settleChildren();
         check(f.errors.isEmpty() && approvals.get() == 1 && f.writes.get() == 0 && f.childCalls.get() == 2,
                 "Restored child bypassed its configured strict approval: " + f.errors);
     }
@@ -561,8 +579,8 @@ public final class SubAgentLoopIntegrationTest {
         final Fixture f = new Fixture(); f.root.setAutomaticDelegation(false);
         f.client.script = new Script() {
             @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception {
-                check(!schemaHas(tools, "spawn_agent") && !schemaHas(tools, "send_message")
-                        && schemaHas(tools, "list_agents"), "Unrequested delegation was advertised to the model");
+                check(!schemaHas(tools, "spawn_agent") && schemaHas(tools, "send_message")
+                        && schemaHas(tools, "list_agents"), "Unrequested spawning was advertised, or messaging was hidden");
                 if (f.client.calls.get() == 1) return call("spawn_agent", "{\"task\":\"model chose parallel work\"}");
                 return text("handled in the parent");
             }
@@ -590,7 +608,7 @@ public final class SubAgentLoopIntegrationTest {
             }
         };
         try {
-            f.root.submit("请使用子agent检查文件", 1L, f.root.generation(), 1, null);
+            f.root.submit("请使用子agent检查文件", 1L, f.root.generation(), 1, null); f.settleChildren();
             check(f.childCalls.get() == 1 && f.root.delegationAllowed(), "Explicit request did not execute a child");
             f.client.script = new Script() {
                 @Override public LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) {
@@ -697,7 +715,7 @@ public final class SubAgentLoopIntegrationTest {
     }
 
     public static void main(String[] args) throws Exception {
-        String[] tests = {"prematureParentFinalWaitsAndReceivesExactlyOneChildResult", "parentRunsIndependentToolsWhileItsChildIsWorking",
+        String[] tests = {"parentFinalEndsTheTurnAndTheChildResultWakesItExactlyOnce", "parentRunsIndependentToolsWhileItsChildIsWorking",
                 "goalCompletionRejectsPendingAndUncollectedChildResults",
                 "childUsageExhaustsParentBudgetBeforeItsToolCanExecute", "endedGoalDoesNotChargeExternalUsage",
                 "parentCancellationInterruptsChildWaitAndKeepsIdleContextReusable", "parentResumeStartsRestoredChildBeforeItsFinalAnswer",

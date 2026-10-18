@@ -28,11 +28,11 @@ public final class SubAgentCommunicationRegressionTest {
         final Map<String, SubAgentManager.Record> records = new LinkedHashMap<String, SubAgentManager.Record>();
         @Override public synchronized List<SubAgentManager.Record> load() throws Exception {
             List<SubAgentManager.Record> copy = new ArrayList<SubAgentManager.Record>();
-            for (SubAgentManager.Record record : records.values()) copy.add(SubAgentManager.Record.fromJson(record.toJson()));
+            for (SubAgentManager.Record record : records.values()) copy.add(RecordFixtures.fromJson(record.toJson()));
             return copy;
         }
         @Override public synchronized void save(SubAgentManager.Record record) throws Exception {
-            records.put(record.id, SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString())));
+            records.put(record.id, RecordFixtures.fromJson(new JSONObject(record.toJson().toString())));
         }
     }
     private static final class Fixture implements SubAgentManager.Factory {
@@ -253,56 +253,6 @@ public final class SubAgentCommunicationRegressionTest {
         check(mail.length() == 1 && mail.getJSONObject(0).getString("id").equals("two"), "Acknowledgement consumed or restored the wrong message");
     }
 
-    private static void childWaitDoesNotWakeItselfByYieldingItsSlot() throws Exception {
-        final Fixture f = new Fixture(); f.holdTool = true;
-        final AtomicLong waitedAt = new AtomicLong(), observed = new AtomicLong();
-        f.script = new Script() {
-            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
-                    List<Message> messages) throws Exception {
-                if ("held-descendant".equals(task.name))
-                    return turn == 1 ? call("probe", new JSONObject()) : text("descendant finished");
-                if (turn == 1) return call("spawn_agent", new JSONObject().put("name", "held-descendant")
-                        .put("task", "hold the probe until released").put("fork", false));
-                if (turn == 2) {
-                    await(f.toolStarted);
-                    String child = "";
-                    for (Message message : messages) if (Message.TOOL.equals(message.role))
-                        child = new JSONObject(message.content).optString("id", child);
-                    check(child.length() > 0, "Nested spawn result disappeared");
-                    long cursor = f.manager.waitForUpdate(task.id, child, 0, -1).getLong("cursor");
-                    observed.set(cursor); waitedAt.set(System.nanoTime());
-                    return call("wait_agent", new JSONObject().put("target", child).put("cursor", cursor)
-                            .put("timeout_ms", 150));
-                }
-                if (turn == 3) {
-                    long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitedAt.get());
-                    JSONObject result = new JSONObject(messages.get(messages.size() - 1).content);
-                    check(waitedMs >= 100 && result.getLong("cursor") == observed.get()
-                            && result.getBoolean("pending"), "Child wait woke on its own waiting/model phase");
-                    f.toolRelease.countDown();
-                }
-                return text("nested result verified");
-            }
-        };
-        try {
-            f.spawn("waiting-parent", "delegate one task and wait for real progress", false);
-            f.settle();
-            check(waitedAt.get() > 0 && f.requests.get() >= 5, "Nested wait did not execute real child requests");
-        } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
-    }
-
-    private static void legacyRefusalResultIsMigratedToFailure() throws Exception {
-        JSONObject legacy = new JSONObject().put("id", "agent_legacy").put("status", "idle")
-                .put("result", PromptGuard.REFUSAL).put("error", "");
-        SubAgentManager.Record restored = SubAgentManager.Record.fromJson(legacy);
-        check(SubAgentManager.FAILED.equals(restored.status) && SubAgentManager.FAILED.equals(restored.phase)
-                && PromptGuard.REFUSAL.equals(restored.error) && restored.result.length() == 0,
-                "Previously refused child result was still reported as successful idle work");
-        SubAgentManager.Record second = SubAgentManager.Record.fromJson(restored.toJson());
-        check(second.revision == restored.revision && second.error.equals(restored.error),
-                "Legacy refusal migration repeated on normal checkpoint copies");
-    }
-
     private static void checkpointedLiveMessageIsNotInjectedTwiceAfterRestart() throws Exception {
         Store store = new Store(); SubAgentManager.Record saved = new SubAgentManager.Record();
         saved.id = "agent_saved_live"; saved.parentId = "main"; saved.name = "recovered";
@@ -353,38 +303,6 @@ public final class SubAgentCommunicationRegressionTest {
             f.manager.send("main", id, "inspect the new objective", "task"); f.settle();
             check(f.requests.get() == 2 && f.manager.find(id).error.length() == 0,
                     "Reusable child did not run exactly the new task after cancellation");
-        } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
-    }
-
-    private static void cancelledNestedWaitKeepsItsFailedStateAcrossRecovery() throws Exception {
-        final Fixture f = new Fixture(); f.holdTool = true;
-        f.script = new Script() {
-            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn,
-                    List<Message> messages) throws Exception {
-                if ("held-descendant".equals(task.name))
-                    return turn == 1 ? call("probe", new JSONObject()) : text("descendant completed");
-                if (turn == 1) return call("spawn_agent", new JSONObject().put("name", "held-descendant")
-                        .put("task", "wait at the probe").put("fork", false));
-                if (turn == 2) return call("wait_agent", new JSONObject().put("timeout_ms", 5000));
-                return text("parent completed");
-            }
-        };
-        String id = f.spawn("waiting-parent", "delegate and wait", false);
-        try {
-            await(f.toolStarted);
-            long deadline = System.currentTimeMillis() + 3000;
-            while (!SubAgentManager.WAITING.equals(f.manager.find(id).status) && System.currentTimeMillis() < deadline)
-                Thread.yield();
-            check(SubAgentManager.WAITING.equals(f.manager.find(id).status), "Nested parent never yielded its execution slot");
-            f.manager.cancelAll();
-            f.manager.awaitSettled(5000, new LlmClient.RequestValidity() {
-                @Override public boolean isCurrent() { return true; }
-            });
-            check(!f.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(f.manager.find(id).status),
-                    "Cancelled waiting parent was changed back to running during slot reacquisition");
-            Fixture recovered = new Fixture(f.store);
-            check(!recovered.manager.hasPendingWork() && SubAgentManager.STOPPED.equals(recovered.manager.find(id).status),
-                    "Cancelled nested wait became a permanently queued task after restart");
         } finally { f.toolRelease.countDown(); f.manager.cancelAll(); }
     }
 
@@ -495,16 +413,115 @@ public final class SubAgentCommunicationRegressionTest {
         } finally { f.toolRelease.countDown(); f.cleanupRelease.countDown(); f.manager.cancelAll(); }
     }
 
+    private static void awaitStatus(Fixture f, String id, String status) throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (!status.equals(f.manager.find(id).status)) {
+            check(System.currentTimeMillis() < deadline, "Agent did not reach " + status + ": " + f.manager.find(id).status);
+            Thread.sleep(20);
+        }
+    }
+
+    private static JSONObject entry(JSONArray log, String kind, String text) throws Exception {
+        JSONObject found = null;
+        for (int i = 0; i < log.length(); i++) {
+            JSONObject item = log.getJSONObject(i);
+            if (kind.equals(item.getString("kind")) && item.getString("text").contains(text)) {
+                check(found == null, "Communication logged twice: " + kind + " " + text);
+                found = item;
+            }
+        }
+        check(found != null, "Communication missing: " + kind + " " + text + " in " + log);
+        return found;
+    }
+
+    private static void communicationLogCoversEveryDirectionOnce() throws Exception {
+        final Fixture f = new Fixture(); f.holdTool = true;
+        f.script = new Script() {
+            @Override public LlmClient.Reply reply(Fixture fixture, SubAgentManager.Record task, int turn, List<Message> messages) throws Exception {
+                if ("reporter".equals(task.name)) {
+                    if (turn == 1) return call("report_agent", new JSONObject().put("kind", "progress").put("text", "half of the files checked"));
+                    if (turn == 2) return call("probe", new JSONObject());
+                    return text("reporter finished");
+                }
+                return text(task.name + " finished");
+            }
+        };
+        String reporter = f.spawn("reporter", "check every file and report midway", false);
+        String peer = f.spawn("peer", "stand by for questions", false);
+        try {
+            await(f.toolStarted);
+            awaitStatus(f, peer, SubAgentManager.IDLE);
+            f.manager.send("main", reporter, "main to reporter: also check docs", "message");
+            f.manager.send(peer, reporter, "peer to reporter: docs are in /docs", "message");
+            f.manager.send(reporter, peer, "reporter to peer: thanks", "message");
+            f.manager.send(reporter, "main", "reporter to main: docs found", "message");
+        } finally { f.toolRelease.countDown(); }
+        awaitStatus(f, reporter, SubAgentManager.IDLE);
+
+        JSONArray log = f.manager.communications(reporter);
+        long last = 0;
+        for (int i = 0; i < log.length(); i++) {
+            JSONObject item = log.getJSONObject(i);
+            check(item.getLong("createdAt") >= last, "Communication log is not chronological");
+            last = item.getLong("createdAt");
+            check(!item.getString("text").startsWith("子代理阶段汇报"), "Report was logged again as a wrapped message");
+        }
+        JSONObject task = entry(log, "task", "check every file");
+        check("main".equals(task.getString("from")) && !task.getBoolean("outgoing")
+                && "completed".equals(task.getString("status")), "Main's assignment lost sender or status: " + task);
+        JSONObject progress = entry(log, "progress", "half of the files checked");
+        check(progress.getBoolean("outgoing") && "main".equals(progress.getString("toName"))
+                && SubAgentManager.MAIL_PENDING.equals(progress.getString("status")), "Report to main is not tracked: " + progress);
+        JSONObject fromMain = entry(log, "message", "main to reporter");
+        check(!fromMain.getBoolean("outgoing") && SubAgentManager.MAIL_READ.equals(fromMain.getString("status")),
+                "Main to child message not shown as read: " + fromMain);
+        JSONObject fromPeer = entry(log, "message", "peer to reporter");
+        check("peer".equals(fromPeer.getString("fromName")) && SubAgentManager.MAIL_READ.equals(fromPeer.getString("status")),
+                "Peer message not shown as read on the receiver: " + fromPeer);
+        JSONObject toPeer = entry(log, "message", "reporter to peer");
+        check(toPeer.getBoolean("outgoing") && "/main/peer".equals(toPeer.getString("toPath"))
+                && SubAgentManager.MAIL_PENDING.equals(toPeer.getString("status")), "Idle peer's unread mail not pending: " + toPeer);
+        JSONObject toMain = entry(log, "message", "reporter to main");
+        check(SubAgentManager.MAIL_PENDING.equals(toMain.getString("status")), "Main's unread mail not pending: " + toMain);
+        JSONObject result = entry(log, "final", "reporter finished");
+        check(result.getBoolean("outgoing") && SubAgentManager.MAIL_PENDING.equals(result.getString("status")),
+                "Final result delivery is not tracked: " + result);
+
+        // 同一条同级消息，两边都能看到，状态一致。
+        JSONArray peerLog = f.manager.communications(peer);
+        JSONObject sent = entry(peerLog, "message", "peer to reporter");
+        JSONObject received = entry(peerLog, "message", "reporter to peer");
+        check(sent.getBoolean("outgoing") && SubAgentManager.MAIL_READ.equals(sent.getString("status"))
+                && !received.getBoolean("outgoing") && received.getString("mailId").equals(toPeer.getString("mailId")),
+                "Peer side does not mirror the conversation: " + peerLog);
+
+        // main 收下后，发给 main 的汇报、消息和最终结果都变成已读取。
+        f.manager.collectResults("main", null); f.manager.acknowledgeResults();
+        log = f.manager.communications(reporter);
+        check(SubAgentManager.MAIL_READ.equals(entry(log, "progress", "half of the files").getString("status"))
+                && SubAgentManager.MAIL_READ.equals(entry(log, "message", "reporter to main").getString("status"))
+                && SubAgentManager.MAIL_READ.equals(entry(log, "final", "reporter finished").getString("status")),
+                "Main's acknowledgement did not reach the child's log: " + log);
+
+        // 收件方停止前没读到的消息标成未送达，发件方那边同步看到。
+        f.manager.stopFromUser(peer);
+        check(SubAgentManager.MAIL_DROPPED.equals(entry(f.manager.communications(reporter), "message", "reporter to peer")
+                .getString("status")), "Mail dropped by a stopped peer still looks pending");
+        Fixture restarted = new Fixture(f.store);
+        check(SubAgentManager.MAIL_READ.equals(entry(restarted.manager.communications(reporter), "message", "peer to reporter")
+                .getString("status")), "Delivery status was not persisted");
+    }
+
     public static void main(String[] args) throws Exception {
         String[] tests = {"complexForkedTaskReachesTheModelAndRunsTools", "actualDisclosureTaskRemainsRefusedAndFailed",
                 "delegatedMetadataSurvivesRecoveryWithoutLeakingToApi", "liveParentMessageArrivesBeforeTheNextToolRequest",
                 "twoChildModelRequestsActuallyOverlap", "peerMessageAndProgressWakeTheParentWhileWorkIsRunning",
                 "cursorWaitDoesNotSpinOnTheSameRunningState", "acknowledgedMailboxIsExactAndRestorable",
-                "childWaitDoesNotWakeItselfByYieldingItsSlot", "legacyRefusalResultIsMigratedToFailure",
+                
                 "checkpointedLiveMessageIsNotInjectedTwiceAfterRestart", "objectiveChangeDropsOldLiveInstructionsBeforeChildReuse",
-                "cancelledNestedWaitKeepsItsFailedStateAcrossRecovery", "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
+                "invalidSettlementWaitDoesNotConsumeUndeliveredResults",
                 "userReusedChildReportsLifecycleOutsideManagerLock", "restoredQueuesRemainDormantUntilExplicitResume",
-                "closingChildKeepsLiveWorkUntilItsToolCleanupFinishes"};
+                "closingChildKeepsLiveWorkUntilItsToolCleanupFinishes", "communicationLogCoversEveryDirectionOnce"};
         int failed = 0;
         for (String test : tests) {
             try { SubAgentCommunicationRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); }

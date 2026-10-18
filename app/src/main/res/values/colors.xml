@@ -1,23 +1,51 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="colorPrimary">#FFFFFF</color>
-    <color name="colorPrimaryDark">#EDEDED</color>
-    <color name="colorAccent">#2E6BE6</color>
+    <!-- Material 3 色彩角色（蓝色种子 #415F91 生成的基准色板，浅色）。深色在 values-night。 -->
+    <color name="md_primary">#415F91</color>
+    <color name="md_on_primary">#FFFFFF</color>
+    <color name="md_primary_container">#D6E3FF</color>
+    <color name="md_on_primary_container">#284777</color>
+    <color name="md_secondary">#565F71</color>
+    <color name="md_on_secondary">#FFFFFF</color>
+    <color name="md_secondary_container">#DAE2F9</color>
+    <color name="md_on_secondary_container">#3E4759</color>
+    <color name="md_tertiary">#705575</color>
+    <color name="md_on_tertiary">#FFFFFF</color>
+    <color name="md_tertiary_container">#FAD8FD</color>
+    <color name="md_on_tertiary_container">#573E5C</color>
+    <color name="md_error">#BA1A1A</color>
+    <color name="md_on_error">#FFFFFF</color>
+    <color name="md_error_container">#FFDAD6</color>
+    <color name="md_on_error_container">#93000A</color>
+    <color name="md_surface">#F9F9FF</color>
+    <color name="md_on_surface">#191C20</color>
+    <color name="md_surface_variant">#E0E2EC</color>
+    <color name="md_on_surface_variant">#44474E</color>
+    <color name="md_outline">#74777F</color>
+    <color name="md_outline_variant">#C4C6D0</color>
+    <color name="md_surface_container_lowest">#FFFFFF</color>
+    <color name="md_surface_container_low">#F3F3FA</color>
+    <color name="md_surface_container">#EDEDF4</color>
+    <color name="md_surface_container_high">#E7E8EE</color>
+    <color name="md_surface_container_highest">#E2E2E9</color>
+    <color name="md_inverse_surface">#2E3036</color>
+    <color name="md_inverse_on_surface">#F0F0F7</color>
+    <color name="md_inverse_primary">#AAC7FF</color>
+    <color name="md_scrim">#52000000</color>
+    <!-- 扩展色：成功（新增行数、完成）和警示（受限权限、异常停止）。 -->
+    <color name="md_success">#3B6939</color>
+    <color name="md_success_container">#BCF0B4</color>
+    <color name="md_on_success_container">#23501F</color>
+    <color name="md_warning">#7C5800</color>
+    <color name="md_warning_container">#FFDEA6</color>
+    <color name="md_on_warning_container">#5E4200</color>
 
-    <color name="bg_window">#FFFFFF</color>
-    <color name="surface">#FFFFFF</color>
-    <color name="text_primary">#0D0D0D</color>
-    <color name="text_secondary">#8E8E93</color>
-    <color name="divider">#EFEFF1</color>
-    <color name="mono_bg">#F5F5F7</color>
-    <color name="code_bg">#F2F2F4</color>
-
-    <!-- 蓝色主题：用户气泡、发送按钮、选中态 -->
-    <color name="accent">#2E6BE6</color>
-    <!-- 提醒色：受限 / 限制访问的权限文字。 -->
-    <color name="warn_text">#C77700</color>
-    <color name="chip_bg">#F5F5F7</color>
-    <color name="shadow_mid">#14000000</color>
-    <!-- 失败 / 警告文字。不能用主题色，错误提示看着像强调。 -->
-    <color name="drawer_scrim">#52000000</color>
+    <!-- 旧名字全部指向 M3 角色，布局里不再出现裸色值。 -->
+    <color name="bg_window">@color/md_surface</color>
+    <color name="text_primary">@color/md_on_surface</color>
+    <color name="text_secondary">@color/md_on_surface_variant</color>
+    <color name="divider">@color/md_outline_variant</color>
+    <color name="code_bg">@color/md_surface_container_high</color>
+    <color name="accent">@color/md_primary</color>
+    <color name="drawer_scrim">@color/md_scrim</color>
 </resources>

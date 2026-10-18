@@ -285,7 +285,7 @@ final class RootShell {
         void stop(CleanupBudget budget) {
             // This one guarded signal uses su directly, never the managed executor.
             // A PID/group is killed only after revalidating its captured start time.
-            String check = "s=$(cat /proc/" + pid + "/stat 2>/dev/null) || exit 0; "
+            String check = "IFS= read -r s 2>/dev/null < /proc/" + pid + "/stat || exit 0; "
                     + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || exit 0; g=$3; n=$4; shift 19; "
                     + "[ \"$1\" = " + quote(started) + " ] || exit 0; "
                     + "if [ \"$g\" = " + pid + " ] && [ \"$n\" = " + pid + " ]; then "
@@ -304,14 +304,14 @@ final class RootShell {
             // The non-setsid fallback must also handle descendants hidden from Java.
             return "kill -s STOP " + pid + "; all=' " + pid + " '; records=" + quote(pid + ":" + started) + "; round=0; "
                     + "while [ \"$round\" -lt 32 ]; do changed=0; round=$((round + 1)); "
-                    + "for f in /proc/[0-9]*/stat; do s=$(cat \"$f\" 2>/dev/null) || continue; p=${s%% *}; "
+                    + "for f in /proc/[0-9]*/stat; do IFS= read -r s 2>/dev/null < \"$f\" || continue; p=${s%% *}; "
                     + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || continue; parent=$2; shift 19; "
                     + "case \"$all\" in *\" $parent \"*) case \"$all\" in *\" $p \"*) ;; "
-                    + "*) captured=$1; current=$(cat /proc/$p/stat 2>/dev/null) || continue; current=${current##*) }; "
+                    + "*) captured=$1; IFS= read -r current 2>/dev/null < /proc/$p/stat || continue; current=${current##*) }; "
                     + "set -- $current; [ $# -ge 20 ] || continue; shift 19; [ \"$1\" = \"$captured\" ] || continue; "
                     + "kill -s STOP \"$p\"; all=\"$all$p \"; records=\"$p:$captured $records\"; changed=1;; esac;; esac; done; "
                     + "[ \"$changed\" = 1 ] || break; done; "
-                    + "for r in $records; do p=${r%:*}; start=${r#*:}; s=$(cat /proc/$p/stat 2>/dev/null) || continue; "
+                    + "for r in $records; do p=${r%:*}; start=${r#*:}; IFS= read -r s 2>/dev/null < /proc/$p/stat || continue; "
                     + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || continue; shift 19; "
                     + "[ \"$1\" = \"$start\" ] && kill -s KILL \"$p\"; done;";
         }

@@ -32,12 +32,12 @@ public final class SubAgentProgressRegressionTest {
         final Map<String, SubAgentManager.Record> records = new LinkedHashMap<String, SubAgentManager.Record>();
         @Override public synchronized List<SubAgentManager.Record> load() throws Exception {
             List<SubAgentManager.Record> result = new ArrayList<SubAgentManager.Record>();
-            for (SubAgentManager.Record record : records.values()) result.add(SubAgentManager.Record.fromJson(record.toJson())); return result;
+            for (SubAgentManager.Record record : records.values()) result.add(RecordFixtures.fromJson(record.toJson())); return result;
         }
         @Override public synchronized void save(SubAgentManager.Record record) throws Exception {
-            records.put(record.id, SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString())));
+            records.put(record.id, RecordFixtures.fromJson(new JSONObject(record.toJson().toString())));
         }
-        synchronized SubAgentManager.Record find(String id) throws Exception { return SubAgentManager.Record.fromJson(records.get(id).toJson()); }
+        synchronized SubAgentManager.Record find(String id) throws Exception { return RecordFixtures.fromJson(records.get(id).toJson()); }
     }
 
     private static final class Fixture implements SubAgentManager.Factory {
@@ -48,8 +48,7 @@ public final class SubAgentProgressRegressionTest {
         final AtomicInteger toolsExecuted = new AtomicInteger();
         final AtomicInteger requestsIssued = new AtomicInteger();
         volatile AgentLoop.Listener childListener;
-        boolean retry, guarded, reviewMode, waitMode;
-        String nestedId = "";
+        boolean retry, guarded, reviewMode;
         Fixture() throws Exception {
             root = new AgentLoop(new LlmClient(new LlmClient.Config("http://fixture", "fixture", "fixture")), new ToolRegistry(), new AgentLoop.Quiet());
             root.bindSession(1); root.reset("trusted root"); manager = new SubAgentManager(2, this, store); manager.attachRoot(root); root.setAutomaticDelegation(true);
@@ -67,19 +66,6 @@ public final class SubAgentProgressRegressionTest {
                         if (retry) {
                             if (request == 1) { Reply failure = new Reply(); failure.error = "HTTP 503 provider echoed " + SCRIPT; return failure; }
                             nextRequest.countDown(); await(releaseRequest); return text("request recovered");
-                        }
-                        if (waitMode) {
-                            if (request == 1) return call("spawn_agent", new JSONObject().put("name", "nested").put("task", "hold nested work").put("fork", false));
-                            if (request == 2) {
-                                await(nextRequest);
-                                JSONArray children = shared.list(task.id, 0).getJSONArray("agents");
-                                for (int i = 0; i < children.length(); i++) {
-                                    JSONObject record = children.getJSONObject(i);
-                                    if (task.id.equals(record.getString("parentId"))) nestedId = record.getString("id");
-                                }
-                                return call("wait_agent", new JSONObject().put("target", nestedId).put("timeout_ms", 5000));
-                            }
-                            return text("wait completed");
                         }
                         if (request > 1) return text("tool completed");
                         JSONObject args = new JSONObject().put("command", SCRIPT);
@@ -155,26 +141,14 @@ public final class SubAgentProgressRegressionTest {
         } finally { f.release(); f.finish(); }
     }
 
-    private static void childWaitHasADistinctWaitingStage() throws Exception {
-        Fixture f = new Fixture(); f.waitMode = true;
-        try {
-            String id = f.spawn("waiter"); await(f.nextRequest);
-            long deadline = System.currentTimeMillis() + 3000L;
-            while (!SubAgentManager.WAITING.equals(f.manager.find(id).status) && System.currentTimeMillis() < deadline) Thread.sleep(10L);
-            SubAgentManager.Record record = f.manager.find(id);
-            check(SubAgentManager.WAITING.equals(record.status) && "waiting".equals(record.phase)
-                    && f.manager.find(f.nestedId).status.equals(SubAgentManager.RUNNING), "Real child wait was reported as ordinary active execution");
-        } finally { f.release(); f.finish(); }
-    }
-
     private static void legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips() throws Exception {
         JSONObject old = new JSONObject().put("id", "legacy").put("parentId", "main").put("status", "idle").put("phase", "completed")
                 .put("retryAttempt", 3).put("retryReason", "old retry text");
-        SubAgentManager.Record record = SubAgentManager.Record.fromJson(old);
+        SubAgentManager.Record record = RecordFixtures.fromJson(old);
         check(record.phase.equals("completed") && !record.toJson().has("retryAttempt") && !record.toJson().has("retryReason"),
                 "Legacy retry metadata escaped into the current runtime record");
         record.phase = "tool"; record.activeTool = "read"; record.progress = "Inspecting task evidence";
-        SubAgentManager.Record restored = SubAgentManager.Record.fromJson(record.toJson());
+        SubAgentManager.Record restored = RecordFixtures.fromJson(record.toJson());
         check(restored.phase.equals("tool") && restored.activeTool.equals("read") && restored.progress.equals(record.progress),
                 "Live task progress disappeared from saved record copies");
     }
@@ -182,7 +156,7 @@ public final class SubAgentProgressRegressionTest {
     public static void main(String[] args) throws Exception {
         int passed = 0;
         for (String test : new String[]{"previewApprovalAndExecutionRemainSeparateAndDoNotExposeScripts", "guardedReviewIsNotReportedAsToolExecution",
-                "providerFailureStopsTheChildWithoutInventingRetries", "childWaitHasADistinctWaitingStage", "legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips"}) {
+                "providerFailureStopsTheChildWithoutInventingRetries", "legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips"}) {
             SubAgentProgressRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); passed++;
         }
         System.out.println(passed + " child progress tests passed");

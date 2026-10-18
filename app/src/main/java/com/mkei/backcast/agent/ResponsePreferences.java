@@ -9,7 +9,7 @@ public final class ResponsePreferences {
     }
 
     public static String normalizeSummary(String value) {
-        return normalized(value, new String[]{"auto", "concise", "detailed", "none"}, "auto");
+        return normalized(value, new String[]{"auto", "concise", "detailed", "none"}, "none");
     }
 
     public static String normalizeLanguage(String value) {

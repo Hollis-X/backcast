@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 计划卡片：M3 色调卡片，secondaryContainer、大圆角 16dp。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/md_secondary_container"/>
+    <corners android:radius="16dp"/>
+</shape>

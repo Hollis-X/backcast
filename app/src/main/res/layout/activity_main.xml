@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  主界面。会话铺满全屏，顶栏和输入条浮在上面。
-  阴影一律由 drawable 自绘，不使用 elevation。
+  主界面（Material 3）。根布局 DrawerHost 给左侧抽屉加跟手拖拽。会话铺满全屏；顶部是 M3 小型顶部应用栏，滚动时由 surface 抬升为 surfaceContainer；
+  底部输入条是 surfaceContainerHigh 填充块，里面放辅助芯片和填充图标按钮。
 -->
-<FrameLayout
+<com.mkei.backcast.ui.DrawerHost
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/main_root"
     android:layout_width="match_parent"
@@ -39,19 +39,20 @@
 
     <ImageView
         android:id="@+id/scroll_latest"
-        android:layout_width="44dp"
-        android:layout_height="44dp"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
         android:layout_gravity="bottom|right"
-        android:layout_marginRight="18dp"
+        android:layout_marginRight="16dp"
         android:layout_marginBottom="140dp"
-        android:padding="12dp"
+        android:padding="10dp"
+        android:elevation="3dp"
         android:background="@drawable/bg_latest_button"
         android:contentDescription="@string/scroll_latest"
         android:clickable="true"
         android:focusable="true"
         android:visibility="gone"/>
 
-    <!-- 时间和信号那一条：先用乳白渐变，采到画面后再换成轻微模糊。 -->
+    <!-- 顶部应用栏的底色层（盖住状态栏），颜色由代码按滚动位置切换。 -->
     <ImageView
         android:id="@+id/status_frost"
         android:layout_width="match_parent"
@@ -69,15 +70,16 @@
         android:layout_gravity="top"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingLeft="16dp"
-        android:paddingRight="16dp"
-        android:paddingTop="12dp"
+        android:minHeight="64dp"
+        android:paddingLeft="4dp"
+        android:paddingRight="4dp"
+        android:paddingTop="8dp"
         android:paddingBottom="8dp">
 
             <TextView
                 android:id="@+id/action_menu"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="@null"
                 android:gravity="center"
                 android:includeFontPadding="false"
@@ -87,15 +89,15 @@
             <LinearLayout
                 android:id="@+id/title_chip"
                 android:layout_width="0dp"
-                android:layout_height="44dp"
+                android:layout_height="48dp"
                 android:layout_weight="1"
-                android:layout_marginLeft="6dp"
-                android:layout_marginRight="6dp"
-                android:background="@drawable/bg_chip"
+                android:layout_marginLeft="4dp"
+                android:layout_marginRight="4dp"
+                android:background="@null"
                 android:gravity="center_vertical"
                 android:orientation="vertical"
-                android:paddingLeft="14dp"
-                android:paddingRight="14dp">
+                android:paddingLeft="6dp"
+                android:paddingRight="6dp">
 
                 <TextView
                     android:id="@+id/session_title"
@@ -105,8 +107,8 @@
                     android:maxLines="1"
                     android:includeFontPadding="false"
                     android:text="@string/session_new"
-                    android:textColor="@color/text_primary"
-                    android:textSize="14sp"/>
+                    android:textColor="@color/md_on_surface"
+                    android:textSize="18sp"/>
 
                 <TextView
                     android:id="@+id/session_sub"
@@ -117,7 +119,8 @@
                     android:includeFontPadding="false"
                     android:text="@string/app_name"
                     android:textColor="@color/text_secondary"
-                    android:textSize="11sp"/>
+                    android:layout_marginTop="2dp"
+                    android:textSize="12sp"/>
 
             </LinearLayout>
 
@@ -125,8 +128,8 @@
             <LinearLayout
                 android:id="@+id/top_card"
                 android:layout_width="wrap_content"
-                android:layout_height="44dp"
-                android:background="@drawable/bg_chip"
+                android:layout_height="48dp"
+                android:background="@null"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
                 android:paddingLeft="6dp"
@@ -134,14 +137,15 @@
 
                 <com.mkei.backcast.ui.ContextMeter
                     android:id="@+id/context_meter"
-                    android:layout_width="30dp"
-                    android:layout_height="30dp"
+                    android:layout_width="32dp"
+                    android:layout_height="32dp"
+                    android:layout_marginRight="4dp"
                     android:contentDescription="@string/context_hint"/>
 
                 <TextView
                     android:id="@+id/action_more"
-                    android:layout_width="34dp"
-                    android:layout_height="34dp"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:background="@null"
                     android:gravity="center"
                     android:includeFontPadding="false"
@@ -152,7 +156,7 @@
 
         </LinearLayout>
 
-    <!-- Codex：模型和权限在同一块输入条里，不另起一排芯片。 -->
+    <!-- 输入条：模型和权限做成 M3 辅助芯片，和加号、发送键同在一行。 -->
     <LinearLayout
         android:id="@+id/composer_dock"
         android:layout_width="match_parent"
@@ -161,18 +165,23 @@
         android:orientation="vertical"
         android:paddingLeft="12dp"
         android:paddingRight="12dp"
-        android:layout_marginBottom="8dp">
+        android:paddingTop="6dp"
+        android:paddingBottom="8dp"
+        android:clipToPadding="false"
+        android:clipChildren="false"
+        android:layout_marginBottom="2dp">
 
         <LinearLayout
             android:id="@+id/input_bar"
+            android:elevation="3dp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:background="@drawable/bg_input_bar"
-            android:paddingLeft="6dp"
+            android:paddingLeft="8dp"
             android:paddingRight="8dp"
-            android:paddingTop="4dp"
-            android:paddingBottom="6dp">
+            android:paddingTop="6dp"
+            android:paddingBottom="8dp">
 
             <LinearLayout
                 android:id="@+id/goal_bar"
@@ -246,7 +255,7 @@
                     android:layout_height="1dp"
                     android:layout_marginLeft="8dp"
                     android:layout_marginRight="8dp"
-                    android:background="#E6E6E6"/>
+                    android:background="@color/md_outline_variant"/>
 
             </LinearLayout>
 
@@ -261,79 +270,103 @@
                 android:textColorHint="@color/text_secondary"
                 android:textColor="@color/text_primary"
                 android:textSize="16sp"
-                android:paddingLeft="10dp"
+                android:paddingLeft="12dp"
                 android:paddingRight="8dp"
-                android:paddingTop="8dp"
-                android:paddingBottom="4dp"
+                android:paddingTop="10dp"
+                android:paddingBottom="8dp"
                 android:gravity="center_vertical"
                 android:maxLines="6"
                 android:inputType="textMultiLine|textNoSuggestions|textCapSentences"/>
 
             <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="36dp"
+                android:layout_height="40dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical">
 
                 <TextView
                     android:id="@+id/action_plus"
-                    android:layout_width="36dp"
-                    android:layout_height="36dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="@null"
                     android:gravity="center"
                     android:includeFontPadding="false"
                     android:text=""
                     android:textColor="@color/text_primary"/>
 
-                <LinearLayout
-                    android:id="@+id/model_chip"
-                    android:layout_width="wrap_content"
-                    android:layout_height="32dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
-                    android:paddingLeft="2dp"
-                    android:paddingRight="6dp">
-
-                    <TextView
-                        android:id="@+id/model_chip_text"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:ellipsize="end"
-                        android:maxWidth="148dp"
-                        android:maxLines="1"
-                        android:includeFontPadding="false"
-                        android:text="@string/status_no_model"
-                        android:textColor="@color/text_primary"
-                        android:textSize="13sp"/>
-
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/access_chip"
-                    android:layout_width="wrap_content"
-                    android:layout_height="32dp"
-                    android:gravity="center_vertical"
-                    android:includeFontPadding="false"
-                    android:paddingLeft="4dp"
-                    android:paddingRight="4dp"
-                    android:text="@string/access_full"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="13sp"/>
-
-                <View
+                <!--
+                  两个芯片放进占满剩余宽度的格子里，里面这一行按内容收缩：
+                  放不下时只压窄模型芯片（文字省略），权限芯片和发送键保持原样，不会被挤变形。
+                -->
+                <FrameLayout
                     android:layout_width="0dp"
-                    android:layout_height="1dp"
-                    android:layout_weight="1"/>
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:layout_marginLeft="4dp"
+                    android:layout_marginRight="8dp">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:layout_gravity="start|center_vertical"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <LinearLayout
+                            android:id="@+id/model_chip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="32dp"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_chip_outlined"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingLeft="12dp"
+                            android:paddingRight="8dp">
+
+                            <TextView
+                                android:id="@+id/model_chip_text"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:ellipsize="end"
+                                android:maxWidth="148dp"
+                                android:maxLines="1"
+                                android:includeFontPadding="false"
+                                android:text="@string/status_no_model"
+                                android:textColor="@color/md_on_surface_variant"
+                                android:fontFamily="sans-serif-medium"
+                                android:textSize="14sp"/>
+
+                        </LinearLayout>
+
+                        <TextView
+                            android:id="@+id/access_chip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="32dp"
+                            android:layout_marginLeft="4dp"
+                            android:background="@drawable/bg_chip_warning"
+                            android:drawableStart="@drawable/ic_warning"
+                            android:drawablePadding="6dp"
+                            android:gravity="center_vertical"
+                            android:includeFontPadding="false"
+                            android:paddingLeft="8dp"
+                            android:paddingRight="8dp"
+                            android:text="@string/access_full"
+                            android:textColor="@color/md_warning"
+                            android:fontFamily="sans-serif-medium"
+                            android:textSize="14sp"/>
+
+                    </LinearLayout>
+
+                </FrameLayout>
 
                 <FrameLayout
-                    android:layout_width="28dp"
-                    android:layout_height="28dp"
-                    android:layout_marginRight="2dp">
+                    android:layout_width="40dp"
+                    android:layout_height="40dp">
 
-                    <Button
+                    <android.widget.Button
                         android:id="@+id/send"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
                         android:background="@drawable/bg_circle_accent"
                         android:stateListAnimator="@null"
                         android:elevation="0dp"
@@ -343,10 +376,10 @@
                         android:minHeight="0dp"
                         android:includeFontPadding="false"/>
 
-                    <Button
+                    <android.widget.Button
                         android:id="@+id/stop"
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
                         android:background="@drawable/bg_circle_accent"
                         android:stateListAnimator="@null"
                         android:elevation="0dp"
@@ -371,6 +404,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
+        android:translationZ="6dp"
         android:clickable="true"
         android:focusable="true">
 
@@ -389,15 +423,16 @@
             android:background="@drawable/bg_drawer"
             android:clickable="true"
             android:focusable="true"
-            android:paddingLeft="28dp"
-            android:paddingRight="24dp"
-            android:paddingTop="30dp"
-            android:paddingBottom="28dp">
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp"
+            android:paddingTop="28dp"
+            android:paddingBottom="16dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
+                android:paddingLeft="16dp"
                 android:gravity="center_vertical">
 
             <TextView
@@ -406,13 +441,14 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="@string/drawer_title"
-                android:textColor="@color/text_primary"
-                android:textSize="22sp"/>
+                android:textColor="@color/md_on_surface_variant"
+                android:fontFamily="sans-serif-medium"
+                android:textSize="14sp"/>
 
             <TextView
                 android:id="@+id/drawer_search"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="@null"
                 android:gravity="center"
                 android:text=""
@@ -420,8 +456,8 @@
 
             <TextView
                 android:id="@+id/drawer_settings"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:background="@null"
                 android:gravity="center"
                 android:text=""
@@ -433,7 +469,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1"
-                android:layout_marginTop="18dp"
+                android:layout_marginTop="8dp"
                 android:fillViewport="true"
                 android:scrollbars="none">
 
@@ -448,15 +484,18 @@
             <TextView
                 android:id="@+id/drawer_chat"
                 android:layout_width="wrap_content"
-                android:layout_height="48dp"
+                android:layout_height="56dp"
                 android:layout_gravity="right"
+                android:layout_marginTop="12dp"
+                android:layout_marginRight="4dp"
                 android:background="@drawable/bg_drawer_new"
                 android:gravity="center"
-                android:paddingLeft="20dp"
-                android:paddingRight="24dp"
+                android:paddingLeft="16dp"
+                android:paddingRight="20dp"
                 android:text="@string/drawer_new"
-                android:textColor="#FFFFFF"
-                android:textSize="16sp"/>
+                android:textColor="@color/md_on_primary_container"
+                android:fontFamily="sans-serif-medium"
+                android:textSize="14sp"/>
 
         </LinearLayout>
 
@@ -467,6 +506,7 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone"
+        android:translationZ="8dp"
         android:clickable="true"
         android:focusable="true">
 
@@ -486,16 +526,17 @@
             android:background="@drawable/bg_sheet"
             android:clickable="true"
             android:focusable="true"
-            android:paddingLeft="20dp"
-            android:paddingRight="20dp"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp"
             android:paddingBottom="24dp">
 
             <View
-                android:layout_width="36dp"
+                android:layout_width="32dp"
                 android:layout_height="4dp"
                 android:layout_gravity="center_horizontal"
-                android:layout_marginTop="10dp"
-                android:layout_marginBottom="14dp"
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="16dp"
+                android:alpha="0.4"
                 android:background="@drawable/bg_sheet_handle"/>
 
             <ScrollView
@@ -516,4 +557,4 @@
         </LinearLayout>
 
     </FrameLayout>
-</FrameLayout>
+</com.mkei.backcast.ui.DrawerHost>

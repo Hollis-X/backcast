@@ -39,14 +39,14 @@ public class ContextMeter extends View {
     private void init() {
         track.setStyle(Paint.Style.STROKE);
         track.setStrokeCap(Paint.Cap.ROUND);
-        track.setColor(0xFFE4E4E7);
+        track.setColor(M3.containerHighest);
         normal.setStyle(Paint.Style.STROKE);
         normal.setStrokeCap(Paint.Cap.ROUND);
-        normal.setColor(0xFF111111);
+        normal.setColor(M3.primary);
         warn.setStyle(Paint.Style.STROKE);
         warn.setStrokeCap(Paint.Cap.ROUND);
-        warn.setColor(0xFFD97706);
-        label.setColor(0xFF6E6E76);
+        warn.setColor(M3.warning);
+        label.setColor(M3.onSurfaceVariant);
         label.setTextAlign(Paint.Align.CENTER);
         label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
     }

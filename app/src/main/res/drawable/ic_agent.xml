@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 子代理头像：圆角方脸、两只眼睛、头顶天线，两侧小耳朵。单色，由代码按头像底色着色。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FF000000"
+        android:pathData="M12,1.75a1.6,1.6 0,1 1,0 3.2a1.6,1.6 0,1 1,0 -3.2z M11.25,4.5h1.5v2.25h-1.5z"/>
+    <path android:fillColor="#FF000000" android:fillType="evenOdd"
+        android:pathData="M8,6.5h8a4,4 0,0 1,4 4v5a4,4 0,0 1,-4 4h-8a4,4 0,0 1,-4 -4v-5a4,4 0,0 1,4 -4z
+            M7.35,13a1.65,1.65 0,1 0,3.3 0a1.65,1.65 0,1 0,-3.3 0z
+            M13.35,13a1.65,1.65 0,1 0,3.3 0a1.65,1.65 0,1 0,-3.3 0z"/>
+    <path android:fillColor="#FF000000"
+        android:pathData="M1.75,11.25h1.5v3.5h-1.5z M20.75,11.25h1.5v3.5h-1.5z"/>
+</vector>

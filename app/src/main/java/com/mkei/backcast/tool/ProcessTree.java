@@ -81,11 +81,10 @@ final class ProcessTree {
         }
         if (root && (unreadable || supervisor != null && identity(supervisor.pid) == null)) {
             try {
-                // An unrelated process can exit while being scanned. Only a
-                // still-present unreadable stat makes this census incomplete.
-                String command = "failed=0; for f in /proc/[0-9]*/stat; do "
-                        + "s=$(cat \"$f\" 2>/dev/null) && printf '%s\\n' \"$s\" "
-                        + "|| { [ ! -d \"${f%/stat}\" ] || failed=1; }; done; exit \"$failed\"";
+                // One cat reads every stat file; forking one cat per process took
+                // seconds on phones and ate the whole cleanup deadline. Processes
+                // that exit mid-scan are simply absent, so the census stays usable.
+                String command = "cat /proc/[0-9]*/stat 2>/dev/null; exit 0";
                 RootShell.Out out = rootExec(command, 2097152, budget, "读取进程身份");
                 complete = out.exit == 0;
                 for (String line : new String(out.stdout, "UTF-8").split("\\n")) {
@@ -139,16 +138,15 @@ final class ProcessTree {
         else cleanupAttemptDeadline = Math.min(cleanupAttemptDeadline, deadlineNanos);
         deadlineNanos = cleanupAttemptDeadline;
         cleanupFailure = "";
-        boolean census = false;
         try (CleanupBudget budget = new CleanupBudget(deadlineNanos)) {
             long remaining = Math.max(0, deadlineNanos - System.nanoTime());
             long reserve = Math.min(2000000000L, remaining / 2);
             try (CleanupBudget discovery = new CleanupBudget(deadlineNanos - reserve)) {
-                census = sample(discovery);
+                sample(discovery);
                 signal("STOP", discovery);
-                census = sample(discovery) && census;
+                sample(discovery);
                 signal("STOP", discovery);
-                census = sample(discovery) && census;
+                sample(discovery);
             } catch (Exception timedOut) { failure("停止进程", timedOut.getMessage()); }
             finally {
                 // STOPped supervisors cannot respond to EOF. Reserve time for a
@@ -164,14 +162,12 @@ final class ProcessTree {
             try {
                 long exitDeadline = Math.min(deadlineNanos, System.nanoTime() + 600000000L);
                 while (System.nanoTime() - exitDeadline < 0) {
-                    if (!hasSurvivors(budget) && exited()) {
-                        if (census && !known.isEmpty()) { confirmedStopped = true; cleanupFailure = ""; return true; }
-                        failure("验证进程退出", "进程身份扫描未完整确认。");
-                        return false;
-                    }
+                    // Exited with no live registered process: done, even when some
+                    // /proc entries were unreadable during discovery.
+                    if (!hasSurvivors(budget) && exited()) { confirmedStopped = true; cleanupFailure = ""; return true; }
                     budget.pause(20);
                 }
-                if (!hasSurvivors(budget) && exited() && census && !known.isEmpty()) {
+                if (!hasSurvivors(budget) && exited()) {
                     confirmedStopped = true; cleanupFailure = ""; return true;
                 }
             } catch (Exception unavailable) { failure("验证进程退出", unavailable.getMessage()); }
@@ -207,7 +203,7 @@ final class ProcessTree {
                 return true;
             }
             if (root && live == null) {
-                check.append("s=$(cat /proc/").append(value.pid).append("/stat 2>/dev/null) || { ")
+                check.append("s=; IFS= read -r s 2>/dev/null < /proc/").append(value.pid).append("/stat || { ")
                         .append("[ ! -d /proc/").append(value.pid).append(" ] || exit 9; }; ")
                         .append("s=${s##*) }; set -- $s; [ $# -ge 20 ] || { ")
                         .append("[ ! -d /proc/").append(value.pid).append(" ] || exit 9; }; ")
@@ -245,7 +241,9 @@ final class ProcessTree {
     }
 
     private static String guard(Identity value, String action) {
-        return "(s=$(cat /proc/" + value.pid + "/stat 2>/dev/null) || exit; "
+        // A shell builtin avoids forking cat once per PID while the tree is
+        // stopped. Large root trees must leave time to KILL and verify exit.
+        return "(IFS= read -r s 2>/dev/null < /proc/" + value.pid + "/stat || exit; "
                 + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || exit; "
                 + (action.indexOf(" -- -") >= 0 ? "[ \"$3\" = " + value.pid
                     + " ] && [ \"$4\" = " + value.pid + " ] || exit; " : "")

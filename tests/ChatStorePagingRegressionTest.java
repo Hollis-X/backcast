@@ -462,29 +462,6 @@ public final class ChatStorePagingRegressionTest {
         check(messages(page(store, 8L, -1L, 48)).isEmpty(), "Divider crossed conversation boundaries");
     }
 
-    private static void versionFourteenRestoresOnlyItsKnownCompactionBoundary() throws Exception {
-        Object store = fresh(), db = storeType.getMethod("getWritableDatabase").invoke(store);
-        append(store, 7L, Message.user("old request")); append(store, 7L, Message.assistant("old answer", null));
-        long boundary = number(records("messages", 7L).get(1), "id");
-        append(store, 7L, Message.assistant("newer answer", null));
-        Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
-        for (long sid : new long[]{7L, 8L, 9L}) {
-            @SuppressWarnings("unchecked") Map<String,Object> checkpoint = (Map<String,Object>) valuesType.getConstructor().newInstance();
-            checkpoint.put("session_id", sid); checkpoint.put("through_id", boundary);
-            checkpoint.put("window", sid == 7L ? new JSONArray().put(Message.user(Compactor.wrap("legacy handoff")).toCheckpointJson()).toString()
-                    : sid == 8L ? new JSONArray().put(Message.user("ordinary checkpoint").toCheckpointJson()).toString() : "broken-json");
-            databaseType.getMethod("insert", String.class, String.class, valuesType).invoke(db, "context_windows", null, checkpoint);
-        }
-        databaseType.getMethod("legacyRuns", int.class).invoke(null, 14);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 14, 15);
-        List<Message> decorated = messages(page(store, 7L, -1L, 48));
-        check(decorated.size() == 4 && Message.COMPACTION.equals(decorated.get(2).role)
-                        && "newer answer".equals(decorated.get(3).content) && records("compaction_events", 7L).size() == 1,
-                "Legacy migration lost the known boundary or placed it after later messages");
-        check(records("compaction_events", 8L).isEmpty() && records("compaction_events", 9L).isEmpty()
-                        && "broken-json".equals(records("context_windows", 9L).get(0).get("window")),
-                "Migration invented a successful compaction or rewrote invalid recovery evidence");
-    }
 
     private static void stoppedEmptyTurnDoesNotRewritePreviousTurnTime() throws Exception {
         Object store = fresh();
@@ -529,21 +506,26 @@ public final class ChatStorePagingRegressionTest {
                 "Conversation removal left private request logs or removed another conversation's logs");
     }
 
-    private static void legacyDatabaseUpgradeAddsLocalRequestDiagnostics() throws Exception {
+
+
+    private static void olderSchemaIsDroppedAndRebuilt() throws Exception {
         Object store = fresh();
         Object db = databaseType.getConstructor().newInstance();
         check(storeType.getSuperclass().getField("requestedVersion").getInt(null) == 16,
-                "Fresh databases do not request the compaction event schema version");
-        databaseType.getMethod("legacyRuns", int.class).invoke(null, 10);
+                "Fresh databases do not request the current schema version");
         storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 10, 16);
         @SuppressWarnings("unchecked")
         List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 11 && sql.get(0).startsWith("CREATE TABLE IF NOT EXISTS request_events")
-                        && sql.get(0).contains("diagnostic TEXT NOT NULL DEFAULT ''")
-                        && sql.get(1).contains("request_events(session_id,id)")
-                        && sql.get(2).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
-                        && sql.get(3).contains("diagnostic_errors(session_id,id)"),
-                "Version 10 direct upgrade omitted evidence tables or attempted to add an existing diagnostic column");
+        int drops = 0;
+        for (String statement : sql) if (statement.startsWith("DROP TABLE IF EXISTS ")) drops++;
+        check(drops == 10 && sql.get(0).startsWith("DROP TABLE IF EXISTS ") && sql.get(9).startsWith("DROP TABLE IF EXISTS ")
+                        && sql.get(10).startsWith("CREATE TABLE sessions") && sql.toString().contains("CREATE TABLE IF NOT EXISTS sub_agent_records"),
+                "Older schemas were migrated step by step instead of rebuilt");
+        for (String statement : sql) check(!statement.startsWith("ALTER TABLE"), "Rebuild still patched an old table");
+    }
+
+    private static void requestAttemptsDecodePurposeCancellationAndDuration() throws Exception {
+        Object store = fresh();
         MethodAccess.recordRequest(store, 7, "review", 123, "error", "权限检查失败\n服务暂不可用", 0);
         MethodAccess.recordRequest(store, 7, "compact", 0, "cancelled", "用户停止", 1);
         List<?> events = requestRecords(7);
@@ -552,37 +534,6 @@ public final class ChatStorePagingRegressionTest {
                         && "权限检查失败 服务暂不可用".equals(field(events.get(1), "reason"))
                         && number(events.get(1), "elapsedMs") == 123 && number(events.get(1), "recordedAt") > 0,
                 "Purpose, cancellation, safe reason or request duration was decoded incorrectly");
-    }
-
-    private static void versionElevenMigrationPreservesRequestRows() throws Exception {
-        Object store = fresh();
-        append(store, 7, Message.user("preserved conversation"));
-        Object db = databaseType.getConstructor().newInstance();
-        Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
-        @SuppressWarnings("unchecked") Map<String, Object> old = (Map<String, Object>) valuesType.getConstructor().newInstance();
-        old.put("session_id", 7L); old.put("recorded_at", 123L); old.put("elapsed_ms", 41L);
-        old.put("purpose", "compact"); old.put("outcome", "cancelled"); old.put("reason", "old reason"); old.put("retry_count", 2);
-        long oldId = (Long) databaseType.getMethod("insert", String.class, String.class, valuesType)
-                .invoke(db, "request_events", null, old);
-        databaseType.getMethod("legacyRuns", int.class).invoke(null, 11);
-        storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, 11, 16);
-        @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        check(sql.size() == 10 && sql.get(0).equals("ALTER TABLE request_events ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''")
-                        && sql.get(1).startsWith("CREATE TABLE IF NOT EXISTS diagnostic_errors")
-                        && sql.get(2).contains("diagnostic_errors(session_id,id)"),
-                "Version 11 migration recreated request history or did not apply the additive column default");
-        List<?> before = requestRecords(7);
-        check(before.size() == 1 && number(before.get(0), "id") == oldId && number(before.get(0), "recordedAt") == 123
-                        && number(before.get(0), "elapsedMs") == 41 && "compact".equals(field(before.get(0), "purpose"))
-                        && "cancelled".equals(field(before.get(0), "outcome")) && "old reason".equals(field(before.get(0), "reason"))
-                        && (Integer) field(before.get(0), "retryCount") == 2 && "".equals(field(before.get(0), "diagnostic")),
-                "The migration lost an existing attempt or failed to decode the new empty diagnostic default");
-        MethodAccess.recordRequest(store, 7, "model", 3, "success", "", 0, "{\"provider\":\"grok\"}");
-        List<?> after = requestRecords(7);
-        check(after.size() == 2 && number(after.get(1), "id") == oldId
-                        && "grok".equals(new JSONObject((String) field(after.get(0), "diagnostic")).getString("provider"))
-                        && "preserved conversation".equals(messages(page(store, 7, -1, 48)).get(0).content),
-                "New diagnostic writes after migration changed the old log or conversation");
     }
 
     private static Object run(Object store, long sid) throws Exception {
@@ -655,67 +606,6 @@ public final class ChatStorePagingRegressionTest {
                 "Late heartbeat rewrote a final stopped checkpoint");
     }
 
-    private static void everyLegacyVersionUpgradesWithNullableDurationColumns() throws Exception {
-        for (int version = 1; version <= 15; version++) {
-            Object store = fresh(), db = databaseType.getConstructor().newInstance();
-            databaseType.getMethod("legacyRuns", int.class).invoke(null, version);
-            if (version >= 4) {
-                Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
-                @SuppressWarnings("unchecked") Map<String, Object> legacy = (Map<String, Object>) valuesType.getConstructor().newInstance();
-                legacy.put("session_id", 7L); legacy.put("running", 1); legacy.put("goal", "old goal");
-                legacy.put("status", "active"); legacy.put("elapsed_ms", 123L);
-                if (version >= 5) {
-                    legacy.put("turn_at", 10L); legacy.put("turn_wall", 20L); legacy.put("seen_at", 30L);
-                }
-                if (version >= 13) {
-                    legacy.put("turn_elapsed_ms", 900L); legacy.put("turn_think_ms", 0L);
-                }
-                databaseType.getMethod("insert", String.class, String.class, valuesType).invoke(db, "runs", null, legacy);
-            }
-            if (version >= 12) databaseType.getField("requestDiagnosticColumn").setBoolean(null, true);
-            append(store, 7L, Message.user("preserved legacy request"));
-            storeType.getMethod("onUpgrade", databaseType, int.class, int.class).invoke(store, db, version, 16);
-            @SuppressWarnings("unchecked") Set<String> columns = (Set<String>) databaseType.getField("runColumns").get(null);
-            check(columns.containsAll(Arrays.asList("turn_at", "turn_wall", "seen_at", "turn_elapsed_ms",
-                            "turn_think_ms", "tokens_used", "token_budget", "budget_wrap_finished")),
-                    "Version " + version + " omitted old compatibility or new duration columns");
-            @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-            int elapsedAlters = 0, thinkAlters = 0, selectionAlters = 0;
-            for (String statement : sql) {
-                if (statement.equals("ALTER TABLE runs ADD COLUMN turn_elapsed_ms INTEGER")) elapsedAlters++;
-                if (statement.equals("ALTER TABLE runs ADD COLUMN turn_think_ms INTEGER")) thinkAlters++;
-                if (statement.equals("ALTER TABLE messages ADD COLUMN mcp_selection TEXT NOT NULL DEFAULT ''")) selectionAlters++;
-            }
-            check(elapsedAlters == (version >= 4 && version < 13 ? 1 : 0) && thinkAlters == (version >= 4 && version < 13 ? 1 : 0),
-                    "Version " + version + " altered duration columns after creating their latest schema");
-            check(selectionAlters == (version < 14 ? 1 : 0) && messages(page(store, 7L, -1, 48)).get(0).mcpSelection == null
-                            && "preserved legacy request".equals(messages(page(store, 7L, -1, 48)).get(0).content),
-                    "Version " + version + " failed to add exactly one empty selection default while preserving legacy requests");
-            if (version >= 4) {
-                Object restored = run(store, 7L);
-                check((version >= 13 ? Long.valueOf(900L).equals(field(restored, "turnElapsedMs"))
-                                && Long.valueOf(0L).equals(field(restored, "turnThinkMs"))
-                                : field(restored, "turnElapsedMs") == null && field(restored, "turnThinkMs") == null)
-                                && number(restored, "elapsedMs") == 123L && (Boolean) field(restored, "running")
-                                && "old goal".equals(field(restored, "goal")),
-                        "Version " + version + " invented a legacy checkpoint or lost its existing run/checkpoint");
-            }
-            saveRun(store, 7L, true, 500L, 250L, null);
-            check(number(run(store, 7L), "turnElapsedMs") == 250L && field(run(store, 7L), "turnThinkMs") == null,
-                    "Version " + version + " could not persist new checkpoint values after migration");
-        }
-        Object store = fresh(), db = databaseType.getConstructor().newInstance();
-        storeType.getMethod("onCreate", databaseType).invoke(store, db);
-        @SuppressWarnings("unchecked") List<String> sql = (List<String>) databaseType.getField("statements").get(null);
-        boolean nullable = false;
-        for (String statement : sql) if (statement.startsWith("CREATE TABLE IF NOT EXISTS runs (")) {
-            nullable = statement.contains("turn_elapsed_ms INTEGER,turn_think_ms INTEGER,");
-        }
-        check(nullable, "Fresh schema did not create both nullable duration checkpoints");
-        @SuppressWarnings("unchecked") Set<String> messageColumns = (Set<String>) databaseType.getField("messageColumns").get(null);
-        check(messageColumns.contains("mcp_selection") && sql.toString().contains("mcp_selection TEXT NOT NULL DEFAULT ''"),
-                "Fresh schema omitted empty-default MCP selection metadata");
-    }
 
     private static String repeated(char value, int count) {
         char[] text = new char[count]; Arrays.fill(text, value); return new String(text);
@@ -877,11 +767,9 @@ public final class ChatStorePagingRegressionTest {
                         "prefixRequestCorruptionAndUserlessPageStayExplicit", "messageMetadataSurvivesPaging", "selectedMcpToolSurvivesTranscriptAndContextCheckpoint",
                         "corruptedMcpSelectionCannotSilentlyRestoreAnotherRequest", "emptyPageHasNoContext", "trailingResultsFinishOnlyTheSameToolBatch",
                         "compactionDividersPersistWithoutEnteringTheModelWindow", "compactionDividerPagingPreservesBoundariesAndRequestMetadata",
-                        "versionFourteenRestoresOnlyItsKnownCompactionBoundary",
                         "stoppedEmptyTurnDoesNotRewritePreviousTurnTime", "requestDiagnosticsAreBoundedAndSeparateFromConversation",
-                        "legacyDatabaseUpgradeAddsLocalRequestDiagnostics", "versionElevenMigrationPreservesRequestRows",
+                        "olderSchemaIsDroppedAndRebuilt", "requestAttemptsDecodePurposeCancellationAndDuration",
                         "runDurationsRoundTripWithoutLosingNullOrZero", "durationHeartbeatOnlyUpdatesExistingRunningSession",
-                        "everyLegacyVersionUpgradesWithNullableDurationColumns",
                         "structuredRequestDiagnosticsAreRedactedAndBounded", "configurationDiagnosticsAreRetainedAndSessionIsolated")) {
                     ChatStorePagingRegressionTest.class.getDeclaredMethod(name).invoke(null);
                     System.out.println("PASS " + name);

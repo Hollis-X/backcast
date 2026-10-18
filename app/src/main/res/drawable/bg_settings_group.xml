@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设置分组：M3 surfaceContainer 填充块，大圆角 16dp。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="@color/md_surface_container"/>
+    <corners android:radius="16dp"/>
+</shape>

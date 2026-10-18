@@ -1,19 +1,17 @@
 package com.mkei.backcast.tool;
 
-import com.mkei.backcast.agent.Tool;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
 
 /** 整篇覆盖或新建文件。局部修改不走这里。 */
-public class WriteTool implements Tool {
+public class WriteTool extends AbortableTool {
+    private static final int PREVIOUS_LIMIT = 8 * 1024 * 1024;
 
     private final String workDir;
     private final boolean useRoot;
     private final TemporaryWorkspace temporary;
-    private volatile int epoch;
 
     public WriteTool(String workDir, boolean useRoot, TemporaryWorkspace temporary) {
         this.workDir = workDir == null || workDir.length() == 0 ? null : workDir;
@@ -66,18 +64,9 @@ public class WriteTool implements Tool {
     }
 
     @Override
-    public void abort() {
-        epoch++;
-    }
-
-    @Override
     public String run(JSONObject args) throws Exception {
         final int mine = epoch;
-        ToolchainInstaller.Cancellation cancellation = new ToolchainInstaller.Cancellation() {
-            @Override public void check() throws Exception {
-                if (epoch != mine || Thread.currentThread().isInterrupted()) throw new InterruptedException("已停止。");
-            }
-        };
+        ToolchainInstaller.Cancellation cancellation = cancellationFor(mine);
         String path = args.optString("path", "");
         if (path.length() == 0) {
             return "错误：path 为空。";
@@ -110,6 +99,7 @@ public class WriteTool implements Tool {
         if (probe.directory) {
             return "错误：这是目录：" + file.getAbsolutePath();
         }
+        int[] delta;
         synchronized (ToolPaths.lock(file)) {
             if (epoch != mine) {
                 return "已停止。";
@@ -117,11 +107,18 @@ public class WriteTool implements Tool {
             try {
                 if (!file.equals(ToolPaths.resolve(workDir, file.getPath(), temporary, useRoot, cancellation)))
                     return "错误：文件路径在写入前发生变化。";
+                // 覆盖前读旧内容算增删行数；太大或读不了就当作新文件。
+                String before = "";
+                if (probe.exists && probe.length <= PREVIOUS_LIMIT) {
+                    try { before = new String(ToolPaths.readBytes(file, PREVIOUS_LIMIT, useRoot, cancellation), "UTF-8"); }
+                    catch (Exception unreadable) { before = ""; }
+                }
+                delta = com.mkei.backcast.agent.LineDelta.count(before, content);
                 ToolPaths.writeBytes(file, content.getBytes("UTF-8"), useRoot, cancellation);
             } catch (IllegalArgumentException e) {
                 return "错误：" + e.getMessage();
             }
         }
-        return "已写入 " + ("temporary".equals(purpose) ? file.getAbsolutePath() : path);
+        return "已写入 " + ("temporary".equals(purpose) ? file.getAbsolutePath() : path) + "\n" + com.mkei.backcast.agent.LineDelta.mark(delta);
     }
 }

@@ -1,6 +1,5 @@
 package com.mkei.backcast.agent;
 
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -110,6 +109,7 @@ final class LoopProgress {
      * @return null 表示放行；否则返回要回给模型的结果文本。
      */
     String before(String name, JSONObject args) {
+        if (polling(name)) return null;
         Result previous = results.get(key(name, args));
         if (previous != null && previous.repeats >= REPEAT_LIMIT) {
             reason = "同一工具调用已连续返回 " + REPEAT_LIMIT + " 次相同结果（" + name
@@ -121,6 +121,7 @@ final class LoopProgress {
     }
 
     void tool(String name, JSONObject args, String output) {
+        if (polling(name)) return;
         // 成功改了文件就是实质进展，之前那些重复结果和只读轮次都不再算数。
         if (("edit".equals(name) || "write".equals(name)) && !ToolOutcome.failed(name, output)) {
             results.clear();
@@ -203,6 +204,9 @@ final class LoopProgress {
         }
     }
 
+    /** list_agents 连续拿到同一个“还没完成”的状态是在查进度，不是原地打转。 */
+    private static boolean polling(String name) { return "list_agents".equals(name); }
+
     private static String key(String name, JSONObject args) { return name + ":" + digest(canonical(args)); }
 
     private static String canonical(Object value) {
@@ -226,11 +230,6 @@ final class LoopProgress {
     }
 
     private static String digest(String text) {
-        try {
-            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.getBytes("UTF-8"));
-            StringBuilder out = new StringBuilder();
-            for (byte item : hash) out.append(Integer.toHexString((item & 0xFF) | 0x100).substring(1));
-            return out.toString();
-        } catch (Exception unavailable) { throw new IllegalStateException(unavailable); }
+        return Text.sha256Hex(text);
     }
 }

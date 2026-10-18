@@ -10,9 +10,9 @@ import java.util.Map;
 /** Uses the real official SDK and its resolved runtime graph. No network credentials are needed. */
 public class OpenAiSdkRegressionTest {
     public static void main(String[] args) throws Exception {
-        String gradle = new String(Files.readAllBytes(new File(args[0], "app/build.gradle").toPath()),
+        String gradle = new String(Files.readAllBytes(new File(args[0], "gradle/libs.versions.toml").toPath()),
                 StandardCharsets.UTF_8);
-        if (!gradle.contains("implementation 'com.openai:openai-java:4.75.1'")) {
+        if (!gradle.contains("openai = \"4.81.0\"")) {
             throw new AssertionError("Official SDK version not pinned in the application");
         }
         File libs = new File(args[0], "app/libs");

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 指令条目：浅灰圆角块，和输入框里的指令块同一套观感。 -->
+<!-- 指令条目：surfaceContainerHighest 圆角块。 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/chip_bg"/>
-    <corners android:radius="10dp"/>
+    <solid android:color="@color/md_surface_container_highest"/>
+    <corners android:radius="12dp"/>
 </shape>

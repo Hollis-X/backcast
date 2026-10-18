@@ -2,6 +2,8 @@ package com.mkei.backcast.ui;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /** 一轮里折叠进面板的思考和工具调用。不进请求报文。 */
 public class TurnTrace {
@@ -17,6 +19,28 @@ public class TurnTrace {
         public String phase = "preview";
     }
 
+    public static final String PLAN = "update_plan";
+    public static final String ASK = "ask_user_question";
+
+    /** {状态行, 清单文字}：✓ 已完成、● 进行中、○ 待做。参数还在流式生成、解析不了时给占位。 */
+    public static String[] planView(String args) {
+        try {
+            JSONArray items = com.mkei.backcast.tool.PlanTool.normalize(args);
+            if (items == null) throw new IllegalStateException();
+            StringBuilder out = new StringBuilder();
+            int done = 0;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.getJSONObject(i);
+                String status = item.optString("status");
+                if ("completed".equals(status)) done++;
+                out.append(i == 0 ? "" : "\n")
+                        .append("completed".equals(status) ? "\u2713 " : "in_progress".equals(status) ? "\u25cf " : "\u25cb ")
+                        .append(item.optString("content"));
+            }
+            return new String[] { "已完成 " + done + "/" + items.length(), out.toString() };
+        } catch (Exception partial) { return new String[] { "正在整理计划", "" }; }
+    }
+
     public final List<Step> steps = new ArrayList<Step>();
     /** 面板按发生顺序排。思考在工具后面来，就排在那条工具后面，不堆到最上面。 */
     public final List<Piece> order = new ArrayList<Piece>();
@@ -29,7 +53,8 @@ public class TurnTrace {
     private boolean roundOpen;
     public long elapsedMs;
     public long thinkMs;
-    public boolean showReasoning = true;
+    /** 推理摘要为“无”时，不调用模型总结，直接显示原始思考文字。 */
+    public boolean rawReasoning;
     /** The current stage survives a failed request's preview rollback. */
     public String phase = "model";
     /**
@@ -70,7 +95,7 @@ public class TurnTrace {
             int priority = 0;
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.think != null ? trace.showReasoning && !piece.sealed
+                if (piece.think != null ? !piece.sealed
                         : piece.step != null && !piece.step.done) pending = true;
                 if (piece.step != null && !piece.step.done) {
                     Step step = piece.step;
@@ -90,7 +115,7 @@ public class TurnTrace {
         public boolean hasActivity() {
             for (int i = Math.max(0, start); i < Math.min(end, trace.order.size()); i++) {
                 Piece piece = trace.order.get(i);
-                if (piece.step != null || trace.showReasoning && piece.think != null) return true;
+                if (piece.step != null || piece.think != null) return true;
             }
             return false;
         }
@@ -100,13 +125,34 @@ public class TurnTrace {
     public String activityCaption(int from, int to) {
         int thinks = 0, tools = 0;
         for (int i = Math.max(0, from); i < Math.min(to, order.size()); i++) {
-            if (showReasoning && order.get(i).think != null) thinks++;
-            if (order.get(i).step != null) tools++;
+            if (order.get(i).think != null) thinks++;
+            Step step = order.get(i).step;
+            // 计划也是一次工具调用：卡片画清单，这里照常计数，时间线里也能看到这次调用。
+            if (step != null) tools++;
         }
         if (thinks == 0 && tools == 0) return "";
         String thought = thinks > 0 ? "思考 " + thinks + " 段" : "";
         String calls = tools > 0 ? "工具 " + tools + " 次" : "";
         return thought.length() == 0 ? calls : calls.length() == 0 ? thought : thought + " · " + calls;
+    }
+
+    /** 本轮最新的一份计划参数；没有计划返回 null。 */
+    public String latestPlan() {
+        for (int i = steps.size() - 1; i >= 0; i--) if (PLAN.equals(steps.get(i).name)) return steps.get(i).args;
+        return null;
+    }
+
+    /** 区间内文件改动的增删行数合计；没有改动返回 null。 */
+    public int[] lineDelta(int from, int to) {
+        int[] total = null;
+        for (int i = Math.max(0, from); i < Math.min(to, order.size()); i++) {
+            Step step = order.get(i).step;
+            int[] delta = step == null || !step.done ? null : com.mkei.backcast.agent.LineDelta.parse(step.result);
+            if (delta == null) continue;
+            if (total == null) total = new int[2];
+            total[0] += delta[0]; total[1] += delta[1];
+        }
+        return total;
     }
 
     /** 新的一次模型回复。后面的工具下标从当前条数另起，不盖住已经跑过的。 */
@@ -285,7 +331,7 @@ public class TurnTrace {
         }
         step.started = true;
         step.args = args == null ? "" : args;
-        step.phase = "wait_agent".equals(name) ? "children" : "running";
+        step.phase = "running";
         phase = step.phase;
     }
 
@@ -332,7 +378,7 @@ public class TurnTrace {
 
 
     public static String stepPhaseCaption(Step step) {
-        if ("children".equals(step.phase)) return "等待子任务";
+        if ("children".equals(step.phase)) return "等待子代理";
         if (step.started) return "执行中";
         if ("tool_ready".equals(step.phase)) return "等待执行";
         if ("tool_review".equals(step.phase)) return "权限检查中";

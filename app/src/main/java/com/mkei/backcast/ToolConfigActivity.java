@@ -17,6 +17,7 @@ import com.mkei.backcast.tool.ToolCatalog;
 import com.mkei.backcast.tool.ToolBatchProbe;
 import com.mkei.backcast.tool.ToolkitOperationManager;
 import com.mkei.backcast.ui.Icons;
+import com.mkei.backcast.ui.M3;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.json.JSONArray;
@@ -40,7 +41,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
     };
     private Settings settings;
     private String toolId;
-    private CheckBox useRoot;
+    private android.widget.CompoundButton useRoot;
     private TextView packageStatus, detailName, detailInfo, detailOutput, operationStatus, installProgressText;
     private View installProgressContainer;
     private ProgressBar installProgress;
@@ -58,6 +59,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        M3.load(this);
         setContentView(R.layout.activity_tool_config);
         settings = new Settings(this);
         operations = RunHub.get(this).toolkitOperations();
@@ -68,9 +70,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
         androidx.appcompat.widget.Toolbar toolbar = (androidx.appcompat.widget.Toolbar) findViewById(R.id.tool_toolbar);
         setSupportActionBar(toolbar);
         toolbar.setTitle(toolId.length() > 0 ? R.string.settings_tool_detail_title : R.string.settings_tools_title);
-        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, 0xFF0D0D0D, dp(22)));
+        toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, M3.onSurface, dp(24)));
         toolbar.setNavigationOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { finish(); } });
-        useRoot = (CheckBox) findViewById(R.id.tool_use_root);
+        useRoot = (android.widget.CompoundButton) findViewById(R.id.tool_use_root);
         packageStatus = (TextView) findViewById(R.id.tool_package_status);
         detailName = (TextView) findViewById(R.id.tool_detail_name);
         detailInfo = (TextView) findViewById(R.id.tool_detail_info);
@@ -88,11 +90,11 @@ public final class ToolConfigActivity extends AppCompatActivity {
         batchProgressContainer = findViewById(R.id.tool_batch_progress_container);
         batchProgress = (ProgressBar) findViewById(R.id.tool_batch_progress);
         batchProgressText = (TextView) findViewById(R.id.tool_batch_progress_text);
-        Icons.left(install, Icons.FOLDER, 0xFF0D0D0D, dp(18));
-        Icons.left(remove, Icons.STOP, 0xFF0D0D0D, dp(18));
-        Icons.left(probe, Icons.PLAY, 0xFF0D0D0D, dp(18));
-        Icons.left(cancel, Icons.STOP, 0xFF0D0D0D, dp(18));
-        Icons.left(batchProbe, Icons.PLAY, 0xFF0D0D0D, dp(18));
+        Icons.leftCentered(install, Icons.FOLDER, M3.onPrimary, dp(18));
+        Icons.leftCentered(remove, Icons.STOP, M3.onSurfaceVariant, dp(18));
+        Icons.leftCentered(probe, Icons.PLAY, M3.onSurfaceVariant, dp(18));
+        Icons.leftCentered(cancel, Icons.STOP, M3.onSurfaceVariant, dp(18));
+        Icons.leftCentered(batchProbe, Icons.PLAY, M3.onSurfaceVariant, dp(18));
         useRoot.setChecked(settings.useRoot());
         useRoot.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton button, boolean checked) { updateRoot(checked); }
@@ -416,7 +418,7 @@ public final class ToolConfigActivity extends AppCompatActivity {
             row.setTextColor(getResources().getColor(R.color.text_primary)); row.setTextSize(14);
             row.setPadding(dp(8), dp(12), dp(8), dp(12)); row.setMinHeight(dp(64));
             row.setBackgroundResource(android.R.drawable.list_selector_background);
-            Icons.right(row, Icons.CHEVRON_RIGHT, 0xFF6F6F6F, dp(18));
+            Icons.right(row, Icons.CHEVRON_RIGHT, M3.onSurfaceVariant, dp(18));
             row.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View view) {
                     Intent intent = new Intent(ToolConfigActivity.this, ToolConfigActivity.class);

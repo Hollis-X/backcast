@@ -59,7 +59,7 @@ public final class SubAgentRegressionTest {
                     calls.incrementAndGet();
                     try {
                         Work work;
-                        synchronized (scripts) { work = scripts.get(task.name); }
+                        synchronized (scripts) { work = scripts.get(task.name); if (work == null) work = scripts.get(task.name.replaceAll("_\\d+$", "")); }
                         if (work == null) return text("done: " + lastUser(history));
                         return work.run(task, history, tools);
                     } catch (Exception error) { throw new IllegalStateException(error); }
@@ -82,7 +82,7 @@ public final class SubAgentRegressionTest {
 
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
     private static SubAgentManager.Record copy(SubAgentManager.Record record) throws Exception {
-        return SubAgentManager.Record.fromJson(new JSONObject(record.toJson().toString()));
+        return RecordFixtures.fromJson(new JSONObject(record.toJson().toString()));
     }
     private static LlmClient.Reply text(String text) { LlmClient.Reply reply = new LlmClient.Reply(); reply.content = text; return reply; }
     private static String lastUser(List<Message> history) {
@@ -163,30 +163,80 @@ public final class SubAgentRegressionTest {
                 "Fork truncated history or lost its new assignment");
     }
 
-    private static void childWaitYieldsTheOnlyExecutionSlot() throws Exception {
+    private static void waitingChildYieldsTheOnlyExecutionSlotToItsPeer() throws Exception {
         final Fixture f = new Fixture(1);
-        final AtomicInteger turns = new AtomicInteger();
-        f.work("parent-child", new Work() {
+        final CountDownLatch peerQueued = new CountDownLatch(1);
+        f.work("waiter", new Work() {
             @Override public LlmClient.Reply run(SubAgentManager.Record task, List<Message> history, JSONArray tools) throws Exception {
-                if (turns.incrementAndGet() > 1) return text("nested result collected");
-                String child = f.manager.spawn(task.id, "grandchild", "independent nested task", false).getString("id");
-                JSONObject result = f.manager.waitFor(task.id, child, 5000L);
-                check(!result.getBoolean("pending"), "Nested task starved behind its waiting parent");
-                return text("nested result collected");
+                await(peerQueued);
+                JSONObject result = f.manager.waitForUpdate(task.id, "peer", 5000L, -1L);
+                check(!result.getBoolean("pending"), "Peer starved behind its waiting sibling");
+                return text("peer finished first");
             }
         });
-        String id = f.spawn("parent-child", "delegate nested work"); f.settle();
-        check(f.manager.find(id).result.equals("nested result collected") && f.created.get() == 2,
-                "Nested delegation did not finish");
+        String waiter = f.spawn("waiter", "wait for the peer"); f.spawn("peer", "quick work"); peerQueued.countDown(); f.settle();
+        check(f.manager.find(waiter).result.equals("peer finished first") && f.created.get() == 2,
+                "Waiting for a peer did not finish");
     }
 
-    private static void childCannotWaitOnParentOrPeers() throws Exception {
+    private static void childrenWaitAcrossTheTreeWithoutSelfWaiting() throws Exception {
         Fixture f = new Fixture(2); String a = f.spawn("a", "first"), b = f.spawn("b", "second"); f.settle();
-        for (String target : new String[]{"main", b, a}) {
+        for (String target : new String[]{"main", b, "b", "/main/b"}) {
+            JSONObject waited = f.manager.waitForUpdate(a, target, 0L, -1L);
+            check(waited.has("agents") && !waited.getBoolean("pending"), "Child could not wait across the tree: " + target);
+        }
+        for (String target : new String[]{a, "a"}) {
             boolean denied = false;
             try { f.manager.waitFor(a, target, 0L); } catch (IllegalArgumentException expected) { denied = true; }
-            check(denied, "Child wait admitted a circular dependency: " + target);
+            check(denied, "Child waited on itself: " + target);
         }
+    }
+
+    private static void agentsAreAddressedByNameAndPathAndMessageEachOther() throws Exception {
+        Fixture f = new Fixture(3);
+        String parser = f.spawn("parser", "parse"), again = f.spawn("parser", "parse more"), writer = f.spawn("writer", "write"); f.settle();
+        check("parser".equals(f.manager.find(parser).name) && "parser_2".equals(f.manager.find(again).name),
+                "Sibling names were not made unique");
+        check("/main/parser".equals(f.manager.path(parser)) && "/main/writer".equals(f.manager.path(writer)), "Agents have no readable path");
+        // main -> child by name, path and id
+        f.manager.send("main", "writer", "note by name", "message");
+        f.manager.send("main", "/main/writer", "note by path", "message");
+        f.manager.send("main", writer, "note by id", "message");
+        check(f.manager.find(writer).inbox.length() == 3, "Messages by name, path and id did not all arrive");
+        // peer -> peer and child -> main, without going through the parent
+        f.manager.send(parser, "writer", "from a peer", "message");
+        JSONObject peerMail = f.manager.find(writer).inbox.getJSONObject(3);
+        check("/main/parser".equals(peerMail.getString("fromPath")) && parser.equals(peerMail.getString("from")), "Peer mail lost its sender");
+        f.manager.send(writer, "main", "to main", "message");
+        check(f.manager.find("main").inbox.length() == 1 && "/main/writer".equals(f.manager.find("main").inbox.getJSONObject(0).getString("fromPath")),
+                "Child could not message main by name");
+        f.manager.send(writer, "parent", "to my parent", "message");
+        check(f.manager.find("main").inbox.length() == 2, "parent did not resolve to main");
+        // errors are explicit
+        for (String bad : new String[]{"nobody", "", "/main/nobody"}) {
+            boolean failed = false;
+            try { f.manager.send("main", bad, "x", "message"); } catch (IllegalArgumentException expected) { failed = true; }
+            check(failed, "Unknown target accepted: '" + bad + "'");
+        }
+        JSONObject branch = f.manager.list("main", 0, "/main/parser");
+        check(branch.getJSONArray("agents").length() == 1 && "/main/parser".equals(branch.getJSONArray("agents").getJSONObject(0).getString("path"))
+                && "/main".equals(branch.getString("self")), "list_agents path filter or self path is wrong");
+    }
+
+    private static void onlyMainCreatesChildren() throws Exception {
+        Fixture f = new Fixture(3); String a = f.spawn("a", "outer"); f.settle();
+        ToolRegistry asChild = new ToolRegistry(); SubAgentTools.register(asChild, f.manager, a);
+        check(asChild.get("spawn_agent") == null && asChild.get("close_agent") == null, "A child was given the tools to spawn or close agents");
+        check(asChild.get("send_message") != null && asChild.get("list_agents") != null && asChild.get("wait_agent") == null,
+                "A child lost the tools to talk to its peers");
+        boolean refused = false;
+        try { f.manager.spawn(a, "b", "inner", false); }
+        catch (IllegalStateException expected) { refused = expected.getMessage().contains("main"); }
+        check(refused, "The manager let a child spawn another child");
+        boolean closeRefused = false;
+        try { f.manager.close(a, "a"); } catch (IllegalArgumentException expected) { closeRefused = true; }
+        check(closeRefused, "A child closed an agent");
+        check(f.manager.list("main", 0).getInt("totalAgents") == 1, "Refused spawn still registered an agent");
     }
 
     private static void closingOneChildDoesNotCancelItsPeers() throws Exception {
@@ -247,14 +297,52 @@ public final class SubAgentRegressionTest {
         check(f.manager.list("main", 0).getInt("totalAgents") == 0, "Failed spawn leaked an orphan task record");
     }
 
-    private static void waitToolCollectsResultsExactlyOnce() throws Exception {
+    private static void resultsAreDeliveredOnceAndTheToolSurfaceMatchesClaude() throws Exception {
         Fixture f = new Fixture(1); String id = f.spawn("review", "finish"); f.settle();
+        JSONObject result = f.manager.collectResults("main", id);
+        check(result.getJSONArray("agents").length() == 1 && !f.manager.hasUncollectedResults(), "Collecting did not mark the delivered result");
+        check(f.manager.collectResults("main", id).getJSONArray("agents").length() == 0, "A delivered result was delivered twice");
         ToolRegistry registry = new ToolRegistry(); SubAgentTools.register(registry, f.manager, "main");
-        JSONObject result = new JSONObject(registry.get("wait_agent").run(new JSONObject().put("target", id).put("timeout_ms", 0)));
-        check(result.getJSONArray("agents").length() == 1 && !f.manager.hasUncollectedResults(), "Wait tool failed to mark its delivered result");
-        for (String name : new String[]{"spawn_agent", "send_message", "list_agents", "wait_agent", "close_agent"})
+        for (String name : new String[]{"spawn_agent", "send_message", "list_agents", "close_agent"})
             check(registry.get(name) != null && registry.get(name).parameters().getBoolean("additionalProperties") == false, "Coordination schema is incomplete");
+        for (String name : new String[]{"wait_agent", "read_agent_result", "followup_task"})
+            check(registry.get(name) == null, "Polling or duplicate tool is still exposed: " + name);
         check(registry.get("update_goal") == null && registry.get("get_goal") == null, "Child toolkit exposed the parent's goal tools");
+    }
+
+    private static void sendMessageResumesFinishedAgentsAndQueuesForRunningOnes() throws Exception {
+        final Fixture f = new Fixture(3);
+        final CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
+        f.work("busy", new Work() {
+            @Override public LlmClient.Reply run(SubAgentManager.Record task, List<Message> history, JSONArray tools) throws Exception {
+                started.countDown(); check(release.await(30, TimeUnit.SECONDS), "Busy fixture was never released"); return text("busy done: " + lastUser(history));
+            }
+        });
+        String done = f.spawn("done", "first"); String busy = f.spawn("busy", "long"); await(started);
+        // 先等它真的做完：还在跑时发消息只会进收件箱，测的就不是「已结束的子代理被消息唤醒」了。
+        for (long end = System.currentTimeMillis() + 20000; !SubAgentManager.IDLE.equals(f.manager.find(done).status)
+                && System.currentTimeMillis() < end;) Thread.sleep(10);
+        // finished agent: the message resumes it, with its context, as its next task
+        f.manager.sendMessage("main", "done", "also check the edge case");
+        for (long end = System.currentTimeMillis() + 20000; !f.manager.find(done).result.contains("also check the edge case") && System.currentTimeMillis() < end;) Thread.sleep(10);
+        check(f.manager.find(done).result.contains("also check the edge case") && f.created.get() == 2, "A finished agent was not resumed by a message");
+        // running agent: queued in its inbox, never starts another task
+        int tasks = f.manager.find(busy).tasks.length();
+        f.manager.sendMessage("main", "busy", "fyi: use the new API");
+        check(f.manager.find(busy).tasks.length() == tasks && f.manager.find(busy).inbox.length() == 1, "A running agent got a new task instead of mail");
+        // a peer can wake another finished peer without going through main
+        f.manager.sendMessage(busy, "done", "peer asks for a second opinion");
+        for (long end = System.currentTimeMillis() + 20000; !f.manager.find(done).result.contains("second opinion") && System.currentTimeMillis() < end;) Thread.sleep(10);
+        check(f.manager.find(done).result.contains("second opinion"), "A peer message did not resume a finished agent");
+        release.countDown(); f.settle();
+        // a user-stopped agent is not revived
+        f.manager.stopFromUser(done);
+        boolean refused = false;
+        try { f.manager.sendMessage("main", "done", "wake up"); } catch (IllegalStateException expected) { refused = true; }
+        check(refused, "A stopped agent accepted a message");
+        // main only ever receives mail
+        f.manager.sendMessage(busy, "main", "status");
+        check(f.manager.find("main").inbox.length() == 1 && f.manager.find("main").tasks.length() == 0, "Mail to main became a task");
     }
 
     private static void restoredRootInboxKeepsRevisionAndConsumesDurably() throws Exception {
@@ -303,14 +391,6 @@ public final class SubAgentRegressionTest {
         f.manager.resumePending(); f.manager.send("main", held, "new task after cancellation", "task"); f.settle();
         check(SubAgentManager.IDLE.equals(f.manager.find(held).status) && turns.get() == 2,
                 "Cancelled busy context could not be reused");
-    }
-
-    private static void closingAParentClosesDescendantsWithoutStackRecursion() throws Exception {
-        Fixture f = new Fixture(2); String parent = f.spawn("parent", "original"); f.settle();
-        String child = f.manager.spawn(parent, "child", "nested work", false).getString("id"); f.settle();
-        f.manager.close("main", parent);
-        check(SubAgentManager.CLOSED.equals(f.manager.find(parent).status)
-                && SubAgentManager.CLOSED.equals(f.manager.find(child).status), "Closing parent did not close descendants");
     }
 
     private static void recoveryBeforeFirstUserCheckpointDoesNotLoseTheTask() throws Exception {
@@ -391,41 +471,6 @@ public final class SubAgentRegressionTest {
                 "Settled and collected child work blocked goal completion");
     }
 
-    private static void childFinalWaitsForAndIntegratesItsDelegatedResult() throws Exception {
-        final Fixture f = new Fixture(1); final AtomicInteger turns = new AtomicInteger();
-        f.work("delegator", new Work() {
-            @Override public LlmClient.Reply run(SubAgentManager.Record task, List<Message> history, JSONArray tools) throws Exception {
-                if (turns.incrementAndGet() == 1) {
-                    f.manager.spawn(task.id, "nested", "nested evidence", false);
-                    return text("provisional answer before nested work");
-                }
-                check(lastUser(history).contains("nested evidence"), "Delegating child did not receive its child's evidence");
-                return text("final answer after nested result");
-            }
-        });
-        String id = f.spawn("delegator", "complete nested review"); f.settle();
-        check(turns.get() == 2 && f.manager.find(id).result.equals("final answer after nested result"),
-                "Child final answer escaped before its nested task finished");
-    }
-
-    private static void cancellingAChildOnlyStopsItsOwnedDescendants() throws Exception {
-        final Fixture f = new Fixture(2); final CountDownLatch started = new CountDownLatch(1), release = new CountDownLatch(1);
-        String parent = f.spawn("parent", "ready"); String peer = f.spawn("peer", "peer ready"); f.settle();
-        f.work("nested-hold", new Work() {
-            @Override public LlmClient.Reply run(SubAgentManager.Record task, List<Message> history, JSONArray tools) throws Exception {
-                started.countDown(); await(release); return text("cancelled work");
-            }
-        });
-        String nested = f.manager.spawn(parent, "nested-hold", "hold nested", false).getString("id"); await(started);
-        AgentLoop parentLoop;
-        synchronized (f.loops) { parentLoop = f.loops.get(parent); }
-        parentLoop.cancel(); release.countDown(); f.settle();
-        check(SubAgentManager.STOPPED.equals(f.manager.find(nested).status) && SubAgentManager.IDLE.equals(f.manager.find(peer).status),
-                "Child cancellation escaped its owned descendants");
-        f.manager.send("main", peer, "still useful", "task"); f.settle();
-        check(f.manager.find(peer).result.contains("still useful"), "Peer was unusable after sibling cancellation");
-    }
-
     private static void failedFollowupDoesNotExposeThePreviousFinalAnswer() throws Exception {
         Fixture f = new Fixture(1); String id = f.spawn("review", "successful first task"); f.settle();
         f.work("review", new Work() {
@@ -463,7 +508,7 @@ public final class SubAgentRegressionTest {
         task.pending.put(new JSONObject().put("from", "main").put("text", task.task)); store.save(task);
         Fixture f = new Fixture(1, store); f.manager.setMaxParallel(4);
         Thread.sleep(50L);
-        check(f.created.get() == 0 && f.calls.get() == 0 && f.manager.needsSettlement(),
+        check(f.created.get() == 0 && f.calls.get() == 0 && f.manager.hasPendingWork(),
                 "Changing restored parallelism started work before root authorization was ready");
         f.manager.resumePending(); f.settle(); check(f.calls.get() == 1, "Explicit recovery did not start restored work");
     }
@@ -488,16 +533,17 @@ public final class SubAgentRegressionTest {
     public static void main(String[] args) throws Exception {
         String[] tests = {"childRunsARealLoopAndReusesIdleContext", "concurrentLimitQueuesExcessWork",
                 "busyMessagesQueueWithoutCancellingTheCurrentTurn", "parentAndPeerCommunicationUseTheSameManager",
-                "forkCopiesTheEffectiveHistoryInsteadOfATextExcerpt", "childWaitYieldsTheOnlyExecutionSlot",
-                "childCannotWaitOnParentOrPeers", "closingOneChildDoesNotCancelItsPeers",
+                "forkCopiesTheEffectiveHistoryInsteadOfATextExcerpt", "waitingChildYieldsTheOnlyExecutionSlotToItsPeer",
+                "childrenWaitAcrossTheTreeWithoutSelfWaiting", "agentsAreAddressedByNameAndPathAndMessageEachOther",
+                "onlyMainCreatesChildren", "closingOneChildDoesNotCancelItsPeers",
                 "cancellationIsIdempotentAndIdleChildrenRemainReusable", "childFailureIsReportedWithoutBlockingSettlement",
                 "restoredRunningTaskWaitsForExplicitRecoveryAndKeepsItsUserMessage", "persistenceFailureNeverStartsAnUnreviewableChild",
-                "waitToolCollectsResultsExactlyOnce", "restoredRootInboxKeepsRevisionAndConsumesDurably",
-                "busyCancellationDoesNotRecursivelyClosePeersAndCanReuseContext", "closingAParentClosesDescendantsWithoutStackRecursion",
+                "resultsAreDeliveredOnceAndTheToolSurfaceMatchesClaude", "sendMessageResumesFinishedAgentsAndQueuesForRunningOnes", "restoredRootInboxKeepsRevisionAndConsumesDurably",
+                "busyCancellationDoesNotRecursivelyClosePeersAndCanReuseContext", 
                 "recoveryBeforeFirstUserCheckpointDoesNotLoseTheTask", "closedHistoryCannotHideNewerRestoredWork",
                 "resultBatchesStayBoundedAndFullResultsAreReadable", "usageAndFactoryPermissionConfigurationSurviveIdleReuse",
                 "parentGoalCannotCompleteBeforeChildrenSettleAndResultsAreCollected",
-                "childFinalWaitsForAndIntegratesItsDelegatedResult", "cancellingAChildOnlyStopsItsOwnedDescendants",
+                
                 "failedFollowupDoesNotExposeThePreviousFinalAnswer", "unacknowledgedResultsReplayAfterRestartUntilAFinalAnswer",
                 "longMailboxMessagesReachTheModelWithoutPreviewTruncation", "recoveredWorkCannotStartFromAConcurrencySettingChange",
                 "aPersistedUserStopPreventsAutomaticSettlement"};
