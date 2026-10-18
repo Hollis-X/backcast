@@ -15,6 +15,7 @@ import com.mkei.backcast.agent.SubAgentManager;
 import com.mkei.backcast.ui.AgentPanelState;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.M3;
+import com.mkei.backcast.ui.Skeleton;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -37,7 +38,7 @@ public final class SubAgentsActivity extends AppCompatActivity {
     private long sessionId;
     private LinearLayout body;
     private String rendered = "";
-    private boolean resumed, destroyed;
+    private boolean resumed, destroyed, loaded;
     private final Runnable poll = new Runnable() {
         @Override public void run() { load(); }
     };
@@ -48,6 +49,8 @@ public final class SubAgentsActivity extends AppCompatActivity {
         setContentView(R.layout.activity_sub_agents);
         sessionId = getIntent().getLongExtra(EXTRA_SESSION_ID, -1L);
         body = (LinearLayout) findViewById(R.id.agent_panel_body);
+        // 第一次读子代理要先恢复会话，可能要等一会儿：先画三行骨架，读完由 render 整个换掉。
+        body.addView(Skeleton.list(this, 3, 40, false, true), new LinearLayout.LayoutParams(-1, -2));
         androidx.appcompat.widget.Toolbar toolbar = (androidx.appcompat.widget.Toolbar) findViewById(R.id.agent_panel_toolbar);
         toolbar.setNavigationIcon(Icons.tinted(this, Icons.BACK, M3.onSurface, dp(24)));
         toolbar.setNavigationOnClickListener(new View.OnClickListener() {
@@ -102,7 +105,8 @@ public final class SubAgentsActivity extends AppCompatActivity {
     private void render(List<SubAgentManager.Record> rows) {
         StringBuilder signature = new StringBuilder();
         for (SubAgentManager.Record row : rows) signature.append(row.id).append('\n').append(row.name).append('\n');
-        if (signature.toString().equals(rendered) && body.getChildCount() > 0) return;
+        if (loaded && signature.toString().equals(rendered) && body.getChildCount() > 0) return;
+        loaded = true;
         rendered = signature.toString();
         body.removeAllViews();
         if (rows.isEmpty()) {

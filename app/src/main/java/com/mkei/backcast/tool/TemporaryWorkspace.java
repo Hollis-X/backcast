@@ -53,6 +53,12 @@ public final class TemporaryWorkspace {
     private final java.util.Set<String> reportedStale = new java.util.HashSet<String>();
     /** 还没被取走的重启遗留失败，不算进本轮清理结果，由 staleFailures() 交给调用方写诊断。 */
     private final StringBuilder staleNotes = new StringBuilder();
+    /**
+     * 重启遗留目录清理失败后，多久以后才在每轮收尾里再试。每次重试都要扫一遍 /proc（root 下还要等最多 2 秒重扫），
+     * 而且是在本对象的锁里做的；占用进程结束不掉时每轮都试，会让每轮收尾都多卡几秒。
+     */
+    static final long STALE_RETRY_NANOS = 10L * 60L * 1000000000L;
+    private final java.util.Map<String, Long> staleRetryAt = new java.util.HashMap<String, Long>();
     public TemporaryWorkspace(String workDir, boolean useRoot, File stateDir, long sessionId) {
         configure(workDir, useRoot);
         this.stateDir = canonical(stateDir);
@@ -248,6 +254,10 @@ public final class TemporaryWorkspace {
             if (!allocation.lease.equals(lease) && !RECOVERED.equals(allocation.lease)) continue;
             // 本轮清理顺带重试重启前留下的目录：它失败了不代表本轮没清干净，只报一次。
             boolean stale = RECOVERED.equals(allocation.lease) && !RECOVERED.equals(lease);
+            if (stale) {
+                Long next = staleRetryAt.get(allocation.directory.getPath());
+                if (next != null && System.nanoTime() - next.longValue() < 0) continue;
+            }
             try {
                 budget.check();
                 if (allocation.processPending && allocation.processes.isEmpty()) {
@@ -275,6 +285,7 @@ public final class TemporaryWorkspace {
                 String path = allocation.directory.getPath();
                 if (stale) {
                     // 重启遗留目录的失败与本轮无关：不进返回值（不让本轮显得没清干净），只交给诊断记一次。
+                    staleRetryAt.put(path, Long.valueOf(System.nanoTime() + STALE_RETRY_NANOS));
                     if (reportedStale.add(path)) {
                         if (staleNotes.length() > 0) staleNotes.append('\n');
                         staleNotes.append("（重启前留下的目录）").append(path).append("：").append(failure.getMessage());
@@ -341,6 +352,9 @@ public final class TemporaryWorkspace {
     private String rootRecover(String directory, CleanupBudget budget) throws Exception {
         java.util.List<String> pids = rootScan(directory, budget);
         if (pids.isEmpty()) return null;
+        // App 自己的进程不能结束：它是组长，连组一起杀会把 App 带走。它在用这个目录说明目录还不该删。
+        String self = selfPid();
+        if (pids.contains(self)) throw new IllegalStateException("App 自己仍打开着临时目录里的文件，保留临时目录。");
         rootKill(rootMetadata(pids, budget), budget);
 
         // 结束后只用短暂的重扫窗口等待 /proc 链接消失；每次扫描都是一次 ls，
@@ -349,6 +363,7 @@ public final class TemporaryWorkspace {
         while (System.nanoTime() < rescanDeadline) {
             budget.check();
             pids = rootScan(directory, budget);
+            pids.remove(self);
             if (pids.isEmpty()) return null;
             budget.pause(100);
         }
@@ -425,9 +440,11 @@ public final class TemporaryWorkspace {
     }
 
     private static java.util.List<String> rootScan(String directory, CleanupBudget budget) throws Exception {
+        StringBuilder targets = new StringBuilder();
+        for (String alias : aliases(directory)) targets.append(" -e ").append(RootShell.quote(" -> " + alias));
         String command = "{ ls -l /proc/[0-9]*/cwd /proc/[0-9]*/fd 2>/dev/null; status=$?; printf '%s%s\\n' "
-                + RootShell.quote(ROOT_SCAN_STATUS) + " \"$status\"; } | grep -F -e '/fd:' -e "
-                + RootShell.quote(" -> " + directory) + " -e " + RootShell.quote(ROOT_SCAN_STATUS);
+                + RootShell.quote(ROOT_SCAN_STATUS) + " \"$status\"; } | grep -F -e '/fd:'"
+                + targets + " -e " + RootShell.quote(ROOT_SCAN_STATUS);
         RootShell.Out out = RootShell.exec(command, null, 4 * 1024 * 1024,
                 budget.remainingMillis(2000), budget);
         String output = new String(out.stdout, "UTF-8");
@@ -582,7 +599,30 @@ public final class TemporaryWorkspace {
     }
 
     private static boolean inside(String path, String directory) {
-        return path != null && (path.equals(directory) || path.startsWith(directory + File.separator));
+        if (path == null) return false;
+        for (String alias : aliases(directory)) {
+            if (path.equals(alias) || path.startsWith(alias + File.separator)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 同一个 App 私有目录在 /proc 链接里可能有两种写法：/data/data/包名 和 /data/user/0/包名
+     * （Android 11 起的 App 数据隔离、su 所在的挂载命名空间都会影响 readlink 读到哪一种）。
+     * 只认一种的话，另一种写法的占用会被当成「没人在用」，进程还活着目录就被删了。
+     */
+    static java.util.List<String> aliases(String directory) {
+        java.util.List<String> out = new ArrayList<String>();
+        out.add(directory);
+        String data = "/data/data/", user = "/data/user/0/";
+        if (directory.startsWith(data)) out.add(user + directory.substring(data.length()));
+        else if (directory.startsWith(user)) out.add(data + directory.substring(user.length()));
+        return out;
+    }
+
+    private static String selfPid() {
+        try { return new File("/proc/self").getCanonicalFile().getName(); }
+        catch (Exception unreadable) { return ""; }
     }
 
     private void verify(Allocation allocation, CleanupBudget budget) throws Exception {

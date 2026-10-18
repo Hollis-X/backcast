@@ -73,7 +73,7 @@ public final class RunHubRecoveryTest {
                 + "public static int runSaves,clockSaves;public static java.util.Set<Long> restartOnly=new java.util.HashSet<Long>();public static java.util.List<Long> childWork=new java.util.ArrayList<Long>();"
                 + "public static long requestSession,requestElapsed,diagnosticSession;public static String requestPurpose,requestOutcome,requestReason,requestDiagnostic,diagnosticSource,diagnosticSummary,diagnosticDetail;public static int requestRetry,diagnosticCalls;"
                 + "public static void pauseRead(long sid) { pausedRead=sid; readStarted=new java.util.concurrent.CountDownLatch(1); readRelease=new java.util.concurrent.CountDownLatch(1); }"
-                + "public ChatStore(android.content.Context c) {}"
+                + "public ChatStore(android.content.Context c) {}public java.io.File root(){return new java.io.File(System.getProperty(\"java.io.tmpdir\"),\"backcast-hub-fixture\");}"
                 + "public static void reset() { runs.clear();childWork.clear();restartOnly.clear(); pausedRead=-1;runSaves=clockSaves=0;requestSession=requestElapsed=diagnosticSession=0;requestRetry=diagnosticCalls=0;requestPurpose=requestOutcome=requestReason=requestDiagnostic=diagnosticSource=diagnosticSummary=diagnosticDetail=null; }"
                 + "public static void pending(long sid) { checkpoint(sid,true,5000L,null); }"
                 + "public static void checkpoint(long sid,boolean running,Long elapsed,Long think) { Run r=new Run();r.running=running;r.turnElapsedMs=elapsed;r.turnThinkMs=think;runs.put(sid,r); }"

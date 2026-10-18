@@ -7,6 +7,7 @@
     <string name="agent_panel_stop_confirm">停止此子代理当前的任务，保留已产生的成果。</string>
     <string name="agent_chat_hint">给子代理发消息</string>
     <string name="agent_chat_missing">子代理不存在</string>
+    <string name="agent_chat_earlier_hidden">更早的 %1$d 条消息未显示</string>
     <string name="agent_chat_running">运行中</string>
     <string name="agent_chat_failed">异常停止</string>
     <string name="agent_chat_closed">已停止</string>

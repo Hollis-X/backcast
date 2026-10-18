@@ -82,6 +82,28 @@ public class Message {
         return m;
     }
 
+    /** 换掉正文的浅拷贝，其余字段原样带上；用来清理旧工具输出而不改动原消息对象。 */
+    public Message withContent(String text) {
+        Message m = new Message(role, text);
+        m.toolCalls = toolCalls;
+        m.toolCallId = toolCallId;
+        m.reasoning = reasoning;
+        m.workDir = workDir;
+        m.displayParts = displayParts;
+        m.elapsedMs = elapsedMs;
+        m.thinkMs = thinkMs;
+        m.resumeAfterCompaction = resumeAfterCompaction;
+        m.goalFinalReply = goalFinalReply;
+        m.delegatedRequest = delegatedRequest;
+        m.agentTaskId = agentTaskId;
+        m.coordinationIds = coordinationIds;
+        m.delegationAuthorized = delegationAuthorized;
+        m.delegationForbidden = delegationForbidden;
+        m.taskPaths = taskPaths;
+        m.mcpSelection = mcpSelection;
+        return m;
+    }
+
     public static boolean isCoordination(String content) {
         return content != null && content.startsWith(COORDINATION_PREFIX);
     }

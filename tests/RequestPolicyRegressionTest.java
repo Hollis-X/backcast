@@ -1,6 +1,7 @@
 import android.os.SystemClock;
 import com.mkei.backcast.agent.AgentLoop;
 import com.mkei.backcast.agent.ApprovalGate;
+import com.mkei.backcast.agent.Compactor;
 import com.mkei.backcast.agent.Goal;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.agent.Message;
@@ -245,20 +246,30 @@ public final class RequestPolicyRegressionTest {
         }
         pass("reviewFailuresStopBeforeApprovalOrExecution");
     }
-    private static void contextOverflowStopsWithoutAutomaticRepairOrCompactionRetry() {
-        for (boolean compact : new boolean[]{false, true}) {
-            Fixture failed = new Fixture(reply("", "HTTP 400: context_length_exceeded"), reply("must not be requested", null));
-            failed.loop.setGoal("inspect fixture");
-            failed.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
-            if (compact) failed.loop.compactNow(7L, failed.loop.generation(), 1); else failed.run();
-            check(failed.calls == 1 && failed.errors.size() == 1 && !failed.phases.contains("retry")
-                            && Goal.ACTIVE.equals(failed.loop.goalStatus()) && !failed.loop.busy()
-                            && failed.loop.historySnapshot().get(1).content.equals("previous")
-                            && failed.records.diagnostics.size() == 1
-                            && failed.records.diagnostics.get(0).contains(compact ? ":compact:error:0:" : ":model:error:0:"),
-                    "Context error issued an automatic repair request or replaced the uncompressed window");
-        }
-        pass("contextOverflowStopsWithoutAutomaticRepairOrCompactionRetry");
+    private static void contextOverflowStopsModelAndShrinksCompaction() {
+        Fixture failed = new Fixture(reply("", "HTTP 400: context_length_exceeded"), reply("must not be requested", null));
+        failed.loop.setGoal("inspect fixture");
+        failed.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
+        failed.run();
+        check(failed.calls == 1 && failed.errors.size() == 1 && !failed.phases.contains("retry")
+                        && Goal.ACTIVE.equals(failed.loop.goalStatus()) && !failed.loop.busy()
+                        && failed.loop.historySnapshot().get(1).content.equals("previous")
+                        && failed.records.diagnostics.size() == 1
+                        && failed.records.diagnostics.get(0).contains(":model:error:0:"),
+                "Context error issued an automatic repair request or replaced the uncompressed window");
+        // 摘要请求超窗时缩小请求再发一次，新窗口仍保留完整历史里的用户要求。
+        Fixture shrunk = new Fixture(reply("", "HTTP 400: context_length_exceeded"), reply("shrunk checkpoint", null));
+        shrunk.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
+        shrunk.loop.compactNow(7L, shrunk.loop.generation(), 1);
+        List<Message> window = shrunk.loop.historySnapshot();
+        check(shrunk.calls == 2 && shrunk.errors.isEmpty() && !shrunk.loop.busy()
+                        && "previous".equals(window.get(1).content)
+                        && Compactor.isSummary(window.get(window.size() - 1))
+                        && window.get(window.size() - 1).content.contains("shrunk checkpoint")
+                        && shrunk.records.diagnostics.size() == 2
+                        && shrunk.records.diagnostics.get(0).contains(":compact:error:0:"),
+                "Compaction overflow was not retried with a smaller request");
+        pass("contextOverflowStopsModelAndShrinksCompaction");
     }
     private static void diagnosticStorageFailureDoesNotDiscardAResponse() {
         Fixture f = new Fixture(reply("verified answer", null)); f.records.failDiagnostics = true; f.run();
@@ -271,7 +282,7 @@ public final class RequestPolicyRegressionTest {
         permanentErrorsStopGoalsImmediately(); networkFailuresRetryAndRecover(); exhaustedRetriesStopOnce();
         streamedFailuresAndStopsAreNotRetried(); failedFollowupPreservesWorkUntilExplicitResume();
         compactionOutagesStopWithoutChangingTheWindow(); cancelledRequestsLeaveNoSuccessfulResult(); reviewRequestsHaveSeparateDiagnostics();
-        reviewFailuresStopBeforeApprovalOrExecution(); contextOverflowStopsWithoutAutomaticRepairOrCompactionRetry();
+        reviewFailuresStopBeforeApprovalOrExecution(); contextOverflowStopsModelAndShrinksCompaction();
         diagnosticStorageFailureDoesNotDiscardAResponse();
         System.out.println("Passed " + passed + " request policy regressions");
     }

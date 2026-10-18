@@ -46,7 +46,7 @@ public final class ChatStorePagingRegressionTest {
     }
 
     private static void fixtures(List<JavaFileObject> files) {
-        add(files, "android.content.Context", "public class Context { public Context getApplicationContext(){return this;} }");
+        add(files, "android.content.Context", "public class Context { public Context getApplicationContext(){return this;} public java.io.File getFilesDir(){return new java.io.File(System.getProperty(\"backcast.files.dir\"));} }");
         add(files, "android.content.ContentValues", "public class ContentValues extends java.util.HashMap<String,Object> {} ");
         add(files, "android.database.Cursor",
                 "public class Cursor { private final java.util.List<Object[]> rows; private int at=-1;"
@@ -126,15 +126,43 @@ public final class ChatStorePagingRegressionTest {
                 + "int maximum=limit==null?selected.size():Integer.parseInt(limit);List<Object[]> projected=new ArrayList<Object[]>();"
                 + "for(int i=0;i<Math.min(maximum,selected.size());i++){Object[] data=new Object[columns.length];"
                 + "for(int j=0;j<columns.length;j++)data[j]=selected.get(i).get(columns[j]);projected.add(data);}return new Cursor(projected);}"
-                + "public Cursor rawQuery(String sql,String[] args){if(sql.equals(\"SELECT MAX(id) FROM messages WHERE session_id=?\")){long maximum=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\")&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0]))maximum=Math.max(maximum,((Number)row.get(\"id\")).longValue());List<Object[]> out=new ArrayList<Object[]>();out.add(new Object[]{maximum});return new Cursor(out);}if(!sql.startsWith(\"SELECT COUNT(*) FROM messages\"))throw new AssertionError(sql);"
+                + "public Cursor rawQuery(String sql,String[] args){if(sql.startsWith(\"SELECT name FROM sqlite_master\"))return new Cursor(new ArrayList<Object[]>());if(sql.equals(\"SELECT MAX(id) FROM messages WHERE session_id=?\")){long maximum=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\")&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0]))maximum=Math.max(maximum,((Number)row.get(\"id\")).longValue());List<Object[]> out=new ArrayList<Object[]>();out.add(new Object[]{maximum});return new Cursor(out);}if(!sql.startsWith(\"SELECT COUNT(*) FROM messages\"))throw new AssertionError(sql);"
                 + "long count=0;for(Map<String,Object> row:rows)if(row.get(\"table\").equals(\"messages\")&&((Number)row.get(\"session_id\")).longValue()==Long.parseLong(args[0])"
                 + "&&((Number)row.get(\"id\")).longValue()<Long.parseLong(args[1]))count++;"
                 + "List<Object[]> result=new ArrayList<Object[]>();result.add(new Object[]{Long.valueOf(count)});return new Cursor(result);} }");
     }
 
+    private static Path filesDir;
     private static Object fresh() throws Exception {
         databaseType.getMethod("reset").invoke(null);
+        filesDir = Files.createTempDirectory("backcast-chat-files-");
+        System.setProperty("backcast.files.dir", filesDir.toString());
         return storeType.getConstructor(contextType).newInstance(contextType.getConstructor().newInstance());
+    }
+    /** 聊天记录在 .backcast/sessions/<id>/ 下的文件。 */
+    private static Path sessionFile(long sid, String name) { return filesDir.resolve(".backcast/sessions/" + sid + "/" + name); }
+    private static List<JSONObject> lines(long sid, String type) throws Exception {
+        List<JSONObject> out = new ArrayList<JSONObject>();
+        Path file = sessionFile(sid, "transcript.jsonl");
+        if (!Files.exists(file)) return out;
+        for (String line : Files.readAllLines(file, java.nio.charset.StandardCharsets.UTF_8)) {
+            if (line.isEmpty()) continue;
+            JSONObject json = new JSONObject(line);
+            if (type.equals(json.optString("type"))) out.add(json);
+        }
+        return out;
+    }
+    /** 直接改文件里某条消息的一个字段，模拟旧版本写下的记录或损坏的记录。 */
+    private static void rewriteMessage(long sid, long id, String key, Object value) throws Exception {
+        Path file = sessionFile(sid, "transcript.jsonl");
+        StringBuilder out = new StringBuilder();
+        for (String line : Files.readAllLines(file, java.nio.charset.StandardCharsets.UTF_8)) {
+            if (line.isEmpty()) continue;
+            JSONObject json = new JSONObject(line);
+            if ("message".equals(json.optString("type")) && json.getLong("id") == id) line = json.put(key, value).toString();
+            out.append(line).append('\n');
+        }
+        Files.write(file, out.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
     private static void append(Object store, long sid, Message message) throws Exception {
         storeType.getMethod("append", long.class, Message.class).invoke(store, sid, message);
@@ -235,7 +263,7 @@ public final class ChatStorePagingRegressionTest {
                 "Assistant page retry context lost the original user text, directory or selected MCP identity");
         check(request.content.equals(field(page, "disclosureBefore")), "Ordinary request lost its disclosure scope");
         check(messages(page).size() == 1 && Message.ASSISTANT.equals(messages(page).get(0).role)
-                && number(page, "firstId") == 5L && number(page, "earlierCount") == 3L,
+                && number(page, "firstId") == 4L && number(page, "earlierCount") == 3L,
                 "Complete retry context changed bounded page contents or cursor");
         append(store, 7L, Message.toolResult("pending", "tool result"));
         page = page(store, 7L, -1L, 1); context = (Message)field(page, "requestBefore");
@@ -256,8 +284,8 @@ public final class ChatStorePagingRegressionTest {
         for (String internal : Arrays.asList("⟦目标续跑⟧", "⟦目标续跑⟧\nContinue the existing goal")) {
             // Current append excludes internal USER rows; simulate a transcript saved by an older version.
             append(store, 7L, Message.user("legacy internal row"));
-            List<Map<String, Object>> saved = records("messages", 7L);
-            updateRecord(store, "messages", number(saved.get(saved.size() - 1), "id"), "content", internal);
+            List<JSONObject> saved = lines(7L, "message");
+            rewriteMessage(7L, saved.get(saved.size() - 1).getLong("id"), "content", internal);
             append(store, 7L, Message.assistant("continued answer", null));
             Object page = page(store, 7L, -1L, 1);
             Message retry = (Message)field(page, "requestBefore");
@@ -275,7 +303,7 @@ public final class ChatStorePagingRegressionTest {
                 && next.content.equals(field(page, "disclosureBefore")),
                 "New human request did not replace both independent page scopes");
         store = fresh(); append(store, 7L, Message.user("legacy internal row"));
-        updateRecord(store, "messages", number(records("messages", 7L).get(0), "id"), "content", "⟦目标续跑⟧");
+        rewriteMessage(7L, lines(7L, "message").get(0).getLong("id"), "content", "⟦目标续跑⟧");
         append(store, 7L, Message.assistant("no original human request", null));
         page = page(store, 7L, -1L, 1);
         check(field(page, "requestBefore") == null && "".equals(field(page, "disclosureBefore")),
@@ -289,15 +317,8 @@ public final class ChatStorePagingRegressionTest {
                 "Userless assistant page invented a retry request");
         store = fresh(); Message request = Message.user("Selected request"); request.mcpSelection = selection();
         append(store, 7L, request); append(store, 7L, Message.assistant("selected answer", null));
-        List<Map<String, Object>> rows = (List<Map<String, Object>>)databaseType.getMethod("records", String.class, long.class)
-                .invoke(null, "messages", 7L);
         // Update only the off-page original request; page decoding itself remains valid.
-        Class<?> valuesType = storeType.getClassLoader().loadClass("android.content.ContentValues");
-        Map<String, Object> values = (Map<String, Object>)valuesType.getDeclaredConstructor().newInstance();
-        values.put("mcp_selection", "broken selection metadata");
-        Object db = storeType.getMethod("getWritableDatabase").invoke(store);
-        databaseType.getMethod("update", String.class, valuesType, String.class, String[].class)
-                .invoke(db, "messages", values, "id=?", new String[]{String.valueOf(rows.get(0).get("id"))});
+        rewriteMessage(7L, lines(7L, "message").get(0).getLong("id"), "mcp_selection", "broken selection metadata");
         try { page(store, 7L, -1L, 1); throw new AssertionError("Corrupt off-page retry selection was silently discarded"); }
         catch (java.lang.reflect.InvocationTargetException rejected) {
             check(rejected.getCause() instanceof IllegalStateException, "Wrong prefix selection corruption failure");
@@ -351,7 +372,7 @@ public final class ChatStorePagingRegressionTest {
                 "Selection metadata leaked to assistant/tool or ordinary user messages");
         check(!assistant.toCheckpointJson().has("mcp_selection") && !tool.toCheckpointJson().has("mcp_selection"),
                 "Model checkpoints retained selection metadata on non-user messages");
-        String saved = (String) records("messages", 7L).get(0).get("mcp_selection");
+        String saved = lines(7L, "message").get(0).getJSONObject("mcp_selection").toString();
         check(!saved.contains("private-token") && !saved.contains("private.example")
                         && new JSONObject(saved).getString("connection_id").length() == 64,
                 "Selection storage exposed connection credentials rather than opaque identity");
@@ -364,19 +385,12 @@ public final class ChatStorePagingRegressionTest {
                 "Compacted context and later messages did not restore the selected tool exactly once");
     }
 
-    private static void updateRecord(Object store, String table, long id, String key, String value) throws Exception {
-        Class<?> valuesType = databaseType.getClassLoader().loadClass("android.content.ContentValues");
-        @SuppressWarnings("unchecked") Map<String, Object> values = (Map<String, Object>) valuesType.getConstructor().newInstance();
-        values.put(key, value);
-        Object db = storeType.getMethod("getWritableDatabase").invoke(store);
-        databaseType.getMethod("update", String.class, valuesType, String.class, String[].class)
-                .invoke(db, table, values, "id=?", new String[]{String.valueOf(id)});
-    }
-
     private static void corruptedMcpSelectionCannotSilentlyRestoreAnotherRequest() throws Exception {
         for (String bad : Arrays.asList("not-json", "{}", selection().toJson().put("mapped_name", "different_tool").toString())) {
             Object store = fresh(); Message selected = Message.user("Explicit tool request"); selected.mcpSelection = selection(); append(store, 7L, selected);
-            updateRecord(store, "messages", number(records("messages", 7L).get(0), "id"), "mcp_selection", bad);
+            Object value = bad;
+            try { value = new JSONObject(bad); } catch (Exception notJson) { }
+            rewriteMessage(7L, lines(7L, "message").get(0).getLong("id"), "mcp_selection", value);
             for (String method : Arrays.asList("messagePage", "contextMessages")) {
                 try {
                     if (method.equals("messagePage")) page(store, 7L, -1, 48);
@@ -391,7 +405,8 @@ public final class ChatStorePagingRegressionTest {
         Object store = fresh(); Message selected = Message.user("Checkpoint request"); selected.mcpSelection = selection(); append(store, 7L, selected);
         storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(selected));
         JSONObject broken = selected.toCheckpointJson().put("mcp_selection", new JSONObject());
-        updateRecord(store, "context_windows", number(records("context_windows", 7L).get(0), "id"), "window", new JSONArray().put(broken).toString());
+        JSONObject context = new JSONObject(new String(Files.readAllBytes(sessionFile(7L, "context.json")), "UTF-8"));
+        Files.write(sessionFile(7L, "context.json"), context.put("window", new JSONArray().put(broken)).toString().getBytes("UTF-8"));
         try {
             storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
             throw new AssertionError("Corrupted compacted selection silently restored");
@@ -412,7 +427,7 @@ public final class ChatStorePagingRegressionTest {
         Object store = fresh();
         Message request = Message.user("inspect project"); request.workDir = "/project";
         append(store, 7L, request); append(store, 7L, Message.assistant("before compact", null));
-        long boundary = number(records("messages", 7L).get(1), "id");
+        long boundary = lines(7L, "message").get(1).getLong("id");
         Message summary = Message.user(Compactor.wrap("only a private handoff"));
         storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
         storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
@@ -422,8 +437,8 @@ public final class ChatStorePagingRegressionTest {
         check(decorated.size() == 4 && Message.COMPACTION.equals(decorated.get(2).role)
                         && decorated.get(2).content.isEmpty() && "after compact".equals(decorated.get(3).content),
                 "Saved divider disappeared, duplicated at the same boundary, leaked its summary or moved to the transcript end");
-        check(records("messages", 7L).size() == 3 && records("compaction_events", 7L).size() == 1
-                        && number(records("compaction_events", 7L).get(0), "throughId") == boundary,
+        check(lines(7L, "message").size() == 3 && lines(7L, "compaction").size() == 1
+                        && lines(7L, "compaction").get(0).getLong("through") == boundary,
                 "Local event altered append-only model messages or lost its exact boundary");
         @SuppressWarnings("unchecked") List<Message> context = (List<Message>) storeType.getMethod("contextMessages", long.class).invoke(store, 7L);
         check(context.size() == 3 && Compactor.isSummary(context.get(1)) && "after compact".equals(context.get(2).content),
@@ -434,18 +449,18 @@ public final class ChatStorePagingRegressionTest {
         append(store, 8L, Message.user("other session"));
         storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 8L, Arrays.asList(summary));
         storeType.getMethod("delete", long.class).invoke(store, 7L);
-        check(records("compaction_events", 7L).isEmpty() && records("compaction_events", 8L).size() == 1,
+        check(!Files.exists(sessionFile(7L, "transcript.jsonl")) && lines(8L, "compaction").size() == 1,
                 "Deleting a conversation orphaned dividers or deleted another conversation's marker");
     }
 
     private static void compactionDividerPagingPreservesBoundariesAndRequestMetadata() throws Exception {
         Object store = fresh(); Message request = Message.user("selected task"); request.mcpSelection = selection();
         append(store, 7L, request); append(store, 7L, Message.assistant("first answer", null));
-        long firstBoundary = number(records("messages", 7L).get(1), "id");
+        long firstBoundary = lines(7L, "message").get(1).getLong("id");
         Message summary = Message.user(Compactor.wrap("handoff"));
         storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
         append(store, 7L, Message.assistant("second answer", null));
-        long secondBoundary = number(records("messages", 7L).get(2), "id");
+        long secondBoundary = lines(7L, "message").get(2).getLong("id");
         storeType.getMethod("replaceAll", long.class, List.class).invoke(store, 7L, Arrays.asList(request, summary));
         append(store, 7L, Message.assistant("third answer", null));
         Object latest = page(store, 7L, -1L, 1);
@@ -519,7 +534,7 @@ public final class ChatStorePagingRegressionTest {
         int drops = 0;
         for (String statement : sql) if (statement.startsWith("DROP TABLE IF EXISTS ")) drops++;
         check(drops == 10 && sql.get(0).startsWith("DROP TABLE IF EXISTS ") && sql.get(9).startsWith("DROP TABLE IF EXISTS ")
-                        && sql.get(10).startsWith("CREATE TABLE sessions"),
+                        && sql.get(10).startsWith("CREATE TABLE IF NOT EXISTS request_events"),
                 "Older schemas were migrated step by step instead of rebuilt");
         for (String statement : sql) check(!statement.startsWith("ALTER TABLE"), "Rebuild still patched an old table");
     }
@@ -567,10 +582,10 @@ public final class ChatStorePagingRegressionTest {
         saveRun(store, 7L, true, 0L, 0L, 0L);
         saved = run(store, 7L);
         check(Long.valueOf(0L).equals(field(saved, "turnElapsedMs"))
-                        && Long.valueOf(0L).equals(field(saved, "turnThinkMs")) && records("runs", 7L).size() == 1,
-                "A real zero checkpoint or zero first event became legacy/null or duplicated its row");
-        Map<String, Object> row = records("runs", 7L).get(0);
-        check(!row.containsKey("turn_at") && !row.containsKey("turn_wall") && !row.containsKey("seen_at"),
+                        && Long.valueOf(0L).equals(field(saved, "turnThinkMs")),
+                "A real zero checkpoint or zero first event became legacy/null");
+        JSONObject row = new JSONObject(new String(Files.readAllBytes(sessionFile(7L, "run.json")), "UTF-8"));
+        check(!row.has("turn_at") && !row.has("turn_wall") && !row.has("seen_at"),
                 "New runs persisted obsolete clock anchors");
         saveRun(store, 7L, false, -10L, -20L, -30L);
         saved = run(store, 7L);
@@ -597,7 +612,7 @@ public final class ChatStorePagingRegressionTest {
         Object stopped = run(store, 8L);
         check(number(stopped, "elapsedMs") == 6000L && number(stopped, "turnElapsedMs") == 2000L
                         && number(stopped, "turnThinkMs") == 300L && !(Boolean) field(stopped, "running")
-                        && records("runs", 9L).isEmpty() && records("runs", -1L).isEmpty(),
+                        && !Files.exists(sessionFile(9L, "run.json")) && !Files.exists(filesDir.resolve(".backcast/sessions/-1")),
                 "Heartbeat created a row, updated an idle session, or crossed its session boundary");
         saveRun(store, 7L, false, 18000L, 8000L, 0L);
         saveClock(store, 7L, 19000L, 9000L, null);
@@ -750,6 +765,7 @@ public final class ChatStorePagingRegressionTest {
             try (StandardJavaFileManager manager = compiler.getStandardFileManager(null, null, null)) {
                 for (JavaFileObject source : manager.getJavaFileObjects(Paths.get(args[0],
                         "app/src/main/java/com/mkei/backcast/ChatStore.java").toFile(), Paths.get(args[0],
+                        "app/src/main/java/com/mkei/backcast/SessionFiles.java").toFile(), Paths.get(args[0],
                         "app/src/main/java/com/mkei/backcast/agent/Goal.java").toFile(), Paths.get(args[0],
                         "app/src/main/java/com/mkei/backcast/agent/Diagnostics.java").toFile())) files.add(source);
                 check(compiler.getTask(null, manager, null, Arrays.asList("-encoding", "UTF-8", "-d", output.toString(),

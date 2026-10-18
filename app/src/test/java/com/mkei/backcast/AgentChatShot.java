@@ -149,6 +149,6 @@ public class AgentChatShot {
 
     /** 和 RunHub 用同一个目录：子代理记录直接写成 JSON 文件，打开页面时由 RunHub 读回来。 */
     private static JsonSubAgentStore childStore(long sid) {
-        return new JsonSubAgentStore(new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "sub-agents"), sid, null);
+        return new JsonSubAgentStore(new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), ".backcast/sub-agents"), sid, null);
     }
 }

@@ -92,6 +92,32 @@ public class PlanTimelineTest {
         assertTrue("edit row lacks the line counts: " + shown, chips);
     }
 
+    /** 新的用户消息开始新任务：计划版本从第 1 版重新数，上一个任务的卡片不算进来。 */
+    @Test
+    public void planVersionsRestartAfterEachUserMessage() throws Exception {
+        Context context = new android.view.ContextThemeWrapper(RuntimeEnvironment.getApplication(), R.style.AppTheme);
+        com.mkei.backcast.ui.M3.load(context);
+        LinearLayout page = new LinearLayout(context);
+        page.setOrientation(LinearLayout.VERTICAL);
+        PlanCard first = new PlanCard(context), second = new PlanCard(context), next = new PlanCard(context);
+        first.bind(plan("读代码", "in_progress"), false);
+        second.bind(plan("读代码", "completed"), false);
+        next.bind(plan("改知识库", "in_progress"), false);
+        page.addView(first); page.addView(second);
+        LinearLayout user = new LinearLayout(context);
+        user.setContentDescription("user");
+        page.addView(user);
+        LinearLayout block = new LinearLayout(context);
+        block.addView(next);
+        page.addView(block);
+        PlanCard.renumber(page);
+        assertTrue("older version of the first task is not history", first.isHistory());
+        assertFalse("last version of the first task became history", second.isHistory());
+        assertFalse("the new task's only plan was numbered after the old task", next.isHistory());
+        List<String> shown = texts(next);
+        for (String text : shown) assertFalse("new task plan shows a version label: " + shown, text.contains("第 2 版") || text.contains("第 3 版"));
+    }
+
     @Test
     public void cardShowsDoneSpinnerAndDashedPendingThenSettles() throws Exception {
         Context context = new android.view.ContextThemeWrapper(RuntimeEnvironment.getApplication(), R.style.AppTheme);

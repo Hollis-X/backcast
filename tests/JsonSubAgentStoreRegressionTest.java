@@ -23,6 +23,8 @@ public final class JsonSubAgentStoreRegressionTest {
         if(database!=null)invoke(database,"close",new Class<?>[0]);
         helperType.getField("shared").set(null,null);
         databaseType.getField("refuseInsertTable").set(null,null);
+        Path chats=files.resolve(".backcast");
+        if(Files.exists(chats))try(java.util.stream.Stream<Path> paths=Files.walk(chats)){for(Path path:(Iterable<Path>)paths.sorted(Comparator.reverseOrder())::iterator)Files.delete(path);}
         store=storeType.getConstructor(contextType).newInstance(contextType.getConstructor().newInstance());
         database=invoke(store,"getWritableDatabase",new Class<?>[0]);
         if(children!=null&&Files.exists(children))try(java.util.stream.Stream<Path> paths=Files.walk(children)){for(Path path:(Iterable<Path>)paths.sorted(Comparator.reverseOrder())::iterator)Files.delete(path);}
@@ -79,14 +81,25 @@ public final class JsonSubAgentStoreRegressionTest {
         boolean blocked=false;try{save(late,record("agent_fixture",9,SubAgentManager.RUNNING));}catch(IllegalStateException expected){blocked=true;}
         check(blocked&&load(other).size()==1,"Deletion revived its session or removed a sibling session");
     }
-    private static void draftAdoptionMovesRecordsAndTombstonesOldOwner()throws Exception{
+    private static void draftAdoptionMovesRecordsAndDeletesDraft()throws Exception{
         fresh();Object draft=child(-1);save(draft,record("agent_fixture",3,SubAgentManager.IDLE));
         Field owner=childType.getDeclaredField("owner");owner.setAccessible(true);String old=(String)owner.get(draft);
         invoke(draft,"bindSession",new Class<?>[]{long.class},7L);
         check(load(child(7)).size()==1,"Adoption lost child records");
-        Object late=child(-1);owner.set(late,old);
-        boolean blocked=false;try{save(late,record("agent_fixture",9,SubAgentManager.RUNNING));}catch(IllegalStateException expected){blocked=true;}
-        check(blocked,"Late draft write recreated the adopted owner");
+        check(!Files.exists(children.resolve(old)),"Adopted draft directory was left behind");
+        SubAgentManager.Record next=record("agent_fixture",9,SubAgentManager.RUNNING);save(draft,next);
+        check(load(child(7)).get(0).revision==9&&!Files.exists(children.resolve(old)),"Adopted store kept writing to the draft owner");
+    }
+    /** 没派过子代理的会话不留空目录：草稿落库、删会话都不能在根目录里建墓碑。 */
+    private static void sessionsWithoutChildrenLeaveNoDirectories()throws Exception{
+        fresh();
+        for(long sid=1;sid<=3;sid++){Object draft=child(-1);invoke(draft,"bindSession",new Class<?>[]{long.class},sid);}
+        callStatic("removeOwner",new Class<?>[]{File.class,long.class},children.toFile(),42L);
+        Object dropped=child(5);invoke(dropped,"remove",new Class<?>[0]);
+        String[] left=children.toFile().list();
+        check(left==null||left.length==0,"Sessions without children left directories: "+Arrays.toString(left));
+        boolean blocked=false;try{save(dropped,record("agent_fixture",3,SubAgentManager.IDLE));}catch(IllegalStateException expected){blocked=true;}
+        check(blocked&&!Files.exists(children.resolve("session-5")),"A removed store without a directory accepted a late save");
     }
     @SuppressWarnings("unchecked") private static void recoveryIndexRequiresDurableRootPermission()throws Exception{
         fresh();Object child=child(7);SubAgentManager.Record root=record("main",3,SubAgentManager.IDLE),pending=record("agent_fixture",4,SubAgentManager.QUEUED);
@@ -117,12 +130,63 @@ public final class JsonSubAgentStoreRegressionTest {
     @SuppressWarnings("unchecked") private static void rejectedTranscriptInsertCannotConfirmChildEvent()throws Exception{
         fresh();Message event=Message.user(Message.COORDINATION_PREFIX+"Inspect child data.\n"
                 +new JSONObject().put("messages",new JSONArray().put(new JSONObject().put("id","mail-stable"))));
-        databaseType.getField("refuseInsertTable").set(null,"messages");boolean failed=false;
-        try{invoke(store,"append",new Class<?>[]{long.class,Message.class},7L,event);}catch(IllegalStateException expected){failed=true;}
-        check(failed&&((List<Message>)invoke(store,"contextMessages",new Class<?>[]{long.class},7L)).isEmpty(),"Rejected message write appeared durable");
-        databaseType.getField("refuseInsertTable").set(null,"context_windows");failed=false;
-        try{invoke(store,"replaceAll",new Class<?>[]{long.class,List.class},7L,Arrays.asList(event));}catch(IllegalStateException expected){failed=true;}
-        check(failed&&((List<Message>)invoke(store,"contextMessages",new Class<?>[]{long.class},7L)).isEmpty(),"Rejected checkpoint write appeared durable");
+        // 聊天记录在文件里：会话目录不可写就是写入被拒绝。
+        invoke(store,"sessions",new Class<?>[0]);
+        File session=files.resolve(".backcast/sessions/7").toFile();check(session.mkdirs()&&session.setWritable(false),"Cannot make session directory read-only");
+        boolean failed=false;
+        try{
+            try{invoke(store,"append",new Class<?>[]{long.class,Message.class},7L,event);}catch(IllegalStateException expected){failed=true;}
+            check(failed&&((List<Message>)invoke(store,"contextMessages",new Class<?>[]{long.class},7L)).isEmpty(),"Rejected message write appeared durable");
+            failed=false;
+            try{invoke(store,"replaceAll",new Class<?>[]{long.class,List.class},7L,Arrays.asList(event));}catch(IllegalStateException expected){failed=true;}
+            check(failed&&((List<Message>)invoke(store,"contextMessages",new Class<?>[]{long.class},7L)).isEmpty(),"Rejected checkpoint write appeared durable");
+        }finally{session.setWritable(true);}
+    }
+    private static String describe(List<Message> list){StringBuilder out=new StringBuilder();for(Message m:list)out.append(m.role).append('|').append(m.content).append('|').append(m.workDir).append('|').append(m.toolCalls).append('|').append(m.elapsedMs).append('|').append(m.toolCallId).append(";");return out.toString();}
+    /** 旧版本把聊天记录存在 backcast.db：第一次打开时整批搬进 .backcast/，搬完删掉旧表，编号和内容不变。 */
+    @SuppressWarnings("unchecked") private static void legacyDatabaseMovesIntoSessionFiles()throws Exception{
+        fresh();
+        Class<?>[] sql=new Class<?>[]{String.class};
+        invoke(database,"execSQL",sql,"CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,updated_at INTEGER NOT NULL)");
+        invoke(database,"execSQL",sql,"CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER NOT NULL,role TEXT NOT NULL,content TEXT,reasoning TEXT,tool_calls TEXT,tool_call_id TEXT,elapsed_ms INTEGER DEFAULT 0,think_ms INTEGER DEFAULT 0,display_parts TEXT,work_dir TEXT,mcp_selection TEXT NOT NULL DEFAULT '')");
+        invoke(database,"execSQL",sql,"CREATE TABLE runs (session_id INTEGER PRIMARY KEY,running INTEGER NOT NULL DEFAULT 0,goal TEXT,status TEXT,elapsed_ms INTEGER NOT NULL DEFAULT 0,turn_at INTEGER NOT NULL DEFAULT 0,turn_wall INTEGER NOT NULL DEFAULT 0,seen_at INTEGER NOT NULL DEFAULT 0,turn_elapsed_ms INTEGER,turn_think_ms INTEGER,tokens_used INTEGER NOT NULL DEFAULT 0,token_budget INTEGER NOT NULL DEFAULT 0,budget_wrap_finished INTEGER)");
+        invoke(database,"execSQL",sql,"CREATE TABLE context_windows (session_id INTEGER PRIMARY KEY,through_id INTEGER NOT NULL,window TEXT NOT NULL)");
+        invoke(database,"execSQL",sql,"CREATE TABLE compaction_events (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER NOT NULL,through_id INTEGER NOT NULL,UNIQUE(session_id,through_id))");
+        invoke(database,"execSQL",sql,"CREATE TABLE reasoning_notes (cache_key TEXT PRIMARY KEY,summary TEXT NOT NULL)");
+        invoke(database,"execSQL",sql,"INSERT INTO sessions(id,title,updated_at) VALUES (3,'旧会话',1000),(5,'较新的会话',2000),(9,'已删除',3000)");
+        invoke(database,"execSQL",sql,"DELETE FROM sessions WHERE id=9");
+        invoke(database,"execSQL",sql,"INSERT INTO messages(id,session_id,role,content,work_dir) VALUES (10,3,'user','第一个问题','/proj'),(11,5,'user','别的会话',NULL),(12,3,'assistant','回答',NULL)");
+        invoke(database,"execSQL",sql,"INSERT INTO messages(id,session_id,role,content,tool_calls,elapsed_ms) VALUES (14,3,'assistant','','[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]',900)");
+        invoke(database,"execSQL",sql,"INSERT INTO messages(id,session_id,role,content,tool_call_id) VALUES (15,3,'tool','文件内容','c1')");
+        invoke(database,"execSQL",sql,"INSERT INTO context_windows VALUES (3,12,'"+new JSONArray().put(Message.assistant("压缩后的摘要",null).toCheckpointJson()).toString().replace("'","''")+"')");
+        invoke(database,"execSQL",sql,"INSERT INTO compaction_events(session_id,through_id) VALUES (3,12)");
+        invoke(database,"execSQL",sql,"INSERT INTO runs(session_id,running,goal,status,elapsed_ms,turn_elapsed_ms,tokens_used,token_budget) VALUES (3,1,'把测试跑通','进行中',4000,1500,42,200)");
+        invoke(database,"execSQL",sql,"INSERT INTO reasoning_notes VALUES ('k1','旧摘要')");
+        List<Object> sessions=(List<Object>)invoke(store,"sessions",new Class<?>[0]);
+        check(sessions.size()==2&&sessions.get(0).getClass().getField("id").getLong(sessions.get(0))==5
+                &&sessions.get(1).getClass().getField("id").getLong(sessions.get(1))==3,"Sessions were not moved in recency order: "+sessions.size());
+        check("旧会话".equals(invoke(store,"title",new Class<?>[]{long.class},3L)),"Session title was lost");
+        Object page=invoke(store,"messagePage",new Class<?>[]{long.class,long.class,int.class},3L,-1L,50);
+        List<Message> shown=(List<Message>)page.getClass().getField("messages").get(page);
+        check(shown.size()==5&&"第一个问题".equals(shown.get(0).content)&&"/proj".equals(shown.get(0).workDir)
+                &&"compaction".equals(shown.get(2).role)
+                &&shown.get(3).toolCalls!=null&&shown.get(3).toolCalls.length()==1&&shown.get(3).elapsedMs==900
+                &&"c1".equals(shown.get(4).toolCallId),"Moved messages lost fields: "+describe(shown));
+        List<Message> context=(List<Message>)invoke(store,"contextMessages",new Class<?>[]{long.class},3L);
+        check(context.size()==3&&"压缩后的摘要".equals(context.get(0).content)&&"c1".equals(context.get(2).toolCallId),"Context window did not resume after the compaction point");
+        Object run=invoke(store,"readRun",new Class<?>[]{long.class},3L);
+        check(run!=null&&run.getClass().getField("running").getBoolean(run)&&"把测试跑通".equals(run.getClass().getField("goal").get(run))
+                &&run.getClass().getField("tokensUsed").getLong(run)==42,"Goal run state was lost");
+        check("旧摘要".equals(invoke(store,"reasoningNote",new Class<?>[]{String.class},"k1")),"Reasoning notes were lost");
+        check((Long)invoke(store,"create",new Class<?>[]{String.class},"新会话")==10L,"A deleted session number was reused");
+        Message next=Message.user("接着问");invoke(store,"append",new Class<?>[]{long.class,Message.class},3L,next);
+        List<Message> after=(List<Message>)invoke(store,"contextMessages",new Class<?>[]{long.class},3L);
+        check(after.size()==4&&"接着问".equals(after.get(3).content),"New message after migration was not appended");
+        Object tables=invoke(database,"rawQuery",new Class<?>[]{String.class,String[].class},"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','messages','runs','context_windows','reasoning_notes','compaction_events')",null);
+        check(!(Boolean)invoke(tables,"moveToFirst",new Class<?>[0]),"Old chat tables were kept in the database");
+        check(Files.exists(files.resolve(".backcast/db-migrated"))&&!Files.exists(files.resolve(".backcast/sessions.importing")),"Migration marker or staging directory is wrong");
+        Object reopened=storeType.getConstructor(contextType).newInstance(contextType.getConstructor().newInstance());
+        check(((List<Object>)invoke(reopened,"sessions",new Class<?>[0])).size()==3,"Reopening the store migrated again or lost sessions");
     }
     @SuppressWarnings("unchecked") private static void explicitChildRestartIndexRequiresPendingAuthorizedTask()throws Exception{
         fresh();Object child=child(7);
@@ -152,7 +216,7 @@ public final class JsonSubAgentStoreRegressionTest {
                 "A progress-only save rewrote the history files");
         check(new JSONObject(new String(Files.readAllBytes(meta),"UTF-8")).getString("progress").equals("reading"),"Progress was not saved");
         JSONArray next=new JSONArray(record.history.toString());next.put(Message.assistant("more",null).toCheckpointJson());
-        record.history=next;record.revision++;save(child,record);
+        record.history=next;record.historyRevision++;record.revision++;save(child,record);
         check(new JSONArray(new String(Files.readAllBytes(history),"UTF-8")).length()==3,"Replaced history was not written");
     }
     private static void largeHistoryRoundTrips()throws Exception{
@@ -179,17 +243,18 @@ public final class JsonSubAgentStoreRegressionTest {
     }
     public static void main(String[] args)throws Exception{
         project=Paths.get(args[0]);output=Files.createTempDirectory("backcast-json-children-");files=output.resolve("files");Files.createDirectories(files);
+        System.setProperty("backcast.files.dir",files.toString());
         System.setProperty("backcast.sqlite.bridge",project.resolve("tests/support/sqlite/sqlite_bridge.py").toString());
         List<File> sources=new ArrayList<File>();
         try(java.util.stream.Stream<Path> paths=Files.walk(project.resolve("tests/support/sqlite"))){paths.filter(p->p.toString().endsWith(".java")).forEach(p->sources.add(p.toFile()));}
-        sources.add(project.resolve("app/src/main/java/com/mkei/backcast/ChatStore.java").toFile());sources.add(project.resolve("app/src/main/java/com/mkei/backcast/JsonSubAgentStore.java").toFile());
+        sources.add(project.resolve("app/src/main/java/com/mkei/backcast/ChatStore.java").toFile());sources.add(project.resolve("app/src/main/java/com/mkei/backcast/SessionFiles.java").toFile());sources.add(project.resolve("app/src/main/java/com/mkei/backcast/JsonSubAgentStore.java").toFile());
         JavaCompiler compiler=ToolProvider.getSystemJavaCompiler();
         try(StandardJavaFileManager manager=compiler.getStandardFileManager(null,null,null)){
             check(compiler.getTask(null,manager,null,Arrays.asList("-proc:none","-encoding","UTF-8","-source","8","-target","8","-Xlint:-options","-classpath",System.getProperty("java.class.path"),"-d",output.toString()),null,manager.getJavaFileObjectsFromFiles(sources)).call(),"Child store fixture compilation failed");
         }
         try(URLClassLoader loader=new URLClassLoader(new URL[]{output.toUri().toURL()},JsonSubAgentStoreRegressionTest.class.getClassLoader())){
             contextType=loader.loadClass("android.content.Context");storeType=loader.loadClass("com.mkei.backcast.ChatStore");childType=loader.loadClass("com.mkei.backcast.JsonSubAgentStore");databaseType=loader.loadClass("android.database.sqlite.SQLiteDatabase");helperType=loader.loadClass("android.database.sqlite.SQLiteOpenHelper");
-            for(String name:Arrays.asList("roundTripKeepsStatusesHistoryMailResultsAndAck","staleAndEqualRevisionsCannotOverwriteNewState","parentSessionsStayIsolatedAndDeleteBlocksLateWriters","draftAdoptionMovesRecordsAndTombstonesOldOwner","recoveryIndexRequiresDurableRootPermission","coordinationEventsSurviveTranscriptAndContextRecovery","rejectedTranscriptInsertCannotConfirmChildEvent","explicitChildRestartIndexRequiresPendingAuthorizedTask","progressSavesDoNotRewriteHistory","largeHistoryRoundTrips","corruptRecordFailsLoudlyAndIsKept","unwritableDirectoryFailsWithoutReplacingState")){
+            for(String name:Arrays.asList("roundTripKeepsStatusesHistoryMailResultsAndAck","staleAndEqualRevisionsCannotOverwriteNewState","parentSessionsStayIsolatedAndDeleteBlocksLateWriters","draftAdoptionMovesRecordsAndDeletesDraft","sessionsWithoutChildrenLeaveNoDirectories","recoveryIndexRequiresDurableRootPermission","coordinationEventsSurviveTranscriptAndContextRecovery","rejectedTranscriptInsertCannotConfirmChildEvent","legacyDatabaseMovesIntoSessionFiles","explicitChildRestartIndexRequiresPendingAuthorizedTask","progressSavesDoNotRewriteHistory","largeHistoryRoundTrips","corruptRecordFailsLoudlyAndIsKept","unwritableDirectoryFailsWithoutReplacingState")){
                 try{JsonSubAgentStoreRegressionTest.class.getDeclaredMethod(name).invoke(null);}catch(InvocationTargetException failure){throw new AssertionError(name,failure.getCause());}
                 passed++;System.out.println("PASS "+name);
             }

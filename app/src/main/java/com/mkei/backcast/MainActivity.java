@@ -60,6 +60,7 @@ import com.mkei.backcast.ui.SlashInput;
 import com.mkei.backcast.ui.SlashMenuPopup;
 import com.mkei.backcast.ui.McpToolPicker;
 import com.mkei.backcast.mcp.McpSelection;
+import com.mkei.backcast.ui.Skeleton;
 import com.mkei.backcast.ui.SweepText;
 import com.mkei.backcast.ui.TranscriptScrollView;
 import com.mkei.backcast.ui.TurnTrace;
@@ -165,6 +166,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private boolean sessionOpening;
     private boolean initialHistoryLoading;
     private boolean earlierLoading;
+    /** 打开会话或子代理页、历史还没画出来时对话区的骨架；第一页画好、读失败或换会话时摘掉。 */
+    private View historySkeleton;
     private boolean historyInserting;
     private long earlierBeforeId;
     private TextView earlierRow;
@@ -893,14 +896,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             res = R.string.access_strict;
         }
         accessChip.setText(res);
-        // 完全访问下工具会直接执行、不再拦：不画底色和边框，只把文字和左侧警示三角染成 warning 黄；
-        // 另外两档有拦截，仍用 secondaryContainer 色调芯片。
+        // 三档都和模型芯片一样不画底色和边框。完全访问下工具会直接执行、不再拦，
+        // 只把文字和左侧警示三角染成 warning 黄；另外两档有拦截，用和模型芯片相同的 onSurfaceVariant。
         boolean full = ApprovalGate.ACCESS_FULL.equals(level);
-        accessChip.setTextColor(full ? M3.warning : M3.onSecondaryContainer);
-        accessChip.setBackgroundResource(full ? R.drawable.bg_chip_warning : R.drawable.bg_chip_tonal);
+        accessChip.setTextColor(full ? M3.warning : M3.onSurfaceVariant);
+        accessChip.setBackgroundResource(full ? R.drawable.bg_chip_warning : R.drawable.bg_chip_plain);
         accessChip.setCompoundDrawablesRelativeWithIntrinsicBounds(full ? R.drawable.ic_warning : 0, 0, 0, 0);
         accessChip.setCompoundDrawablePadding(dp(6));
-        accessChip.setPadding(dp(full ? 8 : 12), 0, dp(full ? 8 : 12), 0);
+        accessChip.setPadding(dp(10), 0, dp(10), 0);
     }
 
     /** 权限选择：三档，改完立刻保存。 */
@@ -2132,6 +2135,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         }
         prompt.setHint(R.string.agent_chat_hint);
         sessionTitle.setText(R.string.history_loading);
+        showHistorySkeleton();
         if (sessionSub != null) sessionSub.setText("");
         send.setEnabled(true);
         stop.setEnabled(true);
@@ -2147,8 +2151,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     /** 子代理页最多画最后这么多条消息，从一条用户消息开始截；再早的不进页面，避免长任务一次画几千个视图。 */
     private static final int CHILD_TAIL = 240;
     /** 只在后台读线程里用：上次解析过的历史版本戳和解析结果；戳没变就不再取、不再解析历史。 */
-    private int childParsedStamp;
+    private long childParsedStamp = -1L;
     private List<Message> childParsedMessages = new ArrayList<Message>();
+    /** 上次解析时截掉、没进页面的更早消息条数（系统消息不算）。 */
+    private int childParsedHidden;
 
     /** 读出子代理的历史，有变化才整页重画；还在跑就每秒再看一次。 */
     private void loadChild() {
@@ -2163,15 +2169,17 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 try {
                     SubAgentManager manager = childManager();
                     // 检查点历史整份替换：版本戳没变就说明没有新消息，只取状态，直接用上次解析的结果。
-                    int stamp = manager == null ? 0 : manager.historyStamp(childId);
-                    boolean changed = stamp != childParsedStamp || childParsedMessages.isEmpty();
+                    long stamp = manager == null ? 0L : manager.historyStamp(childId);
+                    boolean changed = stamp != childParsedStamp;
                     record = manager == null ? null : manager.find(childId, changed);
                     if (record != null) comms = manager.communications(childId);
                     asleep = record != null && manager.dormant(childId);
                     if (record != null && changed) {
-                        messages = childTail(record.history);
+                        int[] hidden = new int[1];
+                        messages = childTail(record.history, hidden);
                         childParsedStamp = stamp;
                         childParsedMessages = messages;
+                        childParsedHidden = hidden[0];
                     }
                 } catch (Exception error) {
                     recordUiFailure(childRoot, "ui:agent_chat", error);
@@ -2179,6 +2187,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 final SubAgentManager.Record row = record;
                 final boolean dormant = asleep;
                 final List<Message> page = messages;
+                final int earlier = childParsedHidden;
                 final org.json.JSONArray log = comms;
                 ui(new Runnable() {
                     @Override public void run() {
@@ -2187,13 +2196,14 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                             // 会话还在恢复、一次读失败时不要就此停住：先显示加载中继续重试，连续几次都读不到才说不存在。
                             childMissing++;
                             sessionTitle.setText(childMissing >= 5 ? R.string.agent_chat_missing : R.string.history_loading);
+                            if (childMissing >= 5) dropHistorySkeleton();
                             send.setEnabled(false);
                             if (slashResumed) stream.postDelayed(childPoll, 800L);
                             return;
                         }
                         childMissing = 0;
                         childDormant = dormant;
-                        showChild(row, page, log);
+                        showChild(row, page, log, earlier);
                         // 运行中每秒刷新；空闲时也慢慢看，别的代理发来消息、对方读到的回执都能跟上。
                         if (slashResumed) stream.postDelayed(childPoll, childBusy ? 1000L : 3000L);
                     }
@@ -2202,13 +2212,16 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         });
     }
 
-    /** 解析子代理历史的末尾一段：隐藏系统消息，派活和转来的消息只显示原话。 */
-    private static List<Message> childTail(org.json.JSONArray history) throws Exception {
+    /** 解析子代理历史的末尾一段：隐藏系统消息，派活和转来的消息只显示原话。hidden[0] 填截掉的更早消息条数。 */
+    private static List<Message> childTail(org.json.JSONArray history, int[] hidden) throws Exception {
         int start = Math.max(0, history.length() - CHILD_TAIL);
         // 截断点往后挪到一条用户消息上，工具结果不会和它的调用分开。
         for (int i = start; start > 0 && i < history.length(); i++) {
             if (Message.USER.equals(history.getJSONObject(i).optString("role"))) { start = i; break; }
         }
+        hidden[0] = 0;
+        for (int i = 0; i < start; i++)
+            if (!Message.SYSTEM.equals(history.getJSONObject(i).optString("role"))) hidden[0]++;
         List<Message> messages = new ArrayList<Message>();
         for (int i = start; i < history.length(); i++) {
             Message m = Message.fromCheckpointJson(history.getJSONObject(i));
@@ -2219,13 +2232,23 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         return messages;
     }
 
+    private TextView earlierNote(int count) {
+        TextView note = new TextView(this);
+        note.setText(getString(R.string.agent_chat_earlier_hidden, Integer.valueOf(count)));
+        note.setTextSize(12);
+        note.setTextColor(M3.onSurfaceVariant);
+        note.setGravity(Gravity.CENTER);
+        note.setPadding(0, dp(8), 0, dp(12));
+        return note;
+    }
+
     /** 正在画的那一页还没画完时，新到的快照先存着，画完再画最新的一份；不再打断重来。 */
     private boolean childRendering;
     private int childRenderToken;
     private int childMissing;
     private Object[] childPending;
 
-    private void showChild(SubAgentManager.Record row, List<Message> messages, org.json.JSONArray comms) {
+    private void showChild(SubAgentManager.Record row, List<Message> messages, org.json.JSONArray comms, final int earlier) {
         childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status) && !childDormant;
         childRetryTask = SubAgentManager.FAILED.equals(row.status) && !"cancelled".equals(row.phase)
                 && row.task != null && row.task.trim().length() > 0 ? row.task : null;
@@ -2238,11 +2261,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         // 签名只看会改变页面内容的东西：历史（同一份解析结果）、状态和通信记录。
         // 不看 revision：子代理每次报阶段都会加它，按它重画会让长历史永远画不完，页面一直空白。
         String signature = row.id + ":" + System.identityHashCode(messages) + ":" + messages.size() + ":" + row.status
-                + ":" + row.error + ":" + comms.toString().hashCode();
+                + ":" + row.error + ":" + earlier + ":" + comms.toString().hashCode();
         if (signature.equals(childRendered)) return;
         // 别处换了页（historyToken 变了）时那一页不会再回调，不能一直当它还在画。
         if (childRendering && childRenderToken == historyToken) {
-            childPending = new Object[] { row, messages, comms };
+            childPending = new Object[] { row, messages, comms, Integer.valueOf(earlier) };
             return;
         }
         childRendered = signature;
@@ -2263,7 +2286,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 childRendering = false;
                 if (token != historyToken) return;
                 releaseLiveViews();
+                dropHistorySkeleton();
                 stream.removeAllViews();
+                // 页面只画最后一段：顶上写明更早的还有多少条，免得以为记录丢了。
+                if (earlier > 0) block.addView(earlierNote(earlier), 0, fullWidth());
                 stream.addView(block, fullWidth());
                 if (stream != null && !childBusy) PlanCard.settleAll(stream);
                 PlanCard latestPlan = childBusy ? PlanCard.latest(stream) : null;
@@ -2273,7 +2299,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 updateLatestButton();
                 Object[] next = childPending;
                 childPending = null;
-                if (next != null) showChild((SubAgentManager.Record) next[0], (List<Message>) next[1], (org.json.JSONArray) next[2]);
+                if (next != null) showChild((SubAgentManager.Record) next[0], (List<Message>) next[1], (org.json.JSONArray) next[2],
+                        ((Integer) next[3]).intValue());
             }
         }, false);
     }
@@ -2568,7 +2595,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     }
 
     /**
-     * 发送键：M3 填充图标按钮（40dp、12dp 圆角）。有字是 primary，没字是禁用态 onSurface 12% / 38%。
+     * 发送键：M3 填充图标按钮（40dp 圆形，和输入条圆角同心）。有字是 primary，没字是禁用态 onSurface 12% / 38%。
      * 没字、上一轮因网络或服务错误中断时换成 primary 的三角（继续），点一下接着跑，不用再发「继续」。
      */
     private void tintSend(boolean active) {
@@ -2591,7 +2618,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         kick(loop);
     }
 
-    /** 停止：同一个填充图标按钮，primary 底上一个 onPrimary 圆角小方块。 */
+    /** 停止：同一个圆形填充图标按钮，primary 底上一个 onPrimary 圆角小方块。 */
     private void paintStop() {
         if (stop == null) {
             return;
@@ -2602,9 +2629,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         square.setColor(M3.onPrimary);
         int inset = dp(13);
         LayerDrawable layer = new LayerDrawable(new Drawable[]{
-                M3.fill(M3.primary, dp(M3.M)), new InsetDrawable(square, inset, inset, inset, inset)});
+                M3.fill(M3.primary, -1), new InsetDrawable(square, inset, inset, inset, inset)});
         stop.setText("");
-        stop.setBackgroundDrawable(M3.ripple(layer, M3.onPrimary, dp(M3.M)));
+        stop.setBackgroundDrawable(M3.ripple(layer, M3.onPrimary, -1));
     }
 
     private void paintRound(Button button, int fill, int glyph, int kind, int inset) {
@@ -2615,9 +2642,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         int side = Math.max(dp(12), dp(40) - inset * 2);
         Drawable icon = Icons.tinted(this, kind, glyph, side);
         LayerDrawable layer = new LayerDrawable(new Drawable[]{
-                M3.fill(fill, dp(M3.M)), new InsetDrawable(icon, inset, inset, inset, inset)});
+                M3.fill(fill, -1), new InsetDrawable(icon, inset, inset, inset, inset)});
         button.setText("");
-        button.setBackgroundDrawable(M3.ripple(layer, M3.onPrimary, dp(M3.M)));
+        button.setBackgroundDrawable(M3.ripple(layer, M3.onPrimary, -1));
     }
 
     /** M3 标准图标按钮：24dp 图标居中，按下出现圆形状态层。 */
@@ -2685,6 +2712,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         send.setEnabled(false);
         stop.setEnabled(false);
         sessionTitle.setText(R.string.history_loading);
+        showHistorySkeleton();
         if (goalBar != null) goalBar.setVisibility(View.GONE);
         if (closeDrawer) {
             hideDrawer();
@@ -2734,6 +2762,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                                                 if (token != historyToken || loop != source || isFinishing()) return;
                                                 sessionOpening = false;
                                                 initialHistoryLoading = false;
+                                                dropHistorySkeleton();
                                                 hub.bind(id, listener);
                                                 historyEvents.clear();
                                                 Toast.makeText(MainActivity.this, R.string.history_load_failed, Toast.LENGTH_SHORT).show();
@@ -2753,6 +2782,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                         @Override public void run() {
                             if (token != historyToken || id != sessionId || isFinishing()) return;
                             sessionOpening = false;
+                            dropHistorySkeleton();
                             Toast.makeText(MainActivity.this, R.string.history_load_failed, Toast.LENGTH_SHORT).show();
                             send.setEnabled(true);
                             stop.setEnabled(true);
@@ -4891,6 +4921,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         initialHistoryLoading = false;
         sessionOpening = false;
         earlierLoading = false;
+        dropHistorySkeleton();
         historyInserting = false;
         historyEvents.clear();
         historySequence = -1;
@@ -4916,6 +4947,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         block.setContentDescription("block");
         renderPage(page, block, token, new Runnable() {
             @Override public void run() {
+                dropHistorySkeleton();
                 stream.addView(block, fullWidth());
                 if (loop != null && (loop.busy() || !historyEvents.isEmpty())) {
                     if (!adoptRunningTurn()) beginWorkRow();
@@ -5042,7 +5074,19 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 loadEarlierPage(row);
             }
         });
-        stream.addView(row, fullWidth());
+        // 第一页还在画时骨架占着对话区，「更早的消息」放在骨架上面，画完后位置不变。
+        stream.addView(row, historySkeleton == null ? -1 : stream.indexOfChild(historySkeleton), fullWidth());
+    }
+
+    private void showHistorySkeleton() {
+        dropHistorySkeleton();
+        historySkeleton = Skeleton.chat(this);
+        stream.addView(historySkeleton, fullWidth());
+    }
+
+    private void dropHistorySkeleton() {
+        Skeleton.remove(historySkeleton);
+        historySkeleton = null;
     }
 
     private void loadEarlierPage(final TextView row) {

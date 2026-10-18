@@ -18,6 +18,7 @@ import com.mkei.backcast.tool.ToolBatchProbe;
 import com.mkei.backcast.tool.ToolkitOperationManager;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.M3;
+import com.mkei.backcast.ui.Skeleton;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.json.JSONArray;
@@ -56,6 +57,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
     private Button install, remove, probe, cancel;
     private JSONObject selected = new JSONObject();
     private JSONObject bundle = new JSONObject();
+    /** 第一次读到工具配置之前，包状态、工具列表和详情处先画骨架；读到或读失败后摘掉。 */
+    private View statusSkeleton, listSkeleton, detailSkeleton;
+    private boolean inventoryRequested;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -126,6 +130,35 @@ public final class ToolConfigActivity extends AppCompatActivity {
             findViewById(R.id.tool_detail_content).setVisibility(View.VISIBLE);
             detailName.setText(ToolCatalog.get(toolId).name);
         }
+        showSkeletons();
+    }
+
+    private void showSkeletons() {
+        LinearLayout statusParent = (LinearLayout) packageStatus.getParent();
+        statusSkeleton = Skeleton.lines(this, 0.34f, 0.72f);
+        statusSkeleton.setPadding(0, dp(4), 0, dp(4));
+        statusParent.addView(statusSkeleton, statusParent.indexOfChild(packageStatus) + 1,
+                new LinearLayout.LayoutParams(-1, -2));
+        packageStatus.setVisibility(View.GONE);
+        if (toolId.length() > 0) {
+            LinearLayout detailParent = (LinearLayout) detailInfo.getParent();
+            detailSkeleton = Skeleton.lines(this, 0.22f, 0.2f, 0.36f, 0.2f, 0.9f, 0.2f, 0.82f, 0.6f);
+            detailParent.addView(detailSkeleton, detailParent.indexOfChild(detailInfo) + 1,
+                    new LinearLayout.LayoutParams(-1, -2));
+            detailInfo.setVisibility(View.GONE);
+        } else {
+            listSkeleton = Skeleton.list(this, 6, 0, true, false);
+            toolList.addView(listSkeleton, new LinearLayout.LayoutParams(-1, -2));
+        }
+    }
+
+    /** 列表有了（或确定读不到）就换回真内容；只做一次。 */
+    private void hideSkeletons() {
+        if (statusSkeleton == null) return;
+        Skeleton.remove(statusSkeleton); Skeleton.remove(listSkeleton); Skeleton.remove(detailSkeleton);
+        statusSkeleton = listSkeleton = detailSkeleton = null;
+        packageStatus.setVisibility(View.VISIBLE);
+        detailInfo.setVisibility(View.VISIBLE);
     }
 
     @Override protected void onResume() {
@@ -179,6 +212,12 @@ public final class ToolConfigActivity extends AppCompatActivity {
             if (inventory != null && !inventory.toString().equals(renderedInventory)) {
                 renderedInventory = inventory.toString(); renderTools(inventory);
             }
+            if (state.refreshing || state.busy) inventoryRequested = true;
+            if (inventory != null) hideSkeletons();
+            else if (inventoryRequested && !state.refreshing && !state.busy && statusSkeleton != null) {
+                // 读清单失败：manager 已记诊断，这里别让骨架一直转。
+                hideSkeletons(); packageStatus.setText(R.string.toolkit_failed);
+            }
             boolean contextMatches = state.context.equals(currentProbeContext());
             if (state.id != 0 && (state.busy || contextMatches)) {
                 if (renderedOperation != state.id) {
@@ -206,7 +245,9 @@ public final class ToolConfigActivity extends AppCompatActivity {
                 }
             }
             if (state.id != 0 && !state.busy && !contextMatches) operations.refreshInventory();
-        } catch (Exception invalid) { operationStatus.setText(R.string.toolkit_failed); operationStatus.setVisibility(View.VISIBLE); }
+        } catch (Exception invalid) {
+            hideSkeletons(); operationStatus.setText(R.string.toolkit_failed); operationStatus.setVisibility(View.VISIBLE);
+        }
         setBusy(state.busy || state.refreshing);
         cancel.setVisibility(state.busy ? View.VISIBLE : View.GONE);
     }

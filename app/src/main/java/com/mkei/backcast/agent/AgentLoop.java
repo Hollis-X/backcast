@@ -1918,33 +1918,66 @@ public class AgentLoop {
      */
     private boolean compact(int token, int gen, long sessionId, boolean followup) {
         listener.onCompactStart(gen);
-        List<Message> request;
+        List<Message> source;
         synchronized (lock) {
             if (stale(token, gen)) {
                 return false;
             }
-            request = new ArrayList<Message>(history);
-            request.add(Message.user(Compactor.PROMPT));
+            source = new ArrayList<Message>(history);
         }
+        String state = Compactor.state(source);
 
-        if (stale(token, gen)) return false;
-        LlmClient.Reply reply = sendRequest(request, null, null, token, gen, "compact");
-        if (stale(token, gen)) {
-            return false;
+        // 压缩请求本身超窗时先清工具输出，再一段段丢最旧的消息，缩小后重发；
+        // 只缩小发给摘要的请求，新窗口仍按完整历史拼。摘要被输出上限截断时要求写短些再试一次。
+        String prompt = Compactor.PROMPT;
+        int shrinks = 0;
+        boolean shortened = false;
+        LlmClient.Reply reply;
+        while (true) {
+            if (stale(token, gen)) return false;
+            List<Message> request = new ArrayList<Message>(source);
+            request.add(Message.user(prompt));
+            reply = sendRequest(request, null, null, token, gen, "compact");
+            if (stale(token, gen)) {
+                return false;
+            }
+            if (reply.error != null && isContextOverflow(reply.error) && shrinks < Compactor.MAX_SHRINKS) {
+                List<Message> smaller = shrinks == 0
+                        ? Compactor.clearToolOutputs(source, 0) : Compactor.dropOldest(source);
+                if (shrinks == 0 && TokenMeter.of(smaller) >= TokenMeter.of(source)) {
+                    smaller = Compactor.dropOldest(source);
+                }
+                shrinks++;
+                if (smaller != null) {
+                    source = smaller;
+                    continue;
+                }
+            }
+            if (reply.error != null) {
+                stopAfterRequestFailure(token, gen, reply.error, reply.userMessage, transientFailure(reply));
+                return false;
+            }
+            accountGoalUsage(reply.promptTokens, reply.completionTokens);
+            if (reply.truncated() && !reply.hasToolCalls() && !shortened) {
+                shortened = true;
+                prompt = Compactor.PROMPT + "\n\n" + Compactor.RETRY_SHORTER;
+                continue;
+            }
+            break;
         }
-        if (reply.error != null) {
-            stopAfterRequestFailure(token, gen, reply.error, reply.userMessage, transientFailure(reply));
-            return false;
-        }
-        accountGoalUsage(reply.promptTokens, reply.completionTokens);
 
         String summary = reply.content == null ? "" : reply.content;
         if (summary.trim().length() == 0 || reply.hasToolCalls()) {
             listener.onError(gen, "压缩没有返回摘要。");
             return false;
         }
+        if (reply.truncated()) {
+            // 被截断的摘要往往正好缺「下一步」，宁可保留原窗口也不用它。
+            listener.onError(gen, "压缩摘要超出输出上限被截断，已保留原上下文。");
+            return false;
+        }
 
-        Message handoff = Message.user(Compactor.wrap(summary));
+        Message handoff = Message.user(Compactor.wrap(summary, state));
         handoff.resumeAfterCompaction = followup;
         handoff.delegationAuthorized = Boolean.valueOf(explicitDelegationAuthorized());
         handoff.delegationForbidden = delegationForbidden();
@@ -1976,6 +2009,26 @@ public class AgentLoop {
         }
         listener.onContextUsage(gen, contextUsed(), contextLimit);
         return true;
+    }
+
+    /**
+     * 摘要前的轻量清理：最近 1/5 窗口以内的工具输出保留，更早的换成占位文字。
+     * 省下不到 1/20 窗口时不动，免得为一点空间打乱缓存。
+     * 只改模型窗口，不写库：重启后读回的是完整输出，到阈值会再清一次。
+     *
+     * @return true 表示 history 已被替换。
+     */
+    private boolean clearOldToolOutputs(int token, int gen) {
+        synchronized (lock) {
+            if (stale(token, gen)) return false;
+            List<Message> cleared = Compactor.clearToolOutputs(history, contextLimit / 5);
+            long saved = (long) TokenMeter.of(history) - TokenMeter.of(cleared);
+            if (saved < contextLimit / 20) return false;
+            history.clear();
+            history.addAll(cleared);
+            resetContextUsageLocked();
+            return true;
+        }
     }
 
     /**
@@ -2304,7 +2357,16 @@ public class AgentLoop {
                 used = contextUsedLocked(schema);
             }
 
-            // 到阈值先把这一轮交接出去，再拿新窗口继续，避免整段历史被服务端拒绝。
+            // 到阈值先清旧工具输出；还不够再把这一轮交接出去，拿新窗口继续，避免整段历史被服务端拒绝。
+            if (used >= contextLimit * compactRatio && clearOldToolOutputs(token, gen)) {
+                synchronized (lock) {
+                    if (stale(token, gen)) {
+                        return;
+                    }
+                    snapshot = new ArrayList<Message>(history);
+                    used = contextUsedLocked(schema);
+                }
+            }
             listener.onContextUsage(gen, used, contextLimit);
             if (used >= contextLimit * compactRatio) {
                 if (!compact(token, gen, sessionId, true)) {

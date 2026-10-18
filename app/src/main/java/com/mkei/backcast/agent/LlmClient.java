@@ -185,6 +185,16 @@ public class LlmClient {
         public boolean hasToolCalls() {
             return toolCalls != null && toolCalls.length() > 0;
         }
+
+        /** 输出写到 max_tokens 被截断（finish_reason 为 length）。 */
+        public boolean truncated() {
+            return "length".equals(finishReason);
+        }
+
+        /** 测试脚本用来模拟结束原因。 */
+        public void setFinishReason(String reason) {
+            finishReason = reason;
+        }
     }
 
     /**
@@ -967,11 +977,11 @@ public class LlmClient {
         reply.content = msg.optString("content", "");
         reply.reasoning = msg.optString("reasoning_content", "");
         reply.applyUsage(root.optJSONObject("usage"));
+        String finish = choices.getJSONObject(0).optString("finish_reason", "");
+        if (finish.length() > 0 && !"null".equals(finish)) reply.finishReason = finish;
         JSONArray calls = msg.optJSONArray("tool_calls");
         if (calls != null && calls.length() > 0) {
             reply.toolCalls = calls;
-            String finish = choices.getJSONObject(0).optString("finish_reason", "");
-            if (finish.length() > 0 && !"null".equals(finish)) reply.finishReason = finish;
             validateToolCalls(reply);
         }
     }

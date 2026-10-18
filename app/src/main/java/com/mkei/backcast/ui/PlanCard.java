@@ -18,8 +18,8 @@ import org.json.JSONObject;
  * 会话里的任务计划卡片（M3 色调卡片）：标题行 + 进度条，已完成绿色对勾，执行中转圈，待执行虚线圆圈。
  *
  * 每次调用 update_plan 是一个版本，各自一张卡片，旧版本保留当时的内容、不再改动。
- * 同一页里的卡片按出现顺序编号（{@link #renumber}）：最后一张是「最新」，照常展开、随计划实时更新；
- * 更早的是「历史」，收起成一行，点开可以查看当时的步骤和状态。
+ * 卡片按任务编号（{@link #renumber}）：每条用户消息开始一个新任务，版本号从 1 重新数；
+ * 任务里最后一张是「最新」，照常展开、随计划实时更新；更早的是「历史」，收起成一行，点开可以查看当时的步骤和状态。
  */
 public final class PlanCard extends LinearLayout {
     private final LinearLayout top;
@@ -161,10 +161,27 @@ public final class PlanCard extends LinearLayout {
         return cards.isEmpty() ? null : cards.get(cards.size() - 1);
     }
 
-    /** 按出现顺序给容器里的计划卡片编号：最后一张是最新，其余是历史。 */
+    /**
+     * 按任务给容器里的计划卡片编号：遇到用户消息（contentDescription 为 user 的行）就开始新的一组，
+     * 新任务的计划从第 1 版数起。每组最后一张是这个任务的最新版，其余是历史。
+     */
     public static void renumber(View root) {
-        List<PlanCard> cards = collect(root, new ArrayList<PlanCard>());
-        for (int i = 0; i < cards.size(); i++) cards.get(i).setVersion(i + 1, cards.size(), i == cards.size() - 1);
+        List<List<PlanCard>> tasks = new ArrayList<List<PlanCard>>();
+        tasks.add(new ArrayList<PlanCard>());
+        group(root, tasks);
+        for (List<PlanCard> cards : tasks)
+            for (int i = 0; i < cards.size(); i++) cards.get(i).setVersion(i + 1, cards.size(), i == cards.size() - 1);
+    }
+
+    private static void group(View view, List<List<PlanCard>> tasks) {
+        if ("user".equals(view.getContentDescription())) {
+            if (!tasks.get(tasks.size() - 1).isEmpty()) tasks.add(new ArrayList<PlanCard>());
+        } else if (view instanceof PlanCard) {
+            tasks.get(tasks.size() - 1).add((PlanCard) view);
+        } else if (view instanceof ViewGroup) {
+            ViewGroup parent = (ViewGroup) view;
+            for (int i = 0; i < parent.getChildCount(); i++) group(parent.getChildAt(i), tasks);
+        }
     }
 
     private static List<PlanCard> collect(View root, List<PlanCard> out) {

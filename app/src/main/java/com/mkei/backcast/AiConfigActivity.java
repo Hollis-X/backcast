@@ -18,6 +18,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.mkei.backcast.agent.LlmClient;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.M3;
+import com.mkei.backcast.ui.Skeleton;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -40,6 +41,8 @@ public class AiConfigActivity extends AppCompatActivity {
     private int requestGeneration;
     private boolean destroyed, bindingDraft;
     private Thread activeFetch;
+    /** 拉模型列表时列表区画的骨架；请求作废或失败时换回原来的列表。 */
+    private boolean fetchSkeleton;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -142,6 +145,7 @@ public class AiConfigActivity extends AppCompatActivity {
     @Override public void finish() { invalidateFetch(); super.finish(); }
     private void invalidateFetch() {
         requestGeneration++; if (activeFetch != null) { activeFetch.interrupt(); activeFetch = null; }
+        if (fetchSkeleton && !destroyed) renderModels(previewModels);
     }
     private void onConnectionChanged() {
         if (bindingDraft) return;
@@ -164,6 +168,8 @@ public class AiConfigActivity extends AppCompatActivity {
         }
         invalidateFetch(); final int generation = requestGeneration; final String providerId = selectedProvider;
         fetchModels.setEnabled(false); showStatus(getString(R.string.fetching));
+        modelList.removeAllViews(); fetchSkeleton = true;
+        modelList.addView(Skeleton.list(this, 4, 18, false, false), new LinearLayout.LayoutParams(-1, -2));
         activeFetch = new Thread(() -> {
             final LlmClient.ModelsResult result = LlmClient.fetchModels(url, key, providerId);
             if (result.error != null) {
@@ -179,7 +185,7 @@ public class AiConfigActivity extends AppCompatActivity {
                 if (!isCurrentFetch(generation, providerId, url, key)) return;
                 activeFetch = null; fetchModels.setEnabled(true);
                 if (result.error != null) {
-                    fetchStatus.setVisibility(View.GONE);
+                    fetchStatus.setVisibility(View.GONE); renderModels(previewModels);
                     String summary = result.userMessage == null || result.userMessage.length() == 0
                             ? "获取模型列表失败，详细原因已记录。" : result.userMessage;
                     Toast.makeText(AiConfigActivity.this, summary, Toast.LENGTH_SHORT).show(); return;
@@ -199,6 +205,7 @@ public class AiConfigActivity extends AppCompatActivity {
     }
     private void showStatus(String text) { fetchStatus.setText(text); fetchStatus.setVisibility(View.VISIBLE); }
     private void renderModels(List<String> models) {
+        fetchSkeleton = false;
         modelList.removeAllViews();
         if (models == null || models.isEmpty()) {
             TextView empty = new TextView(this); empty.setText(R.string.model_empty); empty.setTextSize(12);

@@ -101,6 +101,20 @@ public final class TemporaryRecoveryRegressionTest {
                 "Root scan parser confused fd headers or directory prefixes: " + holders);
     }
 
+    /** 登记的是 /data/data/包名，/proc 链接里读到的是 /data/user/0/包名（或反过来）：两种写法都要认出来。 */
+    private static void rootScanParserMatchesDataAliases() throws Exception {
+        String directory = "/data/data/app/files/.backcast-tmp-a";
+        String output = "/proc/130/fd:\n"
+                + "lrwx------ 1 root root 64 2026-10-18 12:00 3 -> /data/user/0/app/files/.backcast-tmp-a/log.txt\n"
+                + "lrwxrwxrwx 1 root root 0 2026-10-18 12:00 /proc/131/cwd -> /data/data/app/files/.backcast-tmp-a\n"
+                + "lrwxrwxrwx 1 root root 0 2026-10-18 12:00 /proc/132/cwd -> /data/user/10/app/files/.backcast-tmp-a\n";
+        java.util.List<String> holders = TemporaryWorkspace.parseRootScan(output, directory);
+        check(holders.size() == 2 && "130".equals(holders.get(0)) && "131".equals(holders.get(1)),
+                "Root scan missed a holder that used the other spelling of the private directory: " + holders);
+        java.util.List<String> back = TemporaryWorkspace.aliases("/data/user/0/app/files/x");
+        check(back.size() == 2 && back.get(1).equals("/data/data/app/files/x"), "Alias of /data/user/0 was not /data/data: " + back);
+    }
+
     private static void rootScanAcceptsProcRacesButRejectsMissingScan() throws Exception {
         String directory = "/data/user/0/app/cache/.backcast-tmp-a";
         String partial = "/proc/120/fd:\n"
@@ -128,7 +142,7 @@ public final class TemporaryRecoveryRegressionTest {
             int passed = 0;
             for (String name : new String[]{"leftoverWithoutHoldersIsRemoved", "leftoverInUseIsTerminatedThenRemoved",
                     "oldLedgerWithoutRootFlagNeedsRoot", "staleFailureIsReportedOnceInTurnCleanup",
-                    "rootScanParserMatchesDirectoryBoundaries", "rootScanAcceptsProcRacesButRejectsMissingScan"}) {
+                    "rootScanParserMatchesDirectoryBoundaries", "rootScanParserMatchesDataAliases", "rootScanAcceptsProcRacesButRejectsMissingScan"}) {
                 try { TemporaryRecoveryRegressionTest.class.getDeclaredMethod(name).invoke(null); }
                 catch (java.lang.reflect.InvocationTargetException failure) { throw new AssertionError(name, failure.getCause()); }
                 System.out.println("PASS " + name); passed++;

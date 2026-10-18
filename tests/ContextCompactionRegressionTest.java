@@ -27,8 +27,8 @@ public final class ContextCompactionRegressionTest {
         Request(List<Message> messages, JSONArray tools) {
             this.messages = new ArrayList<Message>(messages);
             toolCount = tools == null ? 0 : tools.length();
-            compact = !messages.isEmpty()
-                    && Compactor.PROMPT.equals(messages.get(messages.size() - 1).content);
+            compact = !messages.isEmpty() && messages.get(messages.size() - 1).content != null
+                    && messages.get(messages.size() - 1).content.startsWith(Compactor.PROMPT);
         }
     }
 
@@ -265,27 +265,51 @@ public final class ContextCompactionRegressionTest {
         compactClient.exhausted(); resumedClient.exhausted();
     }
 
-    private static void compactionOverflowPreservesWholeTurnsWithoutAnotherRequest() {
-        ScriptedClient client = new ScriptedClient().then(true, overflow());
+    private static LlmClient.Reply cutOff(String content) {
+        LlmClient.Reply reply = text(content);
+        reply.setFinishReason("length");
+        return reply;
+    }
+    private static List<Message> withoutPrompt(List<Message> request) {
+        return new ArrayList<Message>(request.subList(0, request.size() - 1));
+    }
+
+    private static void compactionOverflowShrinksRequestThenPreservesWholeTurns() {
+        ScriptedClient client = new ScriptedClient();
+        for (int i = 0; i <= Compactor.MAX_SHRINKS; i++) client.then(true, overflow());
         AgentLoop loop = loop(client);
         loop.loadHistory("system fixture", Arrays.asList(
                 Message.user("old-user"), Message.assistant("old-assistant", calls("old-tool", "read")),
-                Message.toolResult("old-tool", "old-result"), Message.assistant("old-answer", null),
+                Message.toolResult("old-tool", "old-result\n" + repeat('o', 2000)), Message.assistant("old-answer", null),
                 Message.user("recent-user"), Message.assistant("recent-assistant", calls("recent-tool", "read")),
-                Message.toolResult("recent-tool", "recent-result"), Message.assistant("recent-answer", null)));
+                Message.toolResult("recent-tool", "recent-result\n" + repeat('n', 2000)), Message.assistant("recent-answer", null)));
         loop.compactNow(1L, loop.generation(), 1);
+        check(client.requests.size() == 1 + Compactor.MAX_SHRINKS, "Overflow did not shrink up to the limit");
+        check(!contains(withoutPrompt(client.requests.get(1).messages), repeat('o', 100))
+                        && contains(client.requests.get(1).messages, Compactor.CLEARED_PREFIX),
+                "First shrink did not clear tool outputs");
+        for (int i = 1; i < client.requests.size(); i++) {
+            List<Message> request = withoutPrompt(client.requests.get(i).messages);
+            validPairs(request);
+            check(Message.SYSTEM.equals(request.get(0).role), "Shrunk request lost the system prompt");
+            check(TokenMeter.of(request) < TokenMeter.of(withoutPrompt(client.requests.get(i - 1).messages)),
+                    "Shrink step " + i + " did not make the request smaller");
+        }
         List<Message> retained = loop.historySnapshot();
-        check(client.requests.size() == 1 && contains(retained, "old-user") && contains(retained, "old-assistant")
-                && contains(retained, "old-result") && contains(retained, "old-answer")
-                && contains(retained, "recent-user") && contains(retained, "recent-result") && summaries(retained) == 0,
-                "Compaction overflow resubmitted or replaced completed turns");
+        check(contains(retained, "old-user") && contains(retained, "old-assistant")
+                && contains(retained, repeat('o', 2000)) && contains(retained, "old-answer")
+                && contains(retained, "recent-user") && contains(retained, repeat('n', 2000)) && summaries(retained) == 0
+                && !contains(retained, Compactor.CLEARED_PREFIX),
+                "Failed compaction replaced or cleared the original window");
         validPairs(retained);
         check(Message.SYSTEM.equals(retained.get(0).role) && !loop.busy(), "Overflow discarded instructions or kept running");
         client.exhausted();
     }
 
-    private static void compactionOverflowPreservesUserlessToolPairsWithoutRetry() {
-        ScriptedClient client = new ScriptedClient().then(true, overflow());
+    private static void compactionOverflowKeepsToolPairsWhileShrinking() {
+        // 输出太短，清理不会更小，直接丢最旧的；刀落在工具结果上要往后挪；剩不下可丢的消息时停下。
+        ScriptedClient client = new ScriptedClient().then(true, overflow()).then(true, overflow())
+                .then(true, overflow());
         AgentLoop loop = loop(client);
         loop.loadHistory("system", Arrays.asList(
                 Message.assistant("old checkpoint tool", calls("a", "read")),
@@ -293,12 +317,122 @@ public final class ContextCompactionRegressionTest {
                 Message.assistant("latest work", calls("b", "read")),
                 Message.toolResult("b", "latest result")));
         loop.compactNow(1L, loop.generation(), 1);
+        for (Request request : client.requests) validPairs(withoutPrompt(request.messages));
         List<Message> retained = loop.historySnapshot();
         validPairs(retained);
-        check(client.requests.size() == 1 && contains(retained, "old checkpoint tool") && contains(retained, "old result")
+        check(client.requests.size() == 3 && contains(retained, "old checkpoint tool") && contains(retained, "old result")
                         && contains(retained, "recent request") && contains(retained, "latest result") && !contains(retained, Compactor.PROMPT),
-                "Compaction failure retried or changed existing tool pairs/latest work");
+                "Compaction failure changed existing tool pairs/latest work or kept retrying");
         client.exhausted();
+    }
+
+    private static void compactionOverflowRetriesWithClearedToolOutputs() {
+        ScriptedClient client = new ScriptedClient().then(true, overflow()).then(true, text("shrunk checkpoint"));
+        AgentLoop loop = loop(client);
+        loop.loadHistory("system fixture", Arrays.asList(
+                Message.user("old-user"), Message.assistant("old-assistant", calls("old-tool", "read")),
+                Message.toolResult("old-tool", "first line\n" + repeat('r', 4000)), Message.assistant("old-answer", null),
+                Message.user("recent-user"), Message.assistant("recent-answer", null)));
+        loop.compactNow(1L, loop.generation(), 1);
+        List<Message> second = client.requests.get(1).messages;
+        check(!contains(second, repeat('r', 100)) && contains(second, "First line: first line"),
+                "Retry did not replace the tool output with its first line");
+        List<Message> retained = loop.historySnapshot();
+        check(summaries(retained) == 1 && contains(retained, "shrunk checkpoint"), "Shrunk retry summary was not used");
+        check(contains(retained, "old-user") && contains(retained, "recent-user"),
+                "New window was not rebuilt from the full history");
+        client.exhausted();
+    }
+
+    private static void truncatedSummaryRetriesShorterThenKeepsWindow() {
+        ScriptedClient client = new ScriptedClient().then(true, cutOff("long checkpoint without next"))
+                .then(true, cutOff("still too long"));
+        AgentLoop loop = loop(client);
+        loop.loadHistory("system fixture", Arrays.asList(Message.user("request"), Message.assistant("answer", null)));
+        loop.compactNow(1L, loop.generation(), 1);
+        List<Message> retry = client.requests.get(1).messages;
+        check(retry.get(retry.size() - 1).content.endsWith(Compactor.RETRY_SHORTER), "Retry did not ask for a shorter summary");
+        List<Message> retained = loop.historySnapshot();
+        check(summaries(retained) == 0 && contains(retained, "answer") && !loop.busy(),
+                "Truncated summary replaced the window");
+        client.exhausted();
+    }
+
+    private static void truncatedSummaryShorterRetryIsUsed() {
+        ScriptedClient client = new ScriptedClient().then(true, cutOff("cut"))
+                .then(true, text("short checkpoint"));
+        AgentLoop loop = loop(client);
+        loop.loadHistory("system fixture", Arrays.asList(Message.user("request"), Message.assistant("answer", null)));
+        loop.compactNow(1L, loop.generation(), 1);
+        List<Message> retained = loop.historySnapshot();
+        check(summaries(retained) == 1 && contains(retained, "short checkpoint") && !contains(retained, "cut\n"),
+                "Shorter retry summary was not used");
+        client.exhausted();
+    }
+
+    private static void thresholdClearsOldToolOutputsBeforeSummary() {
+        ScriptedClient client = new ScriptedClient().then(false, text("done"));
+        AgentLoop loop = loop(client);
+        List<Message> history = Arrays.asList(
+                Message.user("read both files"), Message.assistant("reading old", calls("old", "read")),
+                Message.toolResult("old", "old header\n" + repeat('o', 30000)),
+                Message.assistant("reading recent", calls("recent", "read")),
+                Message.toolResult("recent", "recent body " + repeat('n', 1000)), Message.assistant("read both", null));
+        int total = TokenMeter.of(history) + TokenMeter.of(Message.user("next step"));
+        loop.setContextBudget(total + total / 20, 0.9f);
+        loop.loadHistory("system fixture", history);
+        loop.submit("next step", 1L, loop.generation(), 1, null);
+        check(client.requests.size() == 1 && !client.requests.get(0).compact,
+                "Clearing tool outputs did not avoid a summary");
+        List<Message> sent = client.requests.get(0).messages;
+        validPairs(sent);
+        check(!contains(sent, repeat('o', 100)) && contains(sent, "First line: old header"),
+                "Old tool output was not cleared");
+        check(contains(sent, "recent body " + repeat('n', 1000)), "Recent tool output was cleared");
+        check(contains(sent, "read both files") && contains(sent, "next step"), "Clearing touched user messages");
+        client.exhausted();
+    }
+
+    private static JSONArray call(String id, String name, JSONObject args) {
+        return new JSONArray().put(new JSONObject().put("id", id).put("type", "function")
+                .put("function", new JSONObject().put("name", name).put("arguments", args.toString())));
+    }
+
+    private static void summaryCarriesPlanAndChangedFiles() {
+        ScriptedClient client = new ScriptedClient().then(true, text("first checkpoint"))
+                .then(true, text("second checkpoint\n[Checkpoint state recorded by the app]\n- stale copy"));
+        AgentLoop loop = loop(client);
+        JSONObject plan = new JSONObject().put("items", new JSONArray()
+                .put(new JSONObject().put("content", "step one").put("status", "completed"))
+                .put(new JSONObject().put("content", "step two").put("status", "in_progress")));
+        loop.loadHistory("system fixture", Arrays.asList(Message.user("do the task"),
+                Message.assistant("", call("p", "update_plan", plan)), Message.toolResult("p", "计划已更新"),
+                Message.assistant("", call("e", "edit", new JSONObject().put("path", "/w/a.java"))),
+                Message.toolResult("e", "已修改 1 处：/w/a.java"),
+                Message.assistant("", call("f", "write", new JSONObject().put("path", "/w/failed.txt"))),
+                Message.toolResult("f", "错误：path 不在项目内。"), Message.assistant("ok", null)));
+        loop.compactNow(1L, loop.generation(), 1);
+        String first = loop.historySnapshot().get(loop.historySnapshot().size() - 1).content;
+        check(first.contains("[in_progress] step two") && first.contains("- /w/a.java")
+                && !first.contains("failed.txt"), "Checkpoint state missed the plan or changed files");
+        mutableHistoryAppend(loop, Arrays.asList(Message.user("continue"),
+                Message.assistant("", call("w", "write", new JSONObject().put("path", "/w/b.md"))),
+                Message.toolResult("w", "已写入 /w/b.md"), Message.assistant("written", null)));
+        loop.compactNow(1L, loop.generation(), 2);
+        String second = loop.historySnapshot().get(loop.historySnapshot().size() - 1).content;
+        check(second.contains("[in_progress] step two") && second.contains("- /w/a.java") && second.contains("- /w/b.md"),
+                "Second checkpoint did not carry the earlier plan and files forward");
+        check(!second.contains("stale copy") && second.indexOf("[Checkpoint state") == second.lastIndexOf("[Checkpoint state"),
+                "Model-copied state was kept next to the app state");
+        client.exhausted();
+    }
+
+    private static void mutableHistoryAppend(AgentLoop loop, List<Message> messages) {
+        try {
+            mutableHistory(loop).addAll(messages);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static void normalOverflowStopsUntilExplicitManualResume() {
@@ -563,7 +697,10 @@ public final class ContextCompactionRegressionTest {
         String[] tests = { "compactionReplacesOldSummariesAndToolHistory",
                 "retainedUserMessagesRespectDefaultBudget", "retainedUserBudgetScalesWithSmallWindows",
                 "truncatedDelegationKeepsActualRequestAfterRecovery",
-                "compactionOverflowPreservesWholeTurnsWithoutAnotherRequest", "compactionOverflowPreservesUserlessToolPairsWithoutRetry",
+                "compactionOverflowShrinksRequestThenPreservesWholeTurns", "compactionOverflowKeepsToolPairsWhileShrinking",
+                "compactionOverflowRetriesWithClearedToolOutputs", "truncatedSummaryRetriesShorterThenKeepsWindow",
+                "truncatedSummaryShorterRetryIsUsed", "thresholdClearsOldToolOutputsBeforeSummary",
+                "summaryCarriesPlanAndChangedFiles",
                 "normalOverflowStopsUntilExplicitManualResume", "manualCompactionDoesNotResumeFinishedConversation",
                 "compactionUsageCanExhaustGoalBudget", "autoCompactionReinjectsSpentBudgetWrapUp",
                 "autoCompactionRetainsGoalRulesAndCanFinish",

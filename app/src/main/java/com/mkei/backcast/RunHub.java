@@ -654,8 +654,26 @@ public final class RunHub {
         return next;
     }
 
-    /** 子代理记录的根目录：每个会话一个子目录，见 {@link JsonSubAgentStore}。 */
-    private java.io.File subAgentRoot() { return new java.io.File(app.getFilesDir(), "sub-agents"); }
+    /** 子代理记录的根目录 .backcast/sub-agents：每个会话一个子目录，见 {@link JsonSubAgentStore}。 */
+    private java.io.File subAgentRoot() {
+        java.io.File root = new java.io.File(store.root(), "sub-agents");
+        synchronized (this) {
+            if (!subAgentRootChecked) {
+                subAgentRootChecked = true;
+                // 子代理记录原来在 filesDir/sub-agents，跟聊天记录一起挪进 .backcast/。
+                java.io.File legacy = new java.io.File(app.getFilesDir(), "sub-agents");
+                if (legacy.isDirectory() && !root.exists()) {
+                    root.getParentFile().mkdirs();
+                    if (!legacy.renameTo(root)) {
+                        store.recordDiagnostic(-1, "sub_agent_store", "旧子代理记录目录无法移入 .backcast", legacy.getPath());
+                    }
+                }
+            }
+        }
+        return root;
+    }
+
+    private boolean subAgentRootChecked;
 
     private SubAgentManager manager(final AgentLoop parent) {
         SubAgentManager known = children.get(parent);

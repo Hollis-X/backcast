@@ -31,6 +31,7 @@ import org.json.JSONObject;
  * 报阶段、报进度这种高频保存只改小文件，不再把几 MB 的历史整份序列化一遍。
  * 每个文件先写 .tmp、fsync 再改名覆盖，断电不会留下写了一半的文件。
  * owner 目录里有 {@code .removed} 标记就表示会话已删除，之后的读写都会被拒绝。
+ * 从没派过子代理的会话不建目录、也不留删除标记，免得每个会话都在根目录里留一个空目录。
  */
 public final class JsonSubAgentStore implements SubAgentManager.Store {
     /** 记录出错时写诊断；可以为 null。 */
@@ -42,9 +43,12 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
     private final FailureSink failures;
     private String owner;
     private long sessionId;
-    /** 已经落盘的版本号和历史版本戳；戳没变就说明历史没换，不用再写那个大文件。 */
-    private final Map<String, Long> savedRevision = new HashMap<String, Long>();
-    private final Map<String, Integer> savedHistory = new HashMap<String, Integer>(), savedFork = new HashMap<String, Integer>();
+    /** 这个实例已经删除：目录可能根本没建过，所以不能只靠磁盘上的标记挡住迟到的保存。 */
+    private boolean removed;
+    /** 已经落盘的版本号和历史版本（historyRevision）；版本没变就说明历史没换，不用再写那个大文件。 */
+    private final Map<String, Long> savedRevision = new HashMap<String, Long>(), savedHistory = new HashMap<String, Long>();
+    /** 派生上下文只在派生时设一次，落过盘（或从盘上读出来）就不再写。 */
+    private final Set<String> savedFork = new HashSet<String>();
 
     public JsonSubAgentStore(File root, long sessionId, FailureSink failures) {
         if (root == null) throw new IllegalArgumentException("子 agent 存储目录为空。");
@@ -57,12 +61,16 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
         return "session-" + sessionId;
     }
 
-    /** 草稿会话第一条消息落库后，把草稿目录里的记录挪到正式会话下，草稿目录标记为已删除。 */
+    /**
+     * 草稿会话第一条消息落库后，把草稿目录里的记录挪到正式会话下，再删掉草稿目录。
+     * 草稿编号是随机的，只有这个实例认得它，挪完改了 owner 就不会再有人写回去，所以不用留删除标记。
+     */
     public synchronized void bindSession(long next) {
         String target = owner(next);
         if (owner.equals(target)) return;
+        checkOpen();
         File from = directory(owner), to = directory(target);
-        checkOpen(from); checkOpen(to);
+        checkOpen(to);
         try {
             File[] files = from.listFiles();
             if (files != null && files.length > 0) {
@@ -73,12 +81,13 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
                     if (!file.renameTo(moved)) throw new IOException("无法移动 " + file.getName());
                 }
             }
-            markRemoved(from);
+            if (from.exists() && !from.delete() && from.exists()) throw new IOException("无法删除草稿目录 " + from.getName());
         } catch (IOException failure) { throw failed("子 agent 草稿记录转存失败", failure); }
         owner = target; sessionId = next;
     }
 
     @Override public synchronized List<SubAgentManager.Record> load() {
+        checkOpen();
         File dir = directory(owner);
         checkOpen(dir);
         List<SubAgentManager.Record> records = new ArrayList<SubAgentManager.Record>();
@@ -97,6 +106,8 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
                 }
                 SubAgentManager.Record record = SubAgentManager.Record.fromJson(json);
                 savedRevision.put(id, Long.valueOf(record.revision));
+                savedHistory.put(id, Long.valueOf(record.historyRevision));
+                savedFork.add(id);
                 records.add(record);
             }
             return records;
@@ -104,6 +115,7 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
     }
 
     @Override public synchronized void save(SubAgentManager.Record record) {
+        checkOpen();
         File dir = directory(owner);
         checkOpen(dir);
         try {
@@ -117,16 +129,15 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
             mkdirs(dir);
             JSONArray history = record.history == null ? new JSONArray() : record.history;
             JSONArray fork = record.forkHistory == null ? new JSONArray() : record.forkHistory;
-            int historyStamp = stamp(history), forkStamp = stamp(fork);
             // 先写大文件、最后写元数据：元数据的版本号落盘了，它引用的历史一定已经在了。
-            Integer oldHistory = savedHistory.get(id), oldFork = savedFork.get(id);
-            if (oldHistory == null || oldHistory.intValue() != historyStamp) {
+            Long oldHistory = savedHistory.get(id);
+            if (oldHistory == null || oldHistory.longValue() != record.historyRevision) {
                 write(new File(dir, id + HISTORY), history.toString());
-                savedHistory.put(id, Integer.valueOf(historyStamp));
+                savedHistory.put(id, Long.valueOf(record.historyRevision));
             }
-            if (oldFork == null || oldFork.intValue() != forkStamp) {
+            if (!savedFork.contains(id)) {
                 write(new File(dir, id + FORK), fork.toString());
-                savedFork.put(id, Integer.valueOf(forkStamp));
+                savedFork.add(id);
             }
             write(new File(dir, id + META), light(record));
             savedRevision.put(id, Long.valueOf(record.revision));
@@ -134,14 +145,16 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
     }
 
     public synchronized void remove() {
+        removed = true;
         try { markRemoved(directory(owner)); }
         catch (IOException failure) { throw failed("子 agent 记录删除失败", failure); }
     }
 
-    /** 删除会话时调用：会话没加载过、没有对应的 store 实例也能清掉它的子代理记录。 */
+    /** 删除会话时调用：会话没加载过、没有对应的 store 实例也能清掉它的子代理记录。没有目录就什么都不做。 */
     public static void removeOwner(File root, long sessionId) throws IOException {
         markRemoved(new File(root, owner(sessionId)));
     }
+
 
     /** 进程被拉起来后要接着跑子代理的会话：只读各子代理的轻量记录，不碰历史文件。 */
     public static List<Long> workSessionIds(File root) {
@@ -220,9 +233,6 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
         }
     }
 
-    /** 和 SubAgentManager.historyStamp 一样：历史数组是整份替换的，换了数组或长度变了就是有新内容。 */
-    private static int stamp(JSONArray history) { return System.identityHashCode(history) * 31 + history.length(); }
-
     private static String light(SubAgentManager.Record record) throws Exception {
         JSONArray history = record.history, fork = record.forkHistory;
         record.history = new JSONArray(); record.forkHistory = new JSONArray();
@@ -237,6 +247,10 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
         if (name == null || !name.matches("(?:session-[0-9]+|draft-[A-Za-z0-9_-]+)"))
             throw new IllegalArgumentException("子 agent 存储所有者不合法。");
         return new File(root, name);
+    }
+
+    private void checkOpen() {
+        if (removed) throw new IllegalStateException("子 agent 会话已删除。");
     }
 
     private static void checkOpen(File dir) {
@@ -289,9 +303,9 @@ public final class JsonSubAgentStore implements SubAgentManager.Store {
         if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) throw new IOException("无法创建 " + dir.getName());
     }
 
-    /** 先落删除标记再删记录文件：删到一半断电，标记也已经挡住了之后的读写。 */
+    /** 先落删除标记再删记录文件：删到一半断电，标记也已经挡住了之后的读写。目录不存在说明没有记录，不建空目录。 */
     private static void markRemoved(File dir) throws IOException {
-        mkdirs(dir);
+        if (!dir.isDirectory()) return;
         File marker = new File(dir, REMOVED);
         if (!marker.exists()) write(marker, "");
         File[] files = dir.listFiles();

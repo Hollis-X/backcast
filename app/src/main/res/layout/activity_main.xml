@@ -156,7 +156,11 @@
 
         </LinearLayout>
 
-    <!-- 输入条：模型和权限做成 M3 辅助芯片，和加号、发送键同在一行。 -->
+    <!--
+      输入条：上面一行输入框，下面一行「加号 | 模型、权限 | 发送」。
+      输入条四周留 8dp，40dp 的加号和圆形发送键离边缘也是 8dp，正好和 28dp 的大圆角同心；
+      模型和权限两个芯片都不画边框，只靠文字颜色区分，按下才出现胶囊形状态层。
+    -->
     <LinearLayout
         android:id="@+id/composer_dock"
         android:layout_width="match_parent"
@@ -180,7 +184,7 @@
             android:background="@drawable/bg_input_bar"
             android:paddingLeft="8dp"
             android:paddingRight="8dp"
-            android:paddingTop="6dp"
+            android:paddingTop="4dp"
             android:paddingBottom="8dp">
 
             <LinearLayout
@@ -270,8 +274,8 @@
                 android:textColor="@color/text_primary"
                 android:textSize="16sp"
                 android:paddingLeft="12dp"
-                android:paddingRight="8dp"
-                android:paddingTop="10dp"
+                android:paddingRight="12dp"
+                android:paddingTop="12dp"
                 android:paddingBottom="8dp"
                 android:gravity="center_vertical"
                 android:maxLines="6"
@@ -316,10 +320,10 @@
                             android:layout_width="wrap_content"
                             android:layout_height="32dp"
                             android:layout_weight="1"
-                            android:background="@drawable/bg_chip_outlined"
+                            android:background="@drawable/bg_chip_plain"
                             android:gravity="center_vertical"
                             android:orientation="horizontal"
-                            android:paddingLeft="12dp"
+                            android:paddingLeft="10dp"
                             android:paddingRight="8dp">
 
                             <TextView
@@ -347,8 +351,8 @@
                             android:drawablePadding="6dp"
                             android:gravity="center_vertical"
                             android:includeFontPadding="false"
-                            android:paddingLeft="8dp"
-                            android:paddingRight="8dp"
+                            android:paddingLeft="10dp"
+                            android:paddingRight="10dp"
                             android:text="@string/access_full"
                             android:textColor="@color/md_warning"
                             android:fontFamily="sans-serif-medium"

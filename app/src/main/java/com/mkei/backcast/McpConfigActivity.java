@@ -23,6 +23,7 @@ import com.mkei.backcast.mcp.McpStore;
 import com.mkei.backcast.mcp.McpToolInfo;
 import com.mkei.backcast.ui.Icons;
 import com.mkei.backcast.ui.M3;
+import com.mkei.backcast.ui.Skeleton;
 import com.mkei.backcast.agent.Diagnostics;
 import java.io.File;
 import java.util.List;
@@ -40,6 +41,8 @@ public final class McpConfigActivity extends AppCompatActivity {
     private TextView status, tools;
     private Button probe, cancel;
     private ProgressBar progress;
+    /** 检测连接时工具列表处的骨架，检测结束、取消或配置改动时摘掉。 */
+    private View toolsSkeleton;
     private volatile McpClient probing;
     private int generation;
     private boolean destroyed;
@@ -229,6 +232,9 @@ public final class McpConfigActivity extends AppCompatActivity {
         cancel.setVisibility(View.VISIBLE);
         progress.setVisibility(View.VISIBLE);
         status.setText("正在连接并获取工具…");
+        toolsSkeleton = Skeleton.list(this, 3, 0, true, false);
+        content.addView(toolsSkeleton, content.indexOfChild(tools) + 1, new LinearLayout.LayoutParams(-1, -2));
+        tools.setVisibility(View.GONE);
         new Thread(() -> {
             List<McpToolInfo> result = null;
             Exception failure = null;
@@ -240,6 +246,7 @@ public final class McpConfigActivity extends AppCompatActivity {
             main.post(() -> {
                 if (destroyed || mine != generation || probing != client) return;
                 probing = null;
+                hideToolsSkeleton();
                 probe.setEnabled(true);
                 cancel.setVisibility(View.GONE);
                 progress.setVisibility(View.GONE);
@@ -270,11 +277,18 @@ public final class McpConfigActivity extends AppCompatActivity {
         probing = null;
         if (client != null) client.close();
         if (probe != null) {
+            hideToolsSkeleton();
             probe.setEnabled(true);
             cancel.setVisibility(View.GONE);
             progress.setVisibility(View.GONE);
             status.setText(client == null ? status.getText() : "检测已取消");
         }
+    }
+
+    private void hideToolsSkeleton() {
+        Skeleton.remove(toolsSkeleton);
+        toolsSkeleton = null;
+        tools.setVisibility(View.VISIBLE);
     }
 
     private void invalidateProbe() {

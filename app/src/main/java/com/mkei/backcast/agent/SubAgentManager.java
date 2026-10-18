@@ -54,6 +54,8 @@ public final class SubAgentManager {
         public long sessionId, revision, tokensUsed, collectedRevision, acknowledgedRevision;
         public long lastActivityAt, progressRevision, inboxRevision;
         public JSONArray history = new JSONArray();
+        /** 检查点历史每整份替换一次加 1；界面和 JSON 存储据此判断历史有没有换，不再靠 identityHashCode。 */
+        public long historyRevision;
         public JSONArray pending = new JSONArray();
         public JSONArray inbox = new JSONArray();
         public JSONObject deliveredChildren = new JSONObject();
@@ -73,7 +75,7 @@ public final class SubAgentManager {
                     .put("inFlight", inFlight).put("sessionId", sessionId).put("revision", revision)
                     .put("tokensUsed", tokensUsed).put("collectedRevision", collectedRevision)
                     .put("acknowledgedRevision", acknowledgedRevision)
-                    .put("history", history).put("pending", pending).put("inbox", inbox).put("resume", resume)
+                    .put("history", history).put("historyRevision", historyRevision).put("pending", pending).put("inbox", inbox).put("resume", resume)
                     .put("inFlightStarted", inFlightStarted).put("deliveredChildren", deliveredChildren)
                     .put("acknowledgedChildren", acknowledgedChildren).put("deliveredInbox", deliveredInbox)
                     .put("managerCancelled", managerCancelled).put("phase", phase).put("activeTool", activeTool)
@@ -97,6 +99,7 @@ public final class SubAgentManager {
             task.tokensUsed = json.optLong("tokensUsed", 0L); task.collectedRevision = json.optLong("collectedRevision", 0L);
             task.acknowledgedRevision = json.optLong("acknowledgedRevision", 0L);
             task.history = json.optJSONArray("history"); if (task.history == null) task.history = new JSONArray();
+            task.historyRevision = json.optLong("historyRevision", 0L);
             task.pending = json.optJSONArray("pending"); if (task.pending == null) task.pending = new JSONArray();
             task.inbox = json.optJSONArray("inbox"); if (task.inbox == null) task.inbox = new JSONArray();
             task.resume = json.optBoolean("resume", false);
@@ -913,12 +916,9 @@ public final class SubAgentManager {
         return copy;
     }
 
-    /** 检查点历史的版本戳：每次检查点整份替换数组，戳就会变。O(1)，界面据此决定要不要重新取历史。 */
-    public int historyStamp(String id) {
-        synchronized (lock) {
-            JSONArray history = requireSlot(id).task.history;
-            return System.identityHashCode(history) * 31 + history.length();
-        }
+    /** 检查点历史的版本号：每次检查点整份替换数组就加 1。O(1)，界面据此决定要不要重新取历史。 */
+    public long historyStamp(String id) {
+        synchronized (lock) { return requireSlot(id).task.historyRevision; }
     }
 
     /**
@@ -1400,7 +1400,7 @@ public final class SubAgentManager {
     private void checkpoint(Slot slot, AgentLoop loop) {
         try {
             JSONArray history = checkpoints(loop.historySnapshot());
-            synchronized (lock) { slot.task.history = history; slot.task.revision++; }
+            synchronized (lock) { slot.task.history = history; slot.task.historyRevision++; slot.task.revision++; }
             persist(slot.task.id);
         } catch (Exception error) {
             synchronized (lock) { slot.task.error = "子代理状态保存失败：" + error.getMessage(); }

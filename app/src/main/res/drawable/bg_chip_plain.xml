@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 输入条上的模型 / 权限芯片：不画底色和边框，和输入条融为一体；按下时出现胶囊形状态层。 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="#1F44474E">
+    <item android:id="@android:id/mask">
+        <shape>
+            <solid android:color="#FFFFFFFF"/>
+            <corners android:radius="16dp"/>
+        </shape>
+    </item>
+</ripple>

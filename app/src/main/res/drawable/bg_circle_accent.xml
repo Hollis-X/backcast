@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 发送 / 停止：M3 填充图标按钮，primary 圆角方块。 -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
+<!-- 发送 / 停止：M3 填充图标按钮，primary 圆形；距输入条边缘 8dp，和输入条 28dp 圆角同心。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
     <solid android:color="@color/md_primary"/>
-    <corners android:radius="12dp"/>
 </shape>
