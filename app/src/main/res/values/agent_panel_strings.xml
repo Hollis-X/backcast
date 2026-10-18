@@ -10,6 +10,7 @@
     <string name="agent_chat_running">运行中</string>
     <string name="agent_chat_failed">异常停止</string>
     <string name="agent_chat_closed">已停止</string>
+    <string name="agent_chat_interrupted">已中断</string>
     <string name="agent_chat_send_failed">发送失败，详细原因已记录。</string>
     <string name="comm_sent">已向 %1$s 发送消息</string>
     <string name="comm_sent_task">已向 %1$s 派发任务</string>

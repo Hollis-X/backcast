@@ -269,6 +269,8 @@ public class AgentLoop {
     private boolean pardonReadonly;
     /** 上一轮停在请求失败（断网、服务出错）；新一轮开始或换会话时清掉。 */
     private boolean interruptedByRequestFailure;
+    /** 这次中断是不是网络超时、429、5xx 这类过一会儿可能自己好的错误。 */
+    private boolean interruptedTransient;
     /** 上一轮还没退出时又被要求续跑。退出时接着跑，避免界面停在转圈、目标却没人接。 */
     private boolean resumeAfter;
     private int resumeUi;
@@ -1743,13 +1745,24 @@ public class AgentLoop {
         }
     }
 
-    /** 上一轮因网络或服务错误中断、还没答完：界面把发送键换成「继续」三角，点一下接着跑，不用再发「继续」。 */
+    /**
+     * 这一轮停在半路、还没答完：界面把发送键换成「继续」三角，点一下接着跑，不用再发「继续」。
+     * 不只认网络错误的标记：那个标记只在内存里，App 重启、被系统杀掉或用户停下后都没有，
+     * 所以只要历史停在未答完的位置、当前没在跑就算。用户暂停的目标不算。
+     */
     public boolean interrupted() {
         synchronized (lock) {
-            // 不看 busy：收尾回调先于清除 busy 到达界面，按 busy 判断会让按钮偶尔不变。
-            if (!interruptedByRequestFailure || Goal.PAUSED.equals(goalStatus)) return false;
+            if (Goal.PAUSED.equals(goalStatus)) return false;
+            // 网络错误这条不看 busy：收尾回调先于清除 busy 到达界面，按 busy 判断会让按钮偶尔不变。
+            if (!interruptedByRequestFailure && busy) return false;
         }
         return shouldContinue();
+    }
+
+    /** 中断原因是暂时性的（断网、超时、429、5xx）：子代理据此自动重试；400 之类的请求错误不重试。 */
+    public boolean interruptedTransiently() {
+        synchronized (lock) { if (!interruptedTransient) return false; }
+        return interrupted();
     }
 
     /** 还没答完。已经答完或正在跑的，回到界面时不要再开一轮。 */
@@ -2051,7 +2064,7 @@ public class AgentLoop {
 
     private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
         if (!stopRun(token, gen)) return;
-        synchronized (lock) { interruptedByRequestFailure = true; }
+        synchronized (lock) { interruptedByRequestFailure = true; interruptedTransient = isTransient(error); }
         synchronized (uiLock) {
             // Failed partial text/arguments are not committed history. A later
             // explicit resume must not replay them or need a fake retry event.

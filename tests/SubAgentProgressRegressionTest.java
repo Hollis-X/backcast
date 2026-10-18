@@ -123,21 +123,26 @@ public final class SubAgentProgressRegressionTest {
         } finally { f.release(); f.finish(); }
     }
 
-    private static void providerFailureStopsTheChildWithoutInventingRetries() throws Exception {
-        Fixture f = new Fixture(); f.retry = true; String id = f.spawn("retry");
+    /**
+     * 服务暂时不可用（503）：不立刻报失败，等待期间进度显示「重试」且不泄露服务端回显；
+     * 重试那次请求恢复后接着完成同一个任务，不执行多余工具、不影响主代理。
+     */
+    private static void providerFailureRetriesAndRecovers() throws Exception {
+        Fixture f = new Fixture(); f.retry = true; f.manager.setRetryDelays(10L, 10L, 10L); String id = f.spawn("retry");
         try {
-            f.finish(); SubAgentManager.Record record = f.manager.find(id);
-            check(f.requestsIssued.get() == 1 && f.toolsExecuted.get() == 0 && SubAgentManager.FAILED.equals(record.status)
-                            && "failed".equals(record.phase) && record.result.isEmpty() && record.error.equals("接口返回 HTTP 503"),
-                    "Provider outage retried, executed work, lost the safe failure or returned a successful child result");
-            check(!record.error.contains(SCRIPT) && f.manager.find("main").error.isEmpty(),
-                    "Child failure invented retries, leaked provider echoes or changed the parent state");
-            SubAgentManager.Record saved = f.store.find(id);
-            check(saved.error.equals(record.error) && SubAgentManager.FAILED.equals(saved.status),
-                    "First failure was not persisted with the stopped child state");
-            JSONObject view = f.manager.list("main", 0).getJSONArray("agents").getJSONObject(0);
-            check(view.getString("error").equals(record.error)
-                            && view.getString("status").equals(SubAgentManager.FAILED), "Parent cannot inspect the stopped child's actual failure");
+            await(f.nextRequest);
+            SubAgentManager.Record waiting = f.manager.find(id);
+            check(SubAgentManager.RUNNING.equals(waiting.status) && waiting.error.isEmpty(),
+                    "Transient provider failure was reported as a failure before retrying");
+            check(!waiting.progress.contains(SCRIPT) && !waiting.toJson().toString().contains(SCRIPT),
+                    "Retry progress leaked the provider echo");
+            f.release(); f.finish();
+            SubAgentManager.Record record = f.manager.find(id);
+            check(f.requestsIssued.get() == 2 && f.toolsExecuted.get() == 0 && SubAgentManager.IDLE.equals(record.status)
+                            && record.error.isEmpty() && record.result.contains("request recovered") && record.tasks.length() == 1,
+                    "Retry did not recover the same task: " + record.status + " " + record.error + " " + f.requestsIssued.get());
+            check(f.manager.find("main").error.isEmpty(), "Child retry changed the parent state");
+            check(SubAgentManager.IDLE.equals(f.store.find(id).status), "Recovered state was not persisted");
         } finally { f.release(); f.finish(); }
     }
 
@@ -156,7 +161,7 @@ public final class SubAgentProgressRegressionTest {
     public static void main(String[] args) throws Exception {
         int passed = 0;
         for (String test : new String[]{"previewApprovalAndExecutionRemainSeparateAndDoNotExposeScripts", "guardedReviewIsNotReportedAsToolExecution",
-                "providerFailureStopsTheChildWithoutInventingRetries", "legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips"}) {
+                "providerFailureRetriesAndRecovers", "legacyRetryMetadataIsIgnoredAndLiveProgressRoundTrips"}) {
             SubAgentProgressRegressionTest.class.getDeclaredMethod(test).invoke(null); System.out.println("PASS " + test); passed++;
         }
         System.out.println(passed + " child progress tests passed");

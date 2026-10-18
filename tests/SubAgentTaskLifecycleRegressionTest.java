@@ -566,8 +566,77 @@ public final class SubAgentTaskLifecycleRegressionTest {
         check(rejected && fixture.childCalls.get() == 1 && restricted.find(selected).tasks.length() == 1
                 && !restricted.shouldWakeRoot(), "Restricted child restart bypassed the exhausted parent budget");
     }
+    /** 断网中断：等一会儿接着跑，不开新任务、不先报失败；成功后照常完成。 */
+    static void transientFailureRetriesAndThenCompletes() throws Exception {
+        Fixture fixture = new Fixture(); fixture.manager.setRetryDelays(20L, 20L, 20L);
+        AtomicInteger calls = new AtomicInteger();
+        fixture.script = (f, record, messages, sink) -> {
+            if (calls.incrementAndGet() <= 2) { LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "SocketTimeoutException: fixture"; return reply; }
+            return text("done after retry");
+        };
+        String id = fixture.spawn(false); fixture.settled();
+        SubAgentManager.Record record = fixture.manager.find(id);
+        check(calls.get() == 3, "Transient failure was not retried twice: " + calls.get());
+        check(SubAgentManager.IDLE.equals(record.status) && record.tasks.length() == 1
+                && record.result.contains("done after retry"), "Retry did not finish the same task: " + record.status + " " + record.error);
+    }
+    /** 重试都失败：照原流程标失败、通知主代理；400 之类的请求错误不重试。 */
+    static void exhaustedRetriesFailAndClientErrorsAreNotRetried() throws Exception {
+        Fixture fixture = new Fixture(); fixture.manager.setRetryDelays(20L, 20L, 20L);
+        AtomicInteger calls = new AtomicInteger();
+        fixture.script = (f, record, messages, sink) -> { calls.incrementAndGet(); LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "HTTP 503"; return reply; };
+        String id = fixture.spawn(false); fixture.settled();
+        check(calls.get() == 4 && SubAgentManager.FAILED.equals(fixture.manager.find(id).status),
+                "Exhausted retries did not end as a failure after 3 retries: " + calls.get());
+        Fixture other = new Fixture(); other.manager.setRetryDelays(20L, 20L, 20L);
+        AtomicInteger bad = new AtomicInteger();
+        other.script = (f, record, messages, sink) -> { bad.incrementAndGet(); LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "HTTP 400"; return reply; };
+        String second = other.spawn(false); other.settled();
+        check(bad.get() == 1 && SubAgentManager.FAILED.equals(other.manager.find(second).status), "A client error was retried");
+    }
+    /** 停止会立刻打断重试等待。 */
+    static void stopInterruptsTheRetryWait() throws Exception {
+        Fixture fixture = new Fixture(); fixture.manager.setRetryDelays(60000L);
+        CountDownLatch failed = new CountDownLatch(1);
+        fixture.script = (f, record, messages, sink) -> { failed.countDown(); LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "HTTP 502"; return reply; };
+        String id = fixture.spawn(false); await(failed);
+        long deadline = System.currentTimeMillis() + 3000;
+        while (!"retrying".equals(fixture.manager.find(id).phase) && System.currentTimeMillis() < deadline) Thread.sleep(10);
+        check("retrying".equals(fixture.manager.find(id).phase), "Retry wait was not visible as progress");
+        long started = System.currentTimeMillis();
+        fixture.manager.stopFromUser(id); fixture.settled();
+        check(System.currentTimeMillis() - started < 3000 && SubAgentManager.STOPPED.equals(fixture.manager.find(id).status),
+                "Stop did not interrupt the retry wait");
+    }
+    /** 重启后中断的子代理：dormant；用户只续跑一个时兄弟仍中断，主会话续跑时一起带上。 */
+    static void restoredChildrenStayDormantUntilResumed() throws Exception {
+        Store store = new Store();
+        for (String name : new String[]{"agent_one", "agent_two"}) {
+            SubAgentManager.Record r = new SubAgentManager.Record();
+            r.id = name; r.parentId = "main"; r.name = name; r.task = "recover " + name; r.status = SubAgentManager.RUNNING;
+            r.sessionId = 1; r.inFlight = "recover " + name; r.inFlightRequest = "recover " + name; r.resume = true; r.inFlightStarted = true;
+            r.currentTaskId = "task_" + name;
+            r.tasks.put(new JSONObject().put("taskId", "task_" + name).put("request", "recover " + name).put("status", "running"));
+            r.history.put(Message.system("old").toCheckpointJson());
+            r.history.put(Message.user("recover " + name).toCheckpointJson());
+            store.save(r);
+        }
+        Fixture fixture = new Fixture(store);
+        check(fixture.manager.dormant("agent_one") && fixture.manager.dormant("agent_two") && fixture.childCalls.get() == 0,
+                "Restored children were not dormant or started on their own");
+        check(fixture.manager.resumeFromUser("agent_one"), "Single resume was refused");
+        long deadline = System.currentTimeMillis() + 5000;
+        while (fixture.manager.find("agent_one").status.equals(SubAgentManager.QUEUED) || fixture.manager.find("agent_one").status.equals(SubAgentManager.RUNNING)) {
+            check(System.currentTimeMillis() < deadline, "Resumed child did not finish"); Thread.sleep(10);
+        }
+        check(fixture.childCalls.get() == 1 && fixture.manager.dormant("agent_two"), "Single resume also started the sibling");
+        fixture.manager.resumePending(); fixture.settled();
+        check(fixture.childCalls.get() == 2 && !fixture.manager.dormant("agent_two"), "Parent resume did not bring the sibling along");
+    }
     public static void main(String[] args) throws Exception {
         String[] names = {"defaultSpawnIsIndependentAndCapturesParentConfiguration", "ordinaryMailNeverBecomesAnIdleTask",
+                "transientFailureRetriesAndThenCompletes", "exhaustedRetriesFailAndClientErrorsAreNotRetried",
+                "stopInterruptsTheRetryWait", "restoredChildrenStayDormantUntilResumed",
                 "explicitTasksKeepEarlierResultsAndDistinctIds", "failedFollowupDoesNotEraseCompletedEvidence", "emptyFollowupCannotReuseAnOldAnswer",
                 "stoppedTaskPreservesPartialAndRejectsLateResurrection", "userCanReopenAClosedChildButTheModelCannot", "reportsSeparateProgressPartialAndFinal",
                 "longStoppedAndFailedPartialIsDeliveredCompletely", "distinctLongFinalAndPartialStreamsBothReachTheParent",

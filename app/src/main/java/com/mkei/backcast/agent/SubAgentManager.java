@@ -153,6 +153,8 @@ public final class SubAgentManager {
     private boolean schedulingEnabled;
     private volatile boolean cancelled;
     private String persistenceError = "";
+    /** 网络或服务错误后自动重试的等待时间；都失败才把这次任务标成失败、通知主代理。 */
+    private long[] retryDelaysMs = { 5000L, 15000L, 45000L };
     private volatile WorkObserver workObserver;
 
     public SubAgentManager(int maxParallel, Factory factory, Store store) throws Exception {
@@ -228,7 +230,11 @@ public final class SubAgentManager {
             root.rootWakeAllowed = true;
         }
         persistQuietly(ROOT);
-        synchronized (lock) { schedulingEnabled = true; scheduleLocked(); }
+        synchronized (lock) {
+            // 主会话续跑时把重启后中断的子代理一起带上（包括用户只续跑某一个时暂缓的兄弟）。
+            for (Slot slot : slots.values()) if (!ROOT.equals(slot.task.id) && !slot.stop) slot.ready = true;
+            schedulingEnabled = true; scheduleLocked();
+        }
         notifyWorkChanged();
     }
 
@@ -270,6 +276,39 @@ public final class SubAgentManager {
             schedulingEnabled = true; scheduleLocked(); lock.notifyAll();
         }
         notifyWorkChanged(); return found;
+    }
+
+    /** 测试用：缩短重试等待。 */
+    public void setRetryDelays(long... delaysMs) {
+        synchronized (lock) { retryDelaysMs = delaysMs == null ? new long[0] : delaysMs.clone(); }
+    }
+
+    /**
+     * 重启前在跑、恢复后还没被续跑的子代理：状态仍是 queued，但没人调度它。
+     * 界面据此显示「已中断」和继续三角，不再显示「运行中」和停止键。
+     */
+    public boolean dormant(String id) {
+        synchronized (lock) {
+            Slot slot = slots.get(id);
+            return slot != null && !ROOT.equals(id) && !cancelled && !slot.executing && !slot.stop
+                    && QUEUED.equals(slot.task.status) && (!schedulingEnabled || !slot.ready);
+        }
+    }
+
+    /** 用户在子代理页点继续：只续跑这一个，其余中断的兄弟仍等主会话续跑时一起带上。 */
+    public boolean resumeFromUser(String id) {
+        synchronized (lock) {
+            Slot target = slots.get(id);
+            if (target == null || ROOT.equals(id) || cancelled || target.executing || target.stop
+                    || !QUEUED.equals(target.task.status)) return false;
+            for (Slot slot : slots.values()) {
+                if (slot == target || ROOT.equals(slot.task.id) || slot.executing) continue;
+                if (QUEUED.equals(slot.task.status) && (!schedulingEnabled || !slot.ready)) slot.ready = false;
+            }
+            target.ready = true; schedulingEnabled = true; scheduleLocked(); lock.notifyAll();
+        }
+        notifyWorkChanged();
+        return true;
     }
 
     public void setMaxParallel(int count) {
@@ -1238,6 +1277,7 @@ public final class SubAgentManager {
             else if (!resume) slot.loop.submitDelegated(request, reference, slot.task.currentTaskId,
                     slot.task.sessionId, slot.loop.generation(), ++slot.uiToken);
             if (slot.loop.wasRefused()) synchronized (lock) { slot.task.error = PromptGuard.REFUSAL; }
+            retryInterrupted(slot);
             // Mail that reached this agent while it was finishing is handled before the final answer.
             while (!slot.stop && !cancelled && slot.task.error.length() == 0 && hasInbox(slot.task.id)) {
                 JSONObject collected = collectResults(slot.task.id, null);
@@ -1286,6 +1326,30 @@ public final class SubAgentManager {
                 scheduleLocked(); lock.notifyAll();
             }
             notifyWorkChanged();
+        }
+    }
+
+    /**
+     * 断网、超时、429、5xx 中断、还没答完：按 retryDelaysMs 等一会儿再接着跑，不重开任务，也不先通知主代理。
+     * 停止、取消会立刻打断等待。重试都失败时 error 保留最后一次的原因，由调用方照原流程标失败。
+     */
+    private void retryInterrupted(Slot slot) throws Exception {
+        long[] delays;
+        synchronized (lock) { delays = retryDelaysMs.clone(); }
+        for (int attempt = 0; attempt < delays.length; attempt++) {
+            if (slot.stop || cancelled || !slot.loop.interruptedTransiently()) return;
+            synchronized (lock) {
+                String reason = slot.task.error;
+                slot.task.error = "";
+                updateProgressLocked(slot, "retrying", "", "请求中断（" + Text.clip(reason, 120) + "），"
+                        + Math.max(1L, delays[attempt] / 1000L) + " 秒后第 " + (attempt + 1) + " 次重试");
+                long until = System.currentTimeMillis() + delays[attempt];
+                for (long left = delays[attempt]; left > 0 && !slot.stop && !cancelled;
+                        left = until - System.currentTimeMillis()) lock.wait(left);
+                if (slot.stop || cancelled) return;
+            }
+            persistQuietly(slot.task.id);
+            slot.loop.resume(slot.task.sessionId, ++slot.uiToken);
         }
     }
 

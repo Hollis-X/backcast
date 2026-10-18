@@ -224,6 +224,10 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private String childId = "";
     private String childRendered = "";
     private boolean childBusy, childSending;
+    /** 重启后中断、还没续跑的子代理（状态还是 queued，但没人调度）：显示「已中断」和继续三角。 */
+    private boolean childDormant;
+    /** 子代理这次任务异常停止时的原任务，点继续三角按原任务重新派一次；没有为 null。 */
+    private String childRetryTask;
     /**
      * 子代理页的通信记录，渲染对话前按收件 mailId、派活 taskId、发出的原文建索引，
      * 画到对应的协作消息、派活气泡和 send_message / report_agent 调用时取出来，穿插在发生的位置。
@@ -2153,6 +2157,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         historyReader.execute(new Runnable() {
             @Override public void run() {
                 SubAgentManager.Record record = null;
+                boolean asleep = false;
                 List<Message> messages = childParsedMessages;
                 org.json.JSONArray comms = new org.json.JSONArray();
                 try {
@@ -2162,6 +2167,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                     boolean changed = stamp != childParsedStamp || childParsedMessages.isEmpty();
                     record = manager == null ? null : manager.find(childId, changed);
                     if (record != null) comms = manager.communications(childId);
+                    asleep = record != null && manager.dormant(childId);
                     if (record != null && changed) {
                         messages = childTail(record.history);
                         childParsedStamp = stamp;
@@ -2171,6 +2177,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                     recordUiFailure(childRoot, "ui:agent_chat", error);
                 }
                 final SubAgentManager.Record row = record;
+                final boolean dormant = asleep;
                 final List<Message> page = messages;
                 final org.json.JSONArray log = comms;
                 ui(new Runnable() {
@@ -2185,6 +2192,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                             return;
                         }
                         childMissing = 0;
+                        childDormant = dormant;
                         showChild(row, page, log);
                         // 运行中每秒刷新；空闲时也慢慢看，别的代理发来消息、对方读到的回执都能跟上。
                         if (slashResumed) stream.postDelayed(childPoll, childBusy ? 1000L : 3000L);
@@ -2218,7 +2226,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private Object[] childPending;
 
     private void showChild(SubAgentManager.Record row, List<Message> messages, org.json.JSONArray comms) {
-        childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status);
+        childBusy = com.mkei.backcast.ui.AgentPanelState.active(row.status) && !childDormant;
+        childRetryTask = SubAgentManager.FAILED.equals(row.status) && !"cancelled".equals(row.phase)
+                && row.task != null && row.task.trim().length() > 0 ? row.task : null;
         sessionTitle.setText(row.name);
         bindChildStatus(row);
         // 已结束、已关闭的子代理也能接着聊：发出去就是新任务，沿用原来的上下文。
@@ -2369,7 +2379,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     private void bindChildStatus(SubAgentManager.Record row) {
         if (sessionSub == null) return;
         boolean failed = SubAgentManager.FAILED.equals(row.status) && !"cancelled".equals(row.phase);
-        int text = childBusy ? R.string.agent_chat_running : failed ? R.string.agent_chat_failed
+        int text = childBusy ? R.string.agent_chat_running : childDormant ? R.string.agent_chat_interrupted
+                : failed ? R.string.agent_chat_failed
                 : SubAgentManager.STOPPED.equals(row.status) || SubAgentManager.FAILED.equals(row.status)
                 ? R.string.agent_chat_closed : 0;
         sessionSub.setVisibility(text == 0 ? View.GONE : View.VISIBLE);
@@ -2384,6 +2395,36 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         } else {
             sessionSub.setCompoundDrawables(null, null, null, null);
         }
+    }
+
+    /**
+     * 子代理页的继续三角：重启后中断的只续跑这一个；异常停止的按原任务重新派一次（它保留之前的上下文接着做）。
+     */
+    private void resumeChild() {
+        if (childSending) return;
+        childSending = true;
+        final String retry = childDormant ? null : childRetryTask;
+        tintSend(false);
+        historyReader.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    SubAgentManager manager = childManager();
+                    if (manager == null) throw new IllegalStateException("子代理不存在");
+                    if (manager.dormant(childId)) manager.resumeFromUser(childId);
+                    else if (retry != null) manager.sendFromUser(childId, retry, "task");
+                } catch (Exception error) {
+                    recordUiFailure(childRoot, "ui:agent_chat", error);
+                }
+                ui(new Runnable() {
+                    @Override public void run() {
+                        childSending = false;
+                        if (activityDestroyed || isFinishing()) return;
+                        childRendered = "";
+                        loadChild();
+                    }
+                });
+            }
+        });
     }
 
     /** 跟主会话发消息一样：气泡先出来，后面的回复随轮询画上。 */
@@ -2404,6 +2445,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                     SubAgentManager.Record target = manager.find(childId);
                     manager.sendFromUser(childId, text,
                             com.mkei.backcast.ui.AgentPanelState.active(target.status) ? "message" : "task");
+                    // 重启后中断的子代理没人调度：消息进了收件箱也不会被处理，顺手续跑它。
+                    if (manager.dormant(childId)) manager.resumeFromUser(childId);
                 } catch (Exception error) {
                     failure = error;
                     recordUiFailure(childRoot, "ui:agent_chat", error);
@@ -2537,7 +2580,9 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
     /** 主会话空闲、上一轮停在请求失败且还没答完：可以一键续跑。 */
     private boolean resumable() {
-        return !childMode && loop != null && stop.getVisibility() != View.VISIBLE && loop.interrupted();
+        if (stop.getVisibility() == View.VISIBLE) return false;
+        if (childMode) return !childBusy && !childSending && (childDormant || childRetryTask != null);
+        return loop != null && loop.interrupted();
     }
 
     /** 三角键：和重进会话时续跑同一条路，不插入用户消息，接着原来那一行「工作了」走。 */
@@ -3094,7 +3139,11 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
     
 
     private void onSend() {
-        if (childMode) { sendToChild(); return; }
+        if (childMode) {
+            if (prompt.getText().toString().trim().length() == 0 && resumable()) resumeChild();
+            else sendToChild();
+            return;
+        }
         // Browsing and drafting remain available while a tool is running; sending never replaces it.
         if (sessionOpening || stop.getVisibility() == View.VISIBLE || loop != null && loop.busy()) return;
         final String text = prompt.getText().toString().trim();

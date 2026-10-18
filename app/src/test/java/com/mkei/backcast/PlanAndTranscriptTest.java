@@ -150,7 +150,7 @@ public class PlanAndTranscriptTest {
         assertFalse("the accepted plan stays the latest", cards.get(0).isHistory());
     }
 
-    /** 上一轮停在网络错误、还没答完：输入框为空时发送键是「继续任务」三角，一输入文字就变回发送。 */
+    /** 会话停在半路（断网、被停下或 App 重启）：输入框为空时发送键是「继续任务」三角，一输入文字就变回发送。 */
     @Test
     @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     public void interruptedTurnTurnsSendIntoResume() throws Exception { resumeCase("24-resume-button.png"); }
@@ -171,12 +171,7 @@ public class PlanAndTranscriptTest {
         loopField.setAccessible(true);
         com.mkei.backcast.agent.AgentLoop loop = (com.mkei.backcast.agent.AgentLoop) loopField.get(main);
         assertNotNull("session loop", loop);
-        java.lang.reflect.Field flag = com.mkei.backcast.agent.AgentLoop.class.getDeclaredField("interruptedByRequestFailure");
-        flag.setAccessible(true);
-        flag.setBoolean(loop, true);
-        java.lang.reflect.Method tint = MainActivity.class.getDeclaredMethod("tintSend", boolean.class);
-        tint.setAccessible(true);
-        tint.invoke(main, false);
+        // 不设网络错误标记、也不手动刷新按钮：模拟 App 重启后打开一个停在半路的会话，打开时就该是三角。
         settle(2);
         View send = main.findViewById(R.id.send);
         assertEquals("继续任务", String.valueOf(send.getContentDescription()));
@@ -194,7 +189,6 @@ public class PlanAndTranscriptTest {
         ((android.widget.EditText) main.findViewById(R.id.prompt)).setText("换个问题");
         settle(2);
         assertEquals("发送", String.valueOf(send.getContentDescription()));
-        flag.setBoolean(loop, false);
     }
 
     /** 同一任务里续跑出来的新工作段不再画「工作了」，总耗时只在最上面那一行。 */
@@ -333,6 +327,65 @@ public class PlanAndTranscriptTest {
                 + ((TextView) page.findViewById(R.id.session_title)).getText() + " shown="
                 + seen.subList(Math.max(0, seen.size() - 6), seen.size()) + " count=" + seen.size(), shown);
         assertNotNull(page.findViewById(R.id.stream));
+    }
+
+    /** 已经答完的会话不显示继续三角。 */
+    @Test
+    public void finishedTurnKeepsTheSendArrow() throws Exception {
+        Context app = configure();
+        ChatStore store = new ChatStore(app);
+        long sid = store.create("答完");
+        store.append(sid, Message.user("你好"));
+        Message done = Message.assistant("你好！", null);
+        done.elapsedMs = 1000;
+        store.append(sid, done);
+        store.close();
+        Activity main = open(app);
+        java.lang.reflect.Method tint = MainActivity.class.getDeclaredMethod("tintSend", boolean.class);
+        tint.setAccessible(true);
+        tint.invoke(main, false);
+        assertEquals("发送", String.valueOf(main.findViewById(R.id.send).getContentDescription()));
+    }
+
+    /** 重启前在跑的子代理：恢复后没人调度，页面显示「已中断」、没有停止键，发送键是继续三角。 */
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void childInterruptedByRestartShowsResume() throws Exception {
+        Context app = configure();
+        ChatStore store = new ChatStore(app);
+        long sid = store.create("重启");
+        store.append(sid, Message.user("派一个子代理"));
+        SubAgentManager.Record record = new SubAgentManager.Record();
+        record.id = "cut"; record.parentId = SubAgentManager.ROOT; record.name = "verify-collect"; record.path = "/main/verify-collect";
+        record.task = "核对组包函数"; record.status = SubAgentManager.RUNNING; record.phase = "tool";
+        record.inFlight = "核对组包函数"; record.inFlightRequest = "核对组包函数"; record.resume = true; record.inFlightStarted = true;
+        record.lastActivityAt = System.currentTimeMillis();
+        JSONArray history = new JSONArray();
+        history.put(Message.system("system").toCheckpointJson());
+        history.put(Message.delegated("核对组包函数", "").toCheckpointJson());
+        history.put(Message.assistant("我会先核对样本。", call("t1", "shell", "{\"command\":\"ls\"}")).toCheckpointJson());
+        record.history = history;
+        childStore(sid).save(record);
+        store.close();
+        Intent chat = new Intent(app, SubAgentChatActivity.class)
+                .putExtra(MainActivity.EXTRA_AGENT_ROOT, sid).putExtra(MainActivity.EXTRA_AGENT_ID, "cut");
+        Activity page = Robolectric.buildActivity(SubAgentChatActivity.class, chat).setup().get();
+        TextView sub = (TextView) page.findViewById(R.id.session_sub);
+        for (int i = 0; i < 60 && !"已中断".contentEquals(sub.getText()); i++) { settle(1); Thread.sleep(20); }
+        assertEquals("已中断", String.valueOf(sub.getText()));
+        assertEquals("no stop button for an interrupted child", View.GONE, page.findViewById(R.id.stop).getVisibility());
+        assertEquals("继续任务", String.valueOf(page.findViewById(R.id.send).getContentDescription()));
+        String dir = System.getenv("BACKCAST_SCREENSHOTS");
+        if (dir != null && dir.length() > 0) {
+            View decor = page.getWindow().getDecorView();
+            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(decor.getWidth(), decor.getHeight(),
+                    android.graphics.Bitmap.Config.ARGB_8888);
+            decor.draw(new android.graphics.Canvas(bitmap));
+            new java.io.File(dir).mkdirs();
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, "25-child-interrupted.png"))) {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+            }
+        }
     }
 
     /** 和 RunHub 用同一个目录：子代理记录直接写成 JSON 文件，打开页面时由 RunHub 读回来。 */
