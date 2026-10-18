@@ -1388,7 +1388,15 @@ public class AgentLoop {
         saveRun(false, ownerToken, gen);
     }
 
-    private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, LlmClient.Sink sink,
+    /** 请求在还没收到任何输出时就断了（网络抖动、408/429/5xx），按这些间隔原样重发，都失败才停下。 */
+    private long[] requestRetryDelaysMs = { 2000L, 5000L, 15000L, 30000L };
+
+    /** 测试用：改请求重试的等待间隔；传空数组表示不重试。 */
+    public void setRequestRetryDelays(long... delaysMs) {
+        synchronized (lock) { requestRetryDelaysMs = delaysMs == null ? new long[0] : delaysMs.clone(); }
+    }
+
+    private LlmClient.Reply sendRequest(List<Message> messages, JSONArray tools, final LlmClient.Sink sink,
             final int token, final int gen, String purpose) {
         LlmClient current;
         final Object lease = new Object();
@@ -1421,29 +1429,51 @@ public class AgentLoop {
                 ToolRegistry selectedTools = currentTools();
                 if (selectedTools != null) selectedTools.selectMcpTool(currentMcpSelection());
             }
-            LlmClient.Reply reply = current.sendIfCurrent(messages, tools, sink, new LlmClient.RequestValidity() {
-                @Override public boolean isCurrent() { return !stale(token, gen); }
-            });
-            if (requestRecorder instanceof DetailedRequestRecorder && requestSession >= 0 && reply != null) {
-                boolean cancelledRequest = stale(token, gen);
-                try {
-                    long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - started);
-                    String outcome = cancelledRequest ? "cancelled" : reply.error == null ? "success"
-                            : isTransient(reply.error) ? "retryable_error" : "error";
-                    String reason = cancelledRequest || reply.error == null ? "" : failureReason(reply.error);
-                    ((DetailedRequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
-                            elapsed, outcome, reason, 0,
-                            reply.diagnostic == null ? "" : Diagnostics.boundedJson(reply.diagnostic));
-                } catch (RuntimeException diagnosticFailure) {
-                    // A full or unavailable diagnostic store must not discard a valid model response.
+            // 已经往界面吐过字的请求不重发：半截内容已经显示出来，重发会重复。
+            final boolean[] streamed = { false };
+            LlmClient.Sink watched = sink == null ? null : new LlmClient.Sink() {
+                @Override public void onReasoning(String delta) { streamed[0] = true; sink.onReasoning(delta); }
+                @Override public void onContent(String delta) { streamed[0] = true; sink.onContent(delta); }
+                @Override public void onToolCall(int index, String id, String name, String arguments) {
+                    streamed[0] = true; sink.onToolCall(index, id, name, arguments);
                 }
+            };
+            long[] delays;
+            synchronized (lock) { delays = requestRetryDelaysMs.clone(); }
+            for (int attempt = 0; ; attempt++) {
+                long attemptStarted = SystemClock.elapsedRealtime();
+                LlmClient.Reply reply = current.sendIfCurrent(messages, tools, watched, new LlmClient.RequestValidity() {
+                    @Override public boolean isCurrent() { return !stale(token, gen); }
+                });
+                // 权限审查请求失败照旧停下（宁可不执行），只有模型和压缩请求自动重发。
+                boolean retry = reply != null && reply.error != null && !streamed[0] && attempt < delays.length
+                        && ("model".equals(purpose) || "compact".equals(purpose))
+                        && transientFailure(reply) && !stale(token, gen);
+                if (requestRecorder instanceof DetailedRequestRecorder && requestSession >= 0 && reply != null) {
+                    boolean cancelledRequest = stale(token, gen);
+                    try {
+                        long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - attemptStarted);
+                        String outcome = cancelledRequest ? "cancelled" : reply.error == null ? "success"
+                                : transientFailure(reply) ? "retryable_error" : "error";
+                        String reason = cancelledRequest || reply.error == null ? "" : failureReason(reply.error);
+                        ((DetailedRequestRecorder) requestRecorder).recordRequest(requestSession, purpose,
+                                elapsed, outcome, reason, attempt,
+                                reply.diagnostic == null ? "" : Diagnostics.boundedJson(reply.diagnostic));
+                    } catch (RuntimeException diagnosticFailure) {
+                        // A full or unavailable diagnostic store must not discard a valid model response.
+                    }
+                }
+                UsageObserver observer = usageObserver;
+                if (observer != null && reply != null && !stale(token, gen)) {
+                    long used = Math.max(0L, reply.promptTokens) + Math.max(0L, reply.completionTokens);
+                    if (used > 0) observer.onUsage(used);
+                }
+                if (!retry) return reply;
+                long delay = Math.max(0L, delays[attempt]);
+                listener.onProgress(gen, "retrying", "", "网络中断，" + Math.max(1L, (delay + 999L) / 1000L)
+                        + " 秒后第 " + (attempt + 1) + " 次重试");
+                if (!waitForRequestRetry(token, gen, delay)) return new LlmClient.Reply();
             }
-            UsageObserver observer = usageObserver;
-            if (observer != null && reply != null && !stale(token, gen)) {
-                long used = Math.max(0L, reply.promptTokens) + Math.max(0L, reply.completionTokens);
-                if (used > 0) observer.onUsage(used);
-            }
-            return reply;
         } finally {
             synchronized (lock) {
                 if (requestLease == lease) {
@@ -1452,6 +1482,25 @@ public class AgentLoop {
                 }
             }
         }
+    }
+
+    /** 等下一次重试；停止或换轮立即返回 false。 */
+    private boolean waitForRequestRetry(int token, int gen, long delayMs) {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(delayMs);
+        synchronized (lock) {
+            while (!stale(token, gen)) {
+                long left = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (left <= 0) return true;
+                try { lock.wait(Math.min(left, 200L)); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return false; }
+            }
+        }
+        return false;
+    }
+
+    /** LlmClient 按异常类型标的可重试，加上错误文字兜底（测试替身和旧路径只给文字）。 */
+    private static boolean transientFailure(LlmClient.Reply reply) {
+        return reply != null && reply.error != null && (reply.retryable || isTransient(reply.error));
     }
 
     private void recordError(JSONObject evidence) {
@@ -1884,7 +1933,7 @@ public class AgentLoop {
             return false;
         }
         if (reply.error != null) {
-            stopAfterRequestFailure(token, gen, reply.error, reply.userMessage);
+            stopAfterRequestFailure(token, gen, reply.error, reply.userMessage, transientFailure(reply));
             return false;
         }
         accountGoalUsage(reply.promptTokens, reply.completionTokens);
@@ -1992,7 +2041,7 @@ public class AgentLoop {
         return tail ? text.substring(at) : text.substring(0, Math.max(0, at));
     }
 
-    /** Classify temporary failures for local diagnostics; they never trigger another request. */
+    /** 按错误文字判断是不是临时故障（断网、握手失败、超时、408/429/5xx）；sendRequest 据此重发。 */
     private static boolean isTransient(String error) {
         if (error == null) {
             return false;
@@ -2015,7 +2064,12 @@ public class AgentLoop {
                 || e.contains("unable to resolve")
                 || e.contains("unknownhost")
                 || e.contains("network is unreachable")
-                || e.contains("connection refused");
+                || e.contains("connection refused")
+                || e.contains("connection closed")
+                || e.contains("stream was reset")
+                || e.contains("eofexception")
+                || e.contains("sslhandshake")
+                || e.contains("sslexception");
     }
 
     /** 连续空续跑。对齐 Codex：标成 blocked，不再自动续。 */
@@ -2062,9 +2116,9 @@ public class AgentLoop {
         return true;
     }
 
-    private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
+    private void stopAfterRequestFailure(int token, int gen, String error, String userMessage, boolean transientError) {
         if (!stopRun(token, gen)) return;
-        synchronized (lock) { interruptedByRequestFailure = true; interruptedTransient = isTransient(error); }
+        synchronized (lock) { interruptedByRequestFailure = true; interruptedTransient = transientError; }
         synchronized (uiLock) {
             // Failed partial text/arguments are not committed history. A later
             // explicit resume must not replay them or need a fake retry event.
@@ -2312,7 +2366,7 @@ public class AgentLoop {
                 return;
             }
             if (reply.error != null) {
-                stopAfterRequestFailure(token, gen, reply.error, reply.userMessage);
+                stopAfterRequestFailure(token, gen, reply.error, reply.userMessage, transientFailure(reply));
                 return;
             }
             // 用量记到目标账上；记满会转入 budget_limited，让这一轮收尾。
@@ -2411,7 +2465,7 @@ public class AgentLoop {
             } catch (ReviewRequestFailure failure) {
                 if (stale(token, gen)) return;
                 fillMissingTools(sessionId, "权限审查请求失败，本轮未执行。");
-                stopAfterRequestFailure(token, gen, failure.getMessage(), failure.userMessage);
+                stopAfterRequestFailure(token, gen, failure.getMessage(), failure.userMessage, isTransient(failure.getMessage()));
                 return;
             }
             if (stale(token, gen)) return;

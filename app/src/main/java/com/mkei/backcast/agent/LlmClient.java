@@ -126,6 +126,8 @@ public class LlmClient {
         public JSONObject diagnostic;
         /** Short notification text; raw provider errors remain private diagnostic evidence. */
         public String userMessage;
+        /** 网络层断开（握手失败、连接被关、超时）或 408/429/5xx：重发同一个请求可能就好。 */
+        public boolean retryable;
         /** 这一次请求服务端报的用量。0 表示对方没给。 */
         public long promptTokens;
         public long completionTokens;
@@ -507,8 +509,12 @@ public class LlmClient {
                         detail = sdk.options.jsonMapper().writeValueAsString(((com.openai.errors.OpenAIServiceException) e).body());
                     } catch (Exception missingDetail) { /* HTTP status remains authoritative. */ }
                     reply.error = "HTTP " + mine.status + ": " + trim(detail, 500);
+                    int code = mine.status;
+                    reply.retryable = code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504;
                 } else reply.error = (waitingHeaders && failure instanceof java.io.InterruptedIOException
                         ? "响应头等待超时：" : "") + failure.getClass().getSimpleName() + ": " + failure.getMessage();
+                if (mine.status == 0 && (failure instanceof java.io.IOException || e instanceof java.io.IOException))
+                    reply.retryable = true;
                 if (e instanceof NetworkRouting.Failure) {
                     reply.userMessage = ((NetworkRouting.Failure) e).getMessage();
                     mine.networkDiagnostic = ((NetworkRouting.Failure) e).diagnostic;
@@ -538,6 +544,7 @@ public class LlmClient {
         reply.displayParts = null;
         reply.diagnostic = null;
         reply.userMessage = null;
+        reply.retryable = false;
     }
 
     private String notification(Attempt mine) {

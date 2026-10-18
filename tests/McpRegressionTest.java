@@ -617,7 +617,7 @@ public final class McpRegressionTest {
                 }
             };
             AgentLoop loop = new AgentLoop(client, registry, new AgentLoop.Quiet()); loop.bindSession(1L); loop.reset("system");
-            loop.setContextBudget(1000, 0.9f);
+            loop.setContextBudget(1000, 0.9f); loop.setRequestRetryDelays();
             loop.setRecorder(new AgentLoop.Recorder() {
                 @Override public void record(long sid, Message message) { }
                 @Override public void replace(long sid, List<Message> messages) { checkpoint.clear(); checkpoint.addAll(messages); }

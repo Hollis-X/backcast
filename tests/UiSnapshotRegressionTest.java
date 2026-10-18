@@ -38,7 +38,7 @@ public final class UiSnapshotRegressionTest {
                 }
             };
             loop = new AgentLoop(client, tools, new AgentLoop.Quiet());
-            loop.reset("fixture");
+            loop.reset("fixture"); loop.setRequestRetryDelays();
             loop.setRecorder(new AgentLoop.Recorder() {
                 @Override public void record(long sid, Message message) { stored.add(message); }
                 @Override public void replace(long sid, List<Message> messages) { }

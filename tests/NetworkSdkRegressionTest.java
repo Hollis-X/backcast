@@ -86,18 +86,20 @@ public final class NetworkSdkRegressionTest {
         } finally { NetworkRouting.install(null); }
         pass("actualConnectionFailureProbesWithoutResending");
     }
-    private static void serverFailureStopsLoopWithoutRetryOrProbe() throws Exception {
+    private static void serverFailureRetriesThenStopsWithoutProbe() throws Exception {
         Route route = new Route(); NetworkRouting.install((endpoint, valid) -> route);
         AtomicInteger errors = new AtomicInteger();
         try (Server server = new Server(503, "{\"error\":{\"message\":\"unavailable\"}}")) {
             AgentLoop loop = new AgentLoop(server.client(), new ToolRegistry(), new AgentLoop.Quiet() {
                 @Override public void onError(int gen, String text) { check(text.contains("无法处理"), "Raw HTTP error reached notification"); errors.incrementAndGet(); }
 
-            }); loop.bindSession(7); loop.reset("fixture"); loop.setGoal("inspect"); loop.submit("inspect", 7, loop.generation(), 1, null);
-            check(server.posts.get() == 1 && route.probe.get() == 0 && errors.get() == 1
-                    && !loop.busy() && Goal.ACTIVE.equals(loop.goalStatus()), "503 retried/probed needlessly or falsely completed the goal");
+            }); loop.bindSession(7); loop.reset("fixture"); loop.setGoal("inspect"); loop.setRequestRetryDelays(1L, 1L, 1L, 1L);
+            loop.submit("inspect", 7, loop.generation(), 1, null);
+            // 真实 HTTP 503：LlmClient 标成可重试，AgentLoop 重发 4 次后才停，只报一次错，不做网络探测。
+            check(server.posts.get() == 5 && route.probe.get() == 0 && errors.get() == 1
+                    && !loop.busy() && Goal.ACTIVE.equals(loop.goalStatus()), "503 was not retried 4 times, probed needlessly or falsely completed the goal: " + server.posts.get());
         } finally { NetworkRouting.install(null); }
-        pass("serverFailureStopsLoopWithoutRetryOrProbe");
+        pass("serverFailureRetriesThenStopsWithoutProbe");
     }
     private static void modelListUsesSelectionAndShortFailure() throws Exception {
         Route route = new Route(); NetworkRouting.install((endpoint, valid) -> route);
@@ -138,7 +140,7 @@ public final class NetworkSdkRegressionTest {
     }
     public static void main(String[] args) throws Exception {
         selectedRouteSendsOneRealPost(); preflightFailureNeverPostsAndPreservesToastEvidence(); actualConnectionFailureProbesWithoutResending();
-        serverFailureStopsLoopWithoutRetryOrProbe(); modelListUsesSelectionAndShortFailure();
+        serverFailureRetriesThenStopsWithoutProbe(); modelListUsesSelectionAndShortFailure();
         invalidLocalHeaderDoesNotProbeInternetOrPost(); cancellationDuringSelectionDoesNotPost();
         System.out.println(passed + " network SDK integration tests passed");
     }

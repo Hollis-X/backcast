@@ -66,6 +66,7 @@ public final class GoalContractRegressionTest {
                 @Override public void onSteer(int gen) { steers++; }
                 @Override public void onError(int gen, String message) { errors.add(message); }
             });
+            loop.setRequestRetryDelays(); // 请求层重试单独测，这里看一次失败后的目标状态
             client.fixture = this;
             loop.bindSession(1L);
             loop.reset("You are a local fixture assistant.");

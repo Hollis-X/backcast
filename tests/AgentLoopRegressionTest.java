@@ -77,6 +77,7 @@ public final class AgentLoopRegressionTest {
         loop.bindSession(1);
         loop.reset("You are a local assistant.\n\n---\nDevice: fixture");
         loop.setRecorder(recorder);
+        loop.setRequestRetryDelays(); // 这里测时钟和续跑，请求层重试在 RequestPolicyRegressionTest
         client.loop = loop;
         return loop;
     }
@@ -618,7 +619,7 @@ public final class AgentLoopRegressionTest {
             }
         };
         AgentLoop loop = new AgentLoop(client, new ToolRegistry(), new AgentLoop.Quiet()); holder[0] = loop;
-        loop.bindSession(1); loop.reset("system");
+        loop.bindSession(1); loop.reset("system"); loop.setRequestRetryDelays();
         loop.loadHistory("system", Arrays.asList(Message.user("unfinished")));
         loop.restoreGoal("finish work", Goal.ACTIVE, 73000L, 0L, 0L, Boolean.FALSE);
         loop.restoreTurnClock(12000L, null);

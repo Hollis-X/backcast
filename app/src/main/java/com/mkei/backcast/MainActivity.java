@@ -3469,6 +3469,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
 
     /** Stage notifications use the same generation and snapshot gate as streamed text. */
     private void applyTurnProgress(String phase, String name, String detail) {
+        if ("retrying".equals(phase) && detail != null && detail.length() > 0)
+            Toast.makeText(this, detail, Toast.LENGTH_SHORT).show();
         if (currentTrace == null) beginWorkRow();
         if (currentTrace == null) return;
         if ("tool_ready".equals(phase)) {
@@ -4375,7 +4377,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
             @Override public void run() {
                 if (!compactLive && currentTrace != null && ("model".equals(currentTrace.phase)
                         || "thinking".equals(currentTrace.phase) || "responding".equals(currentTrace.phase)
-                        || "preview".equals(currentTrace.phase))) rewindLiveRound();
+                        || "preview".equals(currentTrace.phase) || "retrying".equals(currentTrace.phase))) rewindLiveRound();
                 sealLiveAnswer(); settleWork();
                 if (compactLive) dropCompactRow(); else settleCompact();
                 refreshGoal();

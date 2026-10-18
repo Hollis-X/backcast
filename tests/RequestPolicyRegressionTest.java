@@ -12,7 +12,7 @@ import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Actual request failures must stop, preserve completed work, and leave bounded safe diagnostics. */
+/** 网络抖动先原样重发几次；重发用完或不该重发的失败才停下，保留已完成的工作和安全的诊断。 */
 public final class RequestPolicyRegressionTest {
     private static int passed;
     private static void check(boolean ok, String message) { if (!ok) throw new AssertionError(message); }
@@ -42,7 +42,7 @@ public final class RequestPolicyRegressionTest {
         final AgentLoop loop;
         int calls, executions;
         final List<String> phases = new ArrayList<String>();
-        boolean cancelDuringRequest, queueResumeDuringRequest;
+        boolean cancelDuringRequest, queueResumeDuringRequest, streamBeforeFailure, cancelOnRetry;
         Fixture(LlmClient.Reply... script) {
             responses.addAll(Arrays.asList(script));
             LlmClient client = new LlmClient(new LlmClient.Config("http://localhost", "fixture", "fixture")) {
@@ -60,7 +60,9 @@ public final class RequestPolicyRegressionTest {
                         }
                         check(!queued.isAlive(), "Queued resume blocked instead of handing off to the active turn");
                     }
-                    return responses.get(calls - 1);
+                    LlmClient.Reply next = responses.get(calls - 1);
+                    if (streamBeforeFailure && next.error != null && sink != null) sink.onContent("partial");
+                    return next;
                 }
             };
             loop = new AgentLoop(client, tools, new AgentLoop.Quiet() {
@@ -68,9 +70,11 @@ public final class RequestPolicyRegressionTest {
 
                 @Override public void onProgress(int gen, String phase, String name, String detail) {
                     phases.add(phase);
+                    if (cancelOnRetry && "retrying".equals(phase)) loop.cancel();
                 }
             });
             loop.bindSession(7L); loop.reset("fixture"); loop.setRecorder(records);
+            loop.setRequestRetryDelays(1L, 1L, 1L, 1L);
             tools.register(new Tool() {
                 @Override public String name() { return "probe"; }
                 @Override public String description() { return "fixture"; }
@@ -92,39 +96,80 @@ public final class RequestPolicyRegressionTest {
         }
         pass("permanentErrorsStopGoalsImmediately");
     }
-    private static void networkFailuresStopOnTheFirstAttempt() throws Exception {
-        for (boolean goal : new boolean[]{false, true}) for (String cause : new String[]{
-                "HTTP 408: echoed-secret", "HTTP 429: echoed-secret", "HTTP 500: echoed-secret", "HTTP 502: echoed-secret",
-                "HTTP 503: echoed-secret", "HTTP 504: echoed-secret", "SocketTimeoutException: echoed-secret",
-                "SocketException: connection reset echoed-secret", "UnknownHostException: echoed-secret",
-                "network is unreachable echoed-secret"}) {
-            LlmClient.Reply error = reply("partial failed response", cause);
-            error.userMessage = "网络可访问，但AI服务器连接失败";
-            error.diagnostic = new JSONObject().put("provider", "deepseek").put("stage", "transport")
-                    .put("api_key", "secret-key").put("messages", "private request");
-            Fixture f = new Fixture(error, reply("must not be requested", null));
-            if (goal) { f.loop.setGoal("inspect fixture"); f.queueResumeDuringRequest = true; }
-            f.run();
-            check(f.calls == 1 && !f.phases.contains("retry") && f.errors.size() == 1 && !f.loop.busy(),
-                    "Network/server failure retried instead of ending its first request: " + cause);
-            check(f.errors.get(0).equals(error.userMessage) && !f.errors.get(0).contains("echoed-secret"),
-                    "Terminal notification lost the short transport classification or exposed provider data");
-            check(f.records.diagnostics.size() == 1 && f.records.diagnostics.get(0).contains(":retryable_error:0:")
-                            && f.records.elapsed.get(0).longValue() == 37L && f.records.messages.size() == 1,
-                    "Failed request diagnostics were lost or a failed assistant answer was persisted");
+    private static final String[] TRANSIENT = {
+            "HTTP 408: echoed-secret", "HTTP 429: echoed-secret", "HTTP 500: echoed-secret", "HTTP 502: echoed-secret",
+            "HTTP 503: echoed-secret", "HTTP 504: echoed-secret", "SocketTimeoutException: echoed-secret",
+            "SocketException: connection reset echoed-secret", "UnknownHostException: echoed-secret",
+            "network is unreachable echoed-secret", "SSLHandshakeException: echoed-secret", "EOFException: echoed-secret"};
+    private static LlmClient.Reply transportFailure(String cause) throws Exception {
+        LlmClient.Reply error = reply("", cause);
+        error.userMessage = "网络可访问，但AI服务器连接失败";
+        error.diagnostic = new JSONObject().put("provider", "deepseek").put("stage", "transport")
+                .put("api_key", "secret-key").put("messages", "private request");
+        return error;
+    }
+    /** 握手失败、连接被掐、408/429/5xx：等一会儿原样重发，下一次成功就接着跑，不打扰用户。 */
+    private static void networkFailuresRetryAndRecover() throws Exception {
+        for (String cause : TRANSIENT) {
+            Fixture f = new Fixture(transportFailure(cause), transportFailure(cause), reply("recovered", null)); f.run();
+            check(f.calls == 3 && f.errors.isEmpty() && !f.loop.busy() && f.phases.contains("retrying"),
+                    "Transient failure was not retried until it recovered: " + cause + " calls=" + f.calls + " " + f.errors);
+            check(f.records.diagnostics.size() == 3 && f.records.diagnostics.get(0).contains(":retryable_error:0:")
+                            && f.records.diagnostics.get(1).contains(":retryable_error:1:")
+                            && f.records.diagnostics.get(2).contains(":success:2:")
+                            && "recovered".equals(f.records.messages.get(f.records.messages.size() - 1).content),
+                    "Retried attempts were not recorded separately or the recovered answer was lost: " + f.records.diagnostics);
             JSONObject saved = new JSONObject(f.records.details.get(0));
             check("deepseek".equals(saved.getString("provider")) && "transport".equals(saved.getString("stage"))
                             && !saved.toString().contains("secret-key") && !saved.toString().contains("private request"),
                     "Detailed local diagnostic lost provider/stage or retained confidential request data");
+        }
+        // 只靠 LlmClient 的异常分类（文字认不出）也要重发。
+        LlmClient.Reply flagged = reply("", "IOException: proxy closed"); flagged.retryable = true;
+        Fixture f = new Fixture(flagged, reply("recovered", null)); f.run();
+        check(f.calls == 2 && f.errors.isEmpty(), "A failure classified retryable by the client was not retried");
+        pass("networkFailuresRetryAndRecover");
+    }
+    /** 重发 4 次都失败才停下：只报一次错，目标不被关掉，发送键可以续跑。 */
+    private static void exhaustedRetriesStopOnce() throws Exception {
+        for (boolean goal : new boolean[]{false, true}) {
+            LlmClient.Reply error = transportFailure("SSLHandshakeException: echoed-secret");
+            Fixture f = new Fixture(error, error, error, error, error, reply("must not be requested", null));
+            if (goal) { f.loop.setGoal("inspect fixture"); f.queueResumeDuringRequest = true; }
+            f.run();
+            check(f.calls == 5 && f.errors.size() == 1 && !f.loop.busy(),
+                    "Exhausted retries did not stop after the fifth attempt: calls=" + f.calls + " " + f.errors);
+            check(f.errors.get(0).equals(error.userMessage) && !f.errors.get(0).contains("echoed-secret"),
+                    "Terminal notification lost the short transport classification or exposed provider data");
+            check(f.records.diagnostics.size() == 5 && f.records.diagnostics.get(4).contains(":retryable_error:4:")
+                            && f.records.messages.size() == 1,
+                    "Failed attempts were not all recorded or a failed assistant answer was persisted");
+            check(f.loop.interrupted() && f.loop.interruptedTransiently(), "Exhausted network retry did not leave a resumable interruption");
             if (goal) check(Goal.ACTIVE.equals(f.loop.goalStatus()), "Request failure falsely completed or blocked an unfinished goal");
         }
-        pass("networkFailuresStopOnTheFirstAttempt");
+        pass("exhaustedRetriesStopOnce");
+    }
+    /** 已经吐过字的请求断了不重发（界面上已有半截内容）；停止会立刻打断重试等待。 */
+    private static void streamedFailuresAndStopsAreNotRetried() throws Exception {
+        LlmClient.Reply error = transportFailure("SocketException: connection reset");
+        Fixture streamed = new Fixture(error, reply("must not be requested", null));
+        streamed.streamBeforeFailure = true; streamed.run();
+        check(streamed.calls == 1 && streamed.errors.size() == 1 && !streamed.phases.contains("retrying"),
+                "A request that already streamed output was sent again");
+        Fixture stopped = new Fixture(error, reply("must not be requested", null));
+        stopped.loop.setRequestRetryDelays(60000L); stopped.cancelOnRetry = true;
+        long started = System.nanoTime();
+        stopped.run();
+        check(stopped.calls == 1 && System.nanoTime() - started < 5_000_000_000L && !stopped.loop.busy(),
+                "Stop did not interrupt the retry wait");
+        pass("streamedFailuresAndStopsAreNotRetried");
     }
     private static void failedFollowupPreservesWorkUntilExplicitResume() throws Exception {
         LlmClient.Reply call = reply("", null);
         call.toolCalls = new JSONArray().put(new JSONObject().put("id", "fixture-call").put("type", "function")
                 .put("function", new JSONObject().put("name", "probe").put("arguments", "{}")));
-        Fixture f = new Fixture(call, reply("", "SocketException: connection reset"), reply("done", null)); f.run();
+        Fixture f = new Fixture(call, reply("", "SocketException: connection reset"), reply("done", null));
+        f.loop.setRequestRetryDelays(); f.run();
         check(f.calls == 2 && f.executions == 1 && f.errors.size() == 1,
                 "Failed followup was automatically retried or repeated completed work");
         check(f.records.diagnostics.get(0).contains(":success:0:") && f.records.diagnostics.get(1).contains(":retryable_error:0:")
@@ -139,20 +184,21 @@ public final class RequestPolicyRegressionTest {
     }
     private static void compactionOutagesStopWithoutChangingTheWindow() {
         LlmClient.Reply error = reply("", "SocketTimeoutException: fixture");
-        Fixture f = new Fixture(error, error, error);
+        Fixture f = new Fixture(error, error, error, error, error, reply("must not be requested", null));
         f.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
         f.loop.compactNow(7L, f.loop.generation(), 1);
-        check(f.calls == 1 && f.errors.size() == 1 && !f.phases.contains("retry") && !f.loop.busy(), "Compaction outage retried");
+        check(f.calls == 5 && f.errors.size() == 1 && f.phases.contains("retrying") && !f.loop.busy(),
+                "Compaction outage was not retried and then stopped: " + f.calls);
         for (String value : f.records.diagnostics) check(value.contains(":compact:retryable_error:"), "Compaction misclassified");
         check(f.loop.historySnapshot().get(f.loop.historySnapshot().size() - 1).content.equals("answer"), "Failed compression destroyed window");
-        Fixture automatic = new Fixture(error, reply("must not be requested", null));
+        Fixture automatic = new Fixture(error, error, error, error, error, reply("must not be requested", null));
         automatic.loop.setGoal("inspect fixture"); automatic.loop.setContextBudget(1, .9f);
         automatic.loop.loadHistory("fixture", Arrays.asList(Message.user("previous"), Message.assistant("answer", null)));
         automatic.run();
-        check(automatic.calls == 1 && automatic.errors.size() == 1 && !automatic.loop.busy()
+        check(automatic.calls == 5 && automatic.errors.size() == 1 && !automatic.loop.busy()
                         && automatic.records.diagnostics.get(0).contains(":compact:retryable_error:0:")
                         && Goal.ACTIVE.equals(automatic.loop.goalStatus()) && automatic.loop.historySnapshot().get(1).content.equals("previous"),
-                "Automatic compaction outage retried, sent a generation request, lost the old window or closed the goal");
+                "Automatic compaction outage was not bounded, sent a generation request, lost the old window or closed the goal");
         pass("compactionOutagesStopWithoutChangingTheWindow");
     }
     private static void cancelledRequestsLeaveNoSuccessfulResult() {
@@ -222,7 +268,8 @@ public final class RequestPolicyRegressionTest {
     }
     private static void pass(String name) { passed++; System.out.println("PASS " + name); }
     public static void main(String[] args) throws Exception {
-        permanentErrorsStopGoalsImmediately(); networkFailuresStopOnTheFirstAttempt(); failedFollowupPreservesWorkUntilExplicitResume();
+        permanentErrorsStopGoalsImmediately(); networkFailuresRetryAndRecover(); exhaustedRetriesStopOnce();
+        streamedFailuresAndStopsAreNotRetried(); failedFollowupPreservesWorkUntilExplicitResume();
         compactionOutagesStopWithoutChangingTheWindow(); cancelledRequestsLeaveNoSuccessfulResult(); reviewRequestsHaveSeparateDiagnostics();
         reviewFailuresStopBeforeApprovalOrExecution(); contextOverflowStopsWithoutAutomaticRepairOrCompactionRetry();
         diagnosticStorageFailureDoesNotDiscardAResponse();

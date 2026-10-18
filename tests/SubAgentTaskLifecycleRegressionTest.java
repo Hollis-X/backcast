@@ -32,6 +32,8 @@ public final class SubAgentTaskLifecycleRegressionTest {
         public synchronized void save(SubAgentManager.Record value) throws Exception { saved.put(value.id, copy(value)); }
     }
     static final class Fixture implements SubAgentManager.ContextFactory {
+        /** 子代理自己的请求层重试；默认关掉，让下面的用例单独测子代理层的重试。 */
+        long[] requestRetryDelays = new long[0];
         final Store store;
         final SubAgentManager manager;
         final AgentLoop root;
@@ -52,6 +54,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
                     return text("parent response");
                 }
             }, rootTools, new AgentLoop.Quiet());
+            root.setRequestRetryDelays();
             root.bindSession(1); root.reset("captured system"); root.setAutomaticDelegation(true);
             manager = new SubAgentManager(2, this, store); manager.attachRoot(root);
         }
@@ -65,7 +68,8 @@ public final class SubAgentTaskLifecycleRegressionTest {
                 }
             };
             ToolRegistry tools = new ToolRegistry(); SubAgentTools.register(tools, shared, record.id);
-            AgentLoop child = new AgentLoop(client, tools, listener); child.reset("new child system"); return child;
+            AgentLoop child = new AgentLoop(client, tools, listener); child.reset("new child system");
+                child.setRequestRetryDelays(requestRetryDelays); return child;
         }
         String spawn(boolean fork) throws Exception { return manager.spawn("main", "worker", "first assignment", fork).getString("id"); }
         void settled() throws Exception {
@@ -580,6 +584,21 @@ public final class SubAgentTaskLifecycleRegressionTest {
         check(SubAgentManager.IDLE.equals(record.status) && record.tasks.length() == 1
                 && record.result.contains("done after retry"), "Retry did not finish the same task: " + record.status + " " + record.error);
     }
+    /** 子代理请求层先重发：握手失败一次就好，不用等子代理层的整轮重试。 */
+    static void requestRetryRecoversInsideTheChild() throws Exception {
+        Fixture fixture = new Fixture(); fixture.manager.setRetryDelays(60000L); fixture.requestRetryDelays = new long[]{1L, 1L};
+        AtomicInteger calls = new AtomicInteger();
+        fixture.script = (f, record, messages, sink) -> {
+            if (calls.incrementAndGet() == 1) { LlmClient.Reply reply = new LlmClient.Reply(); reply.error = "SSLHandshakeException: fixture"; return reply; }
+            return text("done after request retry");
+        };
+        long started = System.nanoTime();
+        String id = fixture.spawn(false); fixture.settled();
+        SubAgentManager.Record record = fixture.manager.find(id);
+        check(calls.get() == 2 && System.nanoTime() - started < 30_000_000_000L, "Request-level retry did not recover inside the child: " + calls.get());
+        check(SubAgentManager.IDLE.equals(record.status) && record.result.contains("done after request retry"),
+                "Request-level retry did not finish the task: " + record.status + " " + record.error);
+    }
     /** 重试都失败：照原流程标失败、通知主代理；400 之类的请求错误不重试。 */
     static void exhaustedRetriesFailAndClientErrorsAreNotRetried() throws Exception {
         Fixture fixture = new Fixture(); fixture.manager.setRetryDelays(20L, 20L, 20L);
@@ -635,7 +654,7 @@ public final class SubAgentTaskLifecycleRegressionTest {
     }
     public static void main(String[] args) throws Exception {
         String[] names = {"defaultSpawnIsIndependentAndCapturesParentConfiguration", "ordinaryMailNeverBecomesAnIdleTask",
-                "transientFailureRetriesAndThenCompletes", "exhaustedRetriesFailAndClientErrorsAreNotRetried",
+                "transientFailureRetriesAndThenCompletes", "requestRetryRecoversInsideTheChild", "exhaustedRetriesFailAndClientErrorsAreNotRetried",
                 "stopInterruptsTheRetryWait", "restoredChildrenStayDormantUntilResumed",
                 "explicitTasksKeepEarlierResultsAndDistinctIds", "failedFollowupDoesNotEraseCompletedEvidence", "emptyFollowupCannotReuseAnOldAnswer",
                 "stoppedTaskPreservesPartialAndRejectsLateResurrection", "userCanReopenAClosedChildButTheModelCannot", "reportsSeparateProgressPartialAndFinal",

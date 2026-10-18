@@ -1215,7 +1215,8 @@ public final class SubAgentManager {
                     @Override public void onCompactStart(int gen) { reportProgress(slot, "compacting", "", null); }
                     @Override public void onCompacted(int gen, boolean followup) { reportProgress(slot, "model", "", null); }
                     @Override public void onProgress(int gen, String phase, String name, String detail) {
-                        reportStage(slot, phase, name);
+                        // 请求层重试的「网络中断，N 秒后第 K 次重试」要显示出来；其余阶段的 detail 是工具参数，不进进度。
+                        reportStage(slot, phase, name, "retrying".equals(phase) ? detail : null);
                     }
                 }, this);
                 if (loop == null) throw new IllegalStateException("Child factory returned no loop");
@@ -1383,12 +1384,12 @@ public final class SubAgentManager {
         if (save) persistQuietly(slot.task.id);
     }
 
-    private void reportStage(Slot slot, String phase, String tool) {
+    private void reportStage(Slot slot, String phase, String tool, String summary) {
         if (phase == null || phase.length() == 0) return;
         String name = tool == null ? "" : tool;
         synchronized (lock) {
             if (slot.stop || CLOSED.equals(slot.task.status)) return;
-            updateProgressLocked(slot, phase, name, null);
+            updateProgressLocked(slot, phase, name, summary);
             slot.lastProgressPersist = System.currentTimeMillis();
         }
         // Tool detail is often a complete script/JSON payload; it belongs to
