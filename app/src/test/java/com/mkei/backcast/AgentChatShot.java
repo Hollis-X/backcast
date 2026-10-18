@@ -129,15 +129,15 @@ public class AgentChatShot {
         checker.events.put(event("e5", "message", "main", "a1", "也顺便看一下 README 里的用法说明。", t + 240000)
                 .put("mailId", "m4").put("status", "pending").put("fromUser", true));
         checker.events.put(event("e6", "error", "a1", "main", "模型请求失败", t + 300000).put("taskId", "t1").put("resultId", "r1"));
-        store.saveSubAgentRecord("session-" + sid, checker.toJson());
+        childStore(sid).save(checker);
         SubAgentManager.Record reviewer = agent("a2", "script_reviewer", SubAgentManager.IDLE);
         reviewer.task = "审阅 show.sh 的输出格式，发现问题直接找 demo_checker 确认";
         reviewer.events.put(event("r1", "message", "a2", "a1", "show.sh 第 2 行的「已完成」标记要和 todo.txt 一致，麻烦确认一下。", t + 120000)
                 .put("mailId", "m2").put("status", "pending"));
         reviewer.events.put(event("r2", "message", "a1", "a2", "已确认：两边都是「已完成」，格式一致。", t + 180000)
                 .put("mailId", "m3").put("status", "pending"));
-        store.saveSubAgentRecord("session-" + sid, reviewer.toJson());
-        store.saveSubAgentRecord("session-" + sid, agent("a3", "doc_writer", SubAgentManager.CLOSED).toJson());
+        childStore(sid).save(reviewer);
+        childStore(sid).save(agent("a3", "doc_writer", SubAgentManager.CLOSED));
         store.close();
 
         Intent list = new Intent(app, SubAgentsActivity.class).putExtra(SubAgentsActivity.EXTRA_SESSION_ID, sid);
@@ -145,5 +145,10 @@ public class AgentChatShot {
         Intent chat = new Intent(app, SubAgentChatActivity.class)
                 .putExtra(MainActivity.EXTRA_AGENT_ROOT, sid).putExtra(MainActivity.EXTRA_AGENT_ID, "a1");
         shoot(Robolectric.buildActivity(SubAgentChatActivity.class, chat).setup().get(), dir, "22-agent-chat" + suffix + ".png");
+    }
+
+    /** 和 RunHub 用同一个目录：子代理记录直接写成 JSON 文件，打开页面时由 RunHub 读回来。 */
+    private static JsonSubAgentStore childStore(long sid) {
+        return new JsonSubAgentStore(new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "sub-agents"), sid, null);
     }
 }

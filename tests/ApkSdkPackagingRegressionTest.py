@@ -60,7 +60,7 @@ def main():
             "Lcom/mkei/backcast/agent/InternetReachability;",
             "Lcom/mkei/backcast/net/DeviceNetworks;",
             "Lcom/mkei/backcast/ui/MarkdownRenderQueue;",
-            "Lcom/mkei/backcast/SQLiteSubAgentStore;",
+            "Lcom/mkei/backcast/JsonSubAgentStore;",
             "Lcom/mkei/backcast/tool/ToolchainDownloader;",
             "Lcom/mkei/backcast/tool/ObjectionBootstrap;",
             "Lcom/mkei/backcast/tool/FindFilesTool;",

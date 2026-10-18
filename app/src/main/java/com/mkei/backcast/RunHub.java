@@ -55,7 +55,7 @@ public final class RunHub {
     private volatile com.mkei.backcast.agent.UserQuestions questions;
     private final Map<AgentLoop, TemporaryWorkspace> temporary = new ConcurrentHashMap<AgentLoop, TemporaryWorkspace>();
     private final Map<AgentLoop, SubAgentManager> children = new ConcurrentHashMap<AgentLoop, SubAgentManager>();
-    private final Map<AgentLoop, SQLiteSubAgentStore> childStores = new ConcurrentHashMap<AgentLoop, SQLiteSubAgentStore>();
+    private final Map<AgentLoop, JsonSubAgentStore> childStores = new ConcurrentHashMap<AgentLoop, JsonSubAgentStore>();
     private final Map<AgentLoop, ChildOwner> childOwners = new ConcurrentHashMap<AgentLoop, ChildOwner>();
     private final Map<ToolRegistry, ToolContext> toolContexts = java.util.Collections.synchronizedMap(
             new java.util.WeakHashMap<ToolRegistry, ToolContext>());
@@ -392,7 +392,7 @@ public final class RunHub {
         loop.bindSession(sessionId);
         TemporaryWorkspace materials = temporary.get(loop);
         if (materials != null) materials.bindSession(sessionId);
-        SQLiteSubAgentStore childStore = childStores.get(loop);
+        JsonSubAgentStore childStore = childStores.get(loop);
         if (childStore != null) childStore.bindSession(sessionId);
         loops.put(Long.valueOf(sessionId), loop);
         if (draft == loop) {
@@ -433,7 +433,7 @@ public final class RunHub {
             loop.clearGoal();
             loop.cancel();
             SubAgentManager manager = children.remove(loop);
-            SQLiteSubAgentStore checkpoint = childStores.remove(loop);
+            JsonSubAgentStore checkpoint = childStores.remove(loop);
             if (checkpoint != null) checkpoint.remove();
             if (manager != null) for (AgentLoop child : manager.runtimeLoops()) {
                 childOwners.remove(child);
@@ -445,6 +445,11 @@ public final class RunHub {
                     @Override public void run() { materials.cleanupRecovered(); }
                 }).start();
             }
+        }
+        // 会话没加载过时也没有对应的 store 实例，直接按会话编号清掉它的子代理记录。
+        if (sessionId >= 0) {
+            try { JsonSubAgentStore.removeOwner(subAgentRoot(), sessionId); }
+            catch (java.io.IOException failure) { store.recordDiagnostic(sessionId, "sub_agent_store", "子 agent 记录删除失败", String.valueOf(failure.getMessage())); }
         }
     }
 
@@ -514,14 +519,14 @@ public final class RunHub {
             recovered = true;
         }
         ids = store.runningIds();
-        for (Long sid : store.subAgentWorkSessionIds()) if (!ids.contains(sid)) ids.add(sid);
+        for (Long sid : JsonSubAgentStore.workSessionIds(subAgentRoot())) if (!ids.contains(sid)) ids.add(sid);
         for (int i = 0; i < ids.size(); i++) {
             final long sid = ids.get(i).longValue();
             final AgentLoop loop;
             final ChatStore.Run savedRun = store.readRun(sid);
             final boolean parentRunning = savedRun.running;
             final boolean childRestartOnly;
-            try { childRestartOnly = store.subAgentUserRestartOnly(sid); }
+            try { childRestartOnly = JsonSubAgentStore.userRestartOnly(subAgentRoot(), sid); }
             catch (RuntimeException failure) {
                 collaborationFailure(sid, "子代理恢复权限损坏，原记录已保留", failure);
                 continue;
@@ -649,11 +654,19 @@ public final class RunHub {
         return next;
     }
 
+    /** 子代理记录的根目录：每个会话一个子目录，见 {@link JsonSubAgentStore}。 */
+    private java.io.File subAgentRoot() { return new java.io.File(app.getFilesDir(), "sub-agents"); }
+
     private SubAgentManager manager(final AgentLoop parent) {
         SubAgentManager known = children.get(parent);
         if (known != null) return known;
         try {
-            final SQLiteSubAgentStore checkpoint = new SQLiteSubAgentStore(store, parent.sessionKey());
+            final JsonSubAgentStore checkpoint = new JsonSubAgentStore(subAgentRoot(), parent.sessionKey(),
+                    new JsonSubAgentStore.FailureSink() {
+                        @Override public void record(long sessionId, String summary, String detail) {
+                            store.recordDiagnostic(sessionId, "sub_agent_store", summary, detail);
+                        }
+                    });
             SubAgentManager created = new SubAgentManager(settings.agentConcurrency(), new SubAgentManager.ContextFactory() {
                 @Override public JSONObject capture(AgentLoop source) throws Exception {
                     JSONObject snapshot = source.captureChildContext();

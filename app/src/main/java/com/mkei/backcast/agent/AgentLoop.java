@@ -1081,6 +1081,7 @@ public class AgentLoop {
 
     /** 模型声明完成、阻塞、无可执行目标或用户要求暂停。 */
     public String closeGoal(String status, String reason) {
+        String leftover = null;
         if (Goal.COMPLETE.equals(status) || Goal.INVALID.equals(status)) {
             SubAgentManager children = subAgents;
             if (children != null && (children.hasPendingWork() || children.hasUncollectedResults())) {
@@ -1095,11 +1096,10 @@ public class AgentLoop {
                     return "错误：当前没有进行中的目标。";
                 }
             }
+            // 清理失败不拦住结束：失败常是系统原因（例如重启前留下、无法核验的目录），
+            // 模型做不了什么，拦住它只会让它不停找别的事做。结果里写明残留，由模型转告用户。
             ToolRegistry tools = currentTools();
-            String cleanup = tools == null ? null : tools.cleanupTemporary(false);
-            if (cleanup != null) {
-                return "错误：临时材料尚未清理，目标不能结束：" + cleanup;
-            }
+            leftover = tools == null ? null : tools.cleanupTemporary(false);
         }
         synchronized (lock) {
             // 预算用尽还在收尾那一轮时，模型仍可以声明完成或遇到阻塞；
@@ -1140,14 +1140,17 @@ public class AgentLoop {
         if (children != null) children.disarmRootWake();
         saveRun(busy);
         String report = goalReport();
-        if (Goal.INVALID.equals(status)) {
-            try {
-                return new JSONObject(report).put("invalidReason", reason.trim()).toString();
-            } catch (Exception invalid) {
-                throw new IllegalStateException(invalid);
+        try {
+            JSONObject result = null;
+            if (Goal.INVALID.equals(status)) result = new JSONObject(report).put("invalidReason", reason.trim());
+            if (leftover != null) {
+                if (result == null) result = new JSONObject(report);
+                result.put("temporaryCleanup", "临时材料未能清理，目标仍已结束；在最终答复里告诉用户残留位置：" + leftover);
             }
+            return result == null ? report : result.toString();
+        } catch (Exception invalid) {
+            throw new IllegalStateException(invalid);
         }
-        return report;
     }
 
     public String goalReport() {
@@ -2332,7 +2335,13 @@ public class AgentLoop {
                         stopForNoProgress(idle, sessionId, gen, token);
                         return;
                     }
-                    addSteer(token, gen, sessionId);
+                    // 只回文字却没标完成：续跑改用收尾提示，让它对照用户的要求标完成，或只做还差的那一条，
+                    // 而不是普通续跑说明里的「证据不够就继续工作」——那会让它交完总结后不停找没要求的活。
+                    // 子代理还在跑时，那段文字多半是「已派出、等结果」，仍用普通续跑说明。
+                    SubAgentManager working = subAgents;
+                    boolean summary = content != null && content.trim().length() > 0
+                            && (working == null || !working.hasPendingWork());
+                    addSteer(token, gen, sessionId, true, summary);
                     if (!stale(token, gen)) continue;
                 } else if (budgetPromptDue()) {
                     // 预算刚用完：注入一次收尾说明，给模型一次收尾机会。
@@ -2904,6 +2913,11 @@ public class AgentLoop {
     }
 
     private void addSteer(int token, int gen, long sessionId, boolean newTurn) {
+        addSteer(token, gen, sessionId, newTurn, false);
+    }
+
+    /** wrapUp：模型刚交了总结、目标仍 active，用收尾提示代替普通续跑说明。 */
+    private void addSteer(int token, int gen, long sessionId, boolean newTurn, boolean wrapUp) {
         boolean limited;
         boolean retargeted;
         long used, budget;
@@ -2920,6 +2934,8 @@ public class AgentLoop {
             note = Goal.objectiveUpdated(objective, used, budget);
         } else if (limited) {
             note = Goal.budgetLimit(objective, used, budget, goalElapsed() / 1000L);
+        } else if (wrapUp) {
+            note = Goal.wrapUp(objective, used, budget);
         } else {
             note = Goal.continuation(objective, used, budget);
         }

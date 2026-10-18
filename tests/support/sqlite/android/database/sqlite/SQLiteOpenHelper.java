@@ -7,8 +7,9 @@ public abstract class SQLiteOpenHelper {
         requestedVersion=version;
         if (shared==null) shared=new SQLiteDatabase();
     }
-    public SQLiteDatabase getWritableDatabase() { if(!initialized){onCreate(shared);initialized=true;}return shared; }
+    public SQLiteDatabase getWritableDatabase() { if(!initialized){onCreate(shared);initialized=true;onOpen(shared);}return shared; }
     public SQLiteDatabase getReadableDatabase() { return getWritableDatabase(); }
     public abstract void onCreate(SQLiteDatabase database);
+    public void onOpen(SQLiteDatabase database) {}
     public abstract void onUpgrade(SQLiteDatabase database,int oldVersion,int newVersion);
 }

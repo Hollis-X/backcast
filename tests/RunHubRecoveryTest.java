@@ -70,7 +70,7 @@ public final class RunHubRecoveryTest {
                 + "public static class Run { public String goal=\"\", status=\"\"; public long elapsedMs,tokensUsed,tokenBudget; public Long turnElapsedMs,turnThinkMs; public boolean running; public Boolean budgetWrapFinished; }"
                 + "private static final java.util.Map<Long,Run> runs=new java.util.HashMap<Long,Run>();"
                 + "public static long pausedRead=-1; public static java.util.concurrent.CountDownLatch readStarted,readRelease;"
-                + "public static int runSaves,clockSaves;public static java.util.Set<Long> restartOnly=new java.util.HashSet<Long>();public boolean subAgentUserRestartOnly(long sid){return restartOnly.contains(sid);}public static java.util.List<Long> childWork=new java.util.ArrayList<Long>();public java.util.List<Long> subAgentWorkSessionIds(){return new java.util.ArrayList<Long>(childWork);}"
+                + "public static int runSaves,clockSaves;public static java.util.Set<Long> restartOnly=new java.util.HashSet<Long>();public static java.util.List<Long> childWork=new java.util.ArrayList<Long>();"
                 + "public static long requestSession,requestElapsed,diagnosticSession;public static String requestPurpose,requestOutcome,requestReason,requestDiagnostic,diagnosticSource,diagnosticSummary,diagnosticDetail;public static int requestRetry,diagnosticCalls;"
                 + "public static void pauseRead(long sid) { pausedRead=sid; readStarted=new java.util.concurrent.CountDownLatch(1); readRelease=new java.util.concurrent.CountDownLatch(1); }"
                 + "public ChatStore(android.content.Context c) {}"
@@ -150,8 +150,12 @@ public final class RunHubRecoveryTest {
                 + "public long usageLease(String id){return 7L;}"
                 + "public AgentLoop createChild(String id,long sid,AgentLoop.Listener listener)throws Exception{"
                 + "Record r=new Record();r.id=id;r.sessionId=sid;r.forkConfig=((ContextFactory)factory).capture(parent);return createTaskChild(r,listener);}public AgentLoop createTaskChild(Record r,AgentLoop.Listener listener)throws Exception{AgentLoop l=factory.create(r,listener,this);l.bindSession(r.sessionId);loops.add(l);return l;} }");
-        add(files, "com.mkei.backcast.SQLiteSubAgentStore", "public class SQLiteSubAgentStore implements com.mkei.backcast.agent.SubAgentManager.Store {"
-                + "public String owner;public long sessionId;public int binds,removes;public SQLiteSubAgentStore(ChatStore store,long sid){sessionId=sid;owner=sid<0?\"draft-fixture\":\"session-\"+sid;}"
+        add(files, "com.mkei.backcast.JsonSubAgentStore", "public class JsonSubAgentStore implements com.mkei.backcast.agent.SubAgentManager.Store {"
+                + "public interface FailureSink{void record(long sid,String summary,String detail);}"
+                + "public static java.util.List<Long> workSessionIds(java.io.File root){return new java.util.ArrayList<Long>(ChatStore.childWork);}"
+                + "public static boolean userRestartOnly(java.io.File root,long sid){return ChatStore.restartOnly.contains(sid);}"
+                + "public static java.util.List<Long> removedOwners=new java.util.ArrayList<Long>();public static void removeOwner(java.io.File root,long sid)throws java.io.IOException{removedOwners.add(sid);}"
+                + "public String owner;public long sessionId;public int binds,removes;public JsonSubAgentStore(java.io.File root,long sid,FailureSink sink){sessionId=sid;owner=sid<0?\"draft-fixture\":\"session-\"+sid;}"
                 + "public void bindSession(long sid){sessionId=sid;owner=\"session-\"+sid;binds++;}public void remove(){removes++;} }");
         add(files, "com.mkei.backcast.agent.ToolRegistry", "public class ToolRegistry { public java.util.List<String> names=new java.util.ArrayList<String>();public java.util.List<Object> tools=new java.util.ArrayList<Object>(); public void register(Object tool) { names.add(tool.getClass().getSimpleName());tools.add(tool); } }");
         for (String name : Arrays.asList("EditTool", "GoalTool", "GetGoalTool", "PlanTool", "AskUserTool", "ReadTool", "FindFilesTool", "ShellTool", "WriteTool", "TemporaryTool", "ToolkitTool")) {

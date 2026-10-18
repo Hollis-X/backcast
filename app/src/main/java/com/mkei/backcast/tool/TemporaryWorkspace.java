@@ -26,6 +26,8 @@ public final class TemporaryWorkspace {
         final String owner;
         String lease;
         boolean processPending;
+        /** 登记进程时开着 root：重启后要用 root 才看得到那些进程。旧登记没有这一项，按开着算。 */
+        boolean processRoot;
         final ArrayList<ProcessCleanup> processes = new ArrayList<ProcessCleanup>();
 
         Allocation(File directory, String workspace, String owner, String lease) {
@@ -46,6 +48,8 @@ public final class TemporaryWorkspace {
     private final ArrayList<Allocation> allocations = new ArrayList<Allocation>();
     private final ThreadLocal<String> turn = new ThreadLocal<String>();
     private String loadError;
+    /** 重启前留下、本进程已经报过一次的清理失败；之后每轮重试仍失败时不再算进本轮的清理结果。 */
+    private final java.util.Set<String> reportedStale = new java.util.HashSet<String>();
     public TemporaryWorkspace(String workDir, boolean useRoot, File stateDir, long sessionId) {
         configure(workDir, useRoot);
         this.stateDir = canonical(stateDir);
@@ -161,6 +165,7 @@ public final class TemporaryWorkspace {
                 verify(allocation);
                 allocation.processes.add(process);
                 allocation.processPending = true;
+                allocation.processRoot |= useRoot;
                 // Persist before the supervisor is acknowledged. Losing live
                 // callbacks at process death must never imply verified exit.
                 save();
@@ -238,10 +243,17 @@ public final class TemporaryWorkspace {
         for (int i = allocations.size() - 1; i >= 0; i--) {
             Allocation allocation = allocations.get(i);
             if (!allocation.lease.equals(lease) && !RECOVERED.equals(allocation.lease)) continue;
+            // 本轮清理顺带重试重启前留下的目录：它失败了不代表本轮没清干净，只报一次。
+            boolean stale = RECOVERED.equals(allocation.lease) && !RECOVERED.equals(lease);
             try {
                 budget.check();
                 if (allocation.processPending && allocation.processes.isEmpty()) {
-                    throw new IllegalStateException("上次进程结束状态尚未验证，原进程身份已不可恢复，保留临时目录。");
+                    // 重启后结束进程的回调已经没了：查 /proc，确认没有进程的当前目录或打开的文件在这个目录里才删。
+                    String busy = holders(allocation, budget);
+                    if (busy != null) {
+                        throw new IllegalStateException("重启前启动的进程仍在使用临时目录，已保留目录：" + busy);
+                    }
+                    allocation.processPending = false;
                 }
                 for (int p = allocation.processes.size() - 1; p >= 0; p--) {
                     ProcessCleanup process = allocation.processes.get(p);
@@ -257,8 +269,11 @@ public final class TemporaryWorkspace {
                 allocations.remove(i);
             } catch (Exception failure) {
                 allocation.lease = RECOVERED;
+                String path = allocation.directory.getPath();
+                if (stale && !reportedStale.add(path)) continue;
                 if (errors.length() > 0) errors.append('\n');
-                errors.append(allocation.directory.getPath()).append("：").append(failure.getMessage());
+                if (stale) errors.append("（重启前留下的目录，与本轮无关）");
+                errors.append(path).append("：").append(failure.getMessage());
             }
         }
         try {
@@ -281,6 +296,149 @@ public final class TemporaryWorkspace {
 
     private void verify(Allocation allocation) throws Exception {
         verify(allocation, null);
+    }
+
+    /**
+     * 重启前启动、结束回调已随旧进程丢失的目录：先结束仍占用它的进程，再让调用方删目录。
+     *
+     * 判定占用的依据是进程的当前目录或任一打开的文件落在这个临时目录里（目录是 App 私有的，只有本 App 自己的进程
+     * 或本 App 用 root 起的进程才进得来）。结束时按进程号发 SIGKILL（发前重核启动时间，避免号被别的进程复用后误杀），
+     * 占用进程若是自己进程组的组长，连它的进程组一起结束，带走同组的子进程。结束后再扫一遍：
+     * 都清了返回 null（可以删目录），还有占用返回剩下的进程号和命令行（保留目录）。
+     *
+     * 开着 root 时用 root 扫全部 /proc；没有 root 只能看到本 App 自己的进程，登记时开过 root 的目录（可能是 root 进程占用）
+     * 就确认不了，直接抛异常保留目录。
+     */
+    private String holders(Allocation allocation, CleanupBudget budget) throws Exception {
+        String directory = allocation.directory.getPath();
+        if (useRoot && RootShell.available(budget)) {
+            return rootRecover(directory, budget);
+        }
+        if (allocation.processRoot) {
+            throw new IllegalStateException("登记时开着 root，现在 root 不可用，确认不了重启前的进程已结束，保留临时目录。");
+        }
+        return ownRecover(new File("/proc"), directory, budget);
+    }
+
+    /** root：在一条命令里扫描、结束、循环等待再扫描，打印仍占用目录的进程。只结束占用本目录的进程。 */
+    private String rootRecover(String directory, CleanupBudget budget) throws Exception {
+        String d = RootShell.quote(directory);
+        String command = "d=" + d + "; hold() { mode=$1; for p in /proc/[0-9]*; do [ -d \"$p\" ] || continue; "
+                + "pid=${p#/proc/}; hit=; "
+                + "case \"$(readlink \"$p/cwd\" 2>/dev/null)\" in \"$d\"|\"$d\"/*) hit=1;; esac; "
+                + "if [ -z \"$hit\" ]; then for f in \"$p\"/fd/*; do "
+                + "case \"$(readlink \"$f\" 2>/dev/null)\" in \"$d\"|\"$d\"/*) hit=1; break;; esac; done; fi; "
+                + "[ -n \"$hit\" ] || continue; "
+                + "cmd=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null | cut -c1-120); "
+                + "s=; IFS= read -r s 2>/dev/null < \"$p/stat\" || continue; s=${s##*) }; set -- $s; "
+                + "[ $# -ge 4 ] || continue; pgid=$3; "
+                + "if [ \"$mode\" = kill ]; then kill -9 \"$pid\" 2>/dev/null; "
+                + "[ \"$pid\" = \"$pgid\" ] && kill -9 -\"$pid\" 2>/dev/null; "
+                + "else printf '%s %s\\n' \"$pid\" \"$cmd\"; fi; "
+                + "done; }; "
+                + "hold kill; i=0; while [ $i -lt 20 ]; do [ -z \"$(hold)\" ] && break; sleep 0.1; i=$((i+1)); done; "
+                + "hold; exit 0";
+        RootShell.Out out = RootShell.exec(command, null, 8192, budget.remainingMillis(4000), budget);
+        if (out.exit != 0) throw new IllegalStateException("root 清理残留进程失败，exit=" + out.exit + "，保留临时目录。");
+        String text = new String(out.stdout, "UTF-8").trim();
+        return text.length() == 0 ? null : text.replace('\n', '；');
+    }
+
+    /** 没有 root 时只扫本 App 能读的进程；读不到的属于别的用户，不会是这里起的非 root 进程。 */
+    String ownRecover(File proc, String directory, CleanupBudget budget) throws Exception {
+        for (String[] holder : scanOwn(proc, directory, budget)) {
+            if (budget != null) budget.check();
+            killOwn(holder[0], holder[1], holder[2]);
+        }
+        for (int i = 0; i < 20 && !scanOwn(proc, directory, budget).isEmpty(); i++) {
+            if (budget != null) budget.pause(100); else Thread.sleep(100);
+        }
+        StringBuilder found = new StringBuilder();
+        for (String[] holder : scanOwn(proc, directory, budget)) {
+            if (found.length() > 0) found.append('；');
+            found.append(holder[0]).append(' ').append(holder[3]);
+        }
+        return found.length() == 0 ? null : found.toString();
+    }
+
+    /** 当前目录或打开的文件落在目录里的本 App 进程，每条 {pid, 启动时间, 进程组, 命令行}。 */
+    private static java.util.List<String[]> scanOwn(File proc, String directory, CleanupBudget budget) throws Exception {
+        File[] entries = proc.listFiles();
+        if (entries == null) throw new IllegalStateException("读不到 /proc，确认不了重启前的进程已结束，保留临时目录。");
+        String self = new File(proc, "self").getCanonicalFile().getName();
+        java.util.List<String[]> holders = new ArrayList<String[]>();
+        for (File entry : entries) {
+            if (budget != null) budget.check();
+            String pid = entry.getName();
+            if (!pid.matches("[0-9]+") || pid.equals(self)) continue;
+            boolean hit = inside(link(new File(entry, "cwd")), directory);
+            File[] fds = hit ? null : new File(entry, "fd").listFiles();
+            if (fds != null) for (File fd : fds) {
+                if (inside(link(fd), directory)) { hit = true; break; }
+            }
+            if (!hit) continue;
+            String[] stat = stat(entry);
+            if (stat == null) continue;
+            holders.add(new String[]{pid, stat[0], stat[1], cmdline(entry)});
+        }
+        return holders;
+    }
+
+    /** 发前重核启动时间：号被复用后那条读到的就是别的进程，启动时间对不上，不发。组长连进程组一起结束。 */
+    private static void killOwn(String pid, String start, String pgid) throws Exception {
+        StringBuilder c = new StringBuilder();
+        c.append("s=; IFS= read -r s 2>/dev/null < /proc/").append(pid).append("/stat || exit 0; ")
+                .append("s=${s##*) }; set -- $s; [ $# -ge 20 ] || exit 0; shift 19; ")
+                .append("[ \"$1\" = ").append(RootShell.quote(start)).append(" ] || exit 0; ")
+                .append("kill -9 ").append(pid).append(" 2>/dev/null; ");
+        if (pid.equals(pgid)) c.append("kill -9 -").append(pid).append(" 2>/dev/null; ");
+        c.append("exit 0");
+        Process killer = new ProcessBuilder("sh", "-c", c.toString()).redirectErrorStream(true).start();
+        try {
+            killer.getOutputStream().close();
+            killer.getInputStream().close();
+            killer.waitFor();
+        } finally { killer.destroyForcibly(); }
+    }
+
+    /** /proc/pid/stat 的启动时间（第 22 项）和进程组（第 5 项）；读不到返回 null。 */
+    private static String[] stat(File entry) {
+        String line = firstLine(new File(entry, "stat"));
+        if (line == null) return null;
+        int close = line.lastIndexOf(')');
+        if (close < 0) return null;
+        String[] fields = line.substring(close + 1).trim().split("\\s+");
+        if (fields.length < 20) return null;
+        return new String[]{ fields[19], fields[2] };
+    }
+
+    private static String firstLine(File file) {
+        try (FileInputStream in = new FileInputStream(file)) {
+            byte[] buffer = new byte[4096];
+            int n = in.read(buffer);
+            if (n <= 0) return null;
+            String text = new String(buffer, 0, n, "UTF-8");
+            int nl = text.indexOf('\n');
+            return nl < 0 ? text : text.substring(0, nl);
+        } catch (Exception unreadable) { return null; }
+    }
+
+    private static String cmdline(File entry) {
+        try (FileInputStream in = new FileInputStream(new File(entry, "cmdline"))) {
+            byte[] head = new byte[120];
+            int n = in.read(head);
+            return n > 0 ? new String(head, 0, n, "UTF-8").replace('\0', ' ').trim() : "";
+        } catch (Exception unreadable) { return ""; }
+    }
+
+    private static String link(File file) {
+        if (file == null) return null;
+        try { return java.nio.file.Files.readSymbolicLink(file.toPath()).toString(); }
+        catch (Exception unreadable) { return null; }
+    }
+
+    private static boolean inside(String path, String directory) {
+        return path != null && (path.equals(directory) || path.startsWith(directory + File.separator));
     }
 
     private void verify(Allocation allocation, CleanupBudget budget) throws Exception {
@@ -391,6 +549,7 @@ public final class TemporaryWorkspace {
                 }
                 Allocation allocation = new Allocation(path, base.getPath(), owner, RECOVERED);
                 allocation.processPending = value.optBoolean("process_pending", false);
+                allocation.processRoot = value.optBoolean("process_root", true);
                 allocations.add(allocation);
             }
         } catch (Exception failure) {
@@ -411,6 +570,7 @@ public final class TemporaryWorkspace {
             roots.put(new JSONObject().put("path", allocation.directory.getPath())
                     .put("workspace", allocation.workspace).put("owner", allocation.owner)
                     .put("process_pending", allocation.processPending)
+                    .put("process_root", allocation.processRoot)
                     .put("storage", new File(allocation.workspace).equals(materialsDir) ? "private" : "legacy"));
         }
         byte[] data = new JSONObject().put("directories", roots).toString().getBytes("UTF-8");

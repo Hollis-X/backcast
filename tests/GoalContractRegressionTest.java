@@ -19,6 +19,8 @@ public final class GoalContractRegressionTest {
     private static final String BLOCKED_AUDIT = "\u963b\u585e\u5ba1\u8ba1";
     private static final String OBJECTIVE_UPDATED = "\u7528\u6237\u6539\u5199\u4e86";
     private static final String BUDGET_EXHAUSTED = "\u9884\u7b97\u5df2\u7ecf\u7528\u5b8c";
+    /** 收尾提示的开头：「这一轮你只回了文字」。 */
+    private static final String WRAP_UP = "\u8fd9\u4e00\u8f6e\u4f60\u53ea\u56de\u4e86\u6587\u5b57";
 
     private interface Script {
         LlmClient.Reply next(Fixture fixture, List<Message> messages, JSONArray tools) throws Exception;
@@ -988,7 +990,8 @@ public final class GoalContractRegressionTest {
         String[] prompts = {
             Goal.continuation(objective, 2L, 10L),
             Goal.budgetLimit(objective, 10L, 10L, 3L),
-            Goal.objectiveUpdated(objective, 2L, 10L)
+            Goal.objectiveUpdated(objective, 2L, 10L),
+            Goal.wrapUp(objective, 2L, 10L)
         };
         for (String prompt : prompts) {
             check(prompt.contains(escaped), "Goal prompt left objective XML delimiters unescaped");
@@ -996,6 +999,62 @@ public final class GoalContractRegressionTest {
         }
         check(Goal.continuation(null, 0L, 0L).contains("<objective>\n\n</objective>"),
                 "Null objective did not yield an empty data block");
+    }
+
+    /** 交了总结、没标完成：下一轮收到的是收尾提示，不是普通续跑说明；收尾提示里写明清理失败不妨碍完成。 */
+    private static void summaryWithoutCompletionGetsAWrapUpPrompt() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) return call("read", "{}");
+                if (f.client.calls == 2) return text("All requested items are verified; summary follows.");
+                if (f.client.calls == 3) {
+                    Message steer = last(messages);
+                    check(Goal.isSteer(steer.content) && steer.content.contains(WRAP_UP),
+                            "Summary was followed by the generic continuation instead of a wrap-up prompt");
+                    check(steer.content.contains("\u6e05\u7406\u88ab\u7cfb\u7edf\u62d2\u7edd"),
+                            "Wrap-up prompt still lets cleanup failures block completion");
+                    return call("update_goal", "{\"status\":\"complete\"}");
+                }
+                return text("Done.");
+            }
+        };
+        fixture.loop.setGoal("verify the fixture");
+        fixture.submit("verify the fixture");
+        check(fixture.client.calls == 4 && Goal.COMPLETE.equals(fixture.loop.goalStatus()),
+                "Wrap-up prompt did not lead to completion");
+    }
+
+    /** 临时材料清理被系统拒绝时，update_goal(complete) 照样结束目标，结果里写明残留。 */
+    private static void cleanupFailureDoesNotBlockCompletion() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(new StuckTemporary());
+        final String[] result = new String[1];
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools)
+                    throws Exception {
+                if (f.client.calls == 1) return call("update_goal", "{\"status\":\"complete\"}");
+                result[0] = last(messages).content;
+                return text("Done; one temporary directory could not be removed.");
+            }
+        };
+        fixture.loop.setGoal("verify the fixture");
+        fixture.submit("verify the fixture");
+        check(Goal.COMPLETE.equals(fixture.loop.goalStatus()), "Cleanup failure blocked goal completion");
+        check(result[0] != null && result[0].contains("temporaryCleanup") && result[0].contains("stuck-dir"),
+                "Completion result did not report the leftover directory: " + result[0]);
+    }
+
+    private static final class StuckTemporary implements Tool, com.mkei.backcast.agent.TemporaryCleanup {
+        @Override public String name() { return "temporary"; }
+        @Override public String description() { return "Temporary fixture"; }
+        @Override public JSONObject parameters() { return new JSONObject(); }
+        @Override public String run(JSONObject args) { return "ok"; }
+        @Override public void abort() { }
+        @Override public void beginTurn() { }
+        @Override public String cleanupTemporary() { return "stuck-dir: previous process state cannot be verified"; }
+        @Override public String finishTurn() { return null; }
     }
 
     public static void main(String[] args) {
@@ -1019,7 +1078,8 @@ public final class GoalContractRegressionTest {
             "persistedPendingBudgetWrapUpIgnoresAnEarlierNoToolAnswer",
             "userResumeReopensToolsAfterAnOldGoalStatusResult",
             "goalToolsExposePauseAndStructuredState", "changedObjectiveReachesTheNextToolRequestOnce",
-            "goalTemplatesEscapeObjectiveDelimiters"
+            "goalTemplatesEscapeObjectiveDelimiters", "summaryWithoutCompletionGetsAWrapUpPrompt",
+            "cleanupFailureDoesNotBlockCompletion"
         };
         for (String name : tests) {
             try {

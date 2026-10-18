@@ -1291,7 +1291,9 @@ public final class AgentLoopRegressionTest {
                 retargets++;
                 check(message.content.contains("new objective"),
                         "Objective update did not carry the rewritten goal");
-            } else if (message.content.contains("继续朝当前目标推进")) {
+            } else if (message.content.contains("继续朝当前目标推进")
+                    || message.content.contains("这一轮你只回了文字")) {
+                // 只回文字的轮次后面接的是收尾提示，它同样是续跑。
                 continuations++;
             }
         }

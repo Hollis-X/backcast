@@ -101,7 +101,6 @@ public class ChatStore extends SQLiteOpenHelper {
         createRequestEvents(db);
         createDiagnosticErrors(db);
         createCompactionEvents(db);
-        createSubAgentRecords(db);
     }
 
     /** Older schemas are not migrated: the stores are rebuilt empty. */
@@ -113,194 +112,13 @@ public class ChatStore extends SQLiteOpenHelper {
         onCreate(db);
     }
 
-    private static void createSubAgentRecords(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE IF NOT EXISTS sub_agent_stores ("
-                + "owner TEXT PRIMARY KEY,removed INTEGER NOT NULL DEFAULT 0)");
-        db.execSQL("CREATE TABLE IF NOT EXISTS sub_agent_records ("
-                + "owner TEXT NOT NULL,agent_id TEXT NOT NULL,revision INTEGER NOT NULL,"
-                + "record_json TEXT NOT NULL,PRIMARY KEY(owner,agent_id))");
-    }
-
-    public static String subAgentOwner(long sessionId) {
-        if (sessionId < 0) throw new IllegalArgumentException("子 agent 会话编号不合法。");
-        return "session-" + sessionId;
-    }
-
-    public synchronized List<JSONObject> loadSubAgentRecords(String owner) {
-        SQLiteDatabase db = getReadableDatabase();
-        requireSubAgentStore(db, owner);
-        List<JSONObject> records = new ArrayList<JSONObject>();
-        Cursor c = db.query("sub_agent_records", new String[]{"agent_id", "revision", "record_json"},
-                "owner=?", new String[]{owner}, null, null, "agent_id ASC");
-        try {
-            while (c.moveToNext()) {
-                try {
-                    JSONObject record = new JSONObject(c.getString(2));
-                    if (!c.getString(0).equals(record.getString("id"))
-                            || c.getLong(1) != record.getLong("revision"))
-                        throw new IllegalStateException("子 agent 数据库索引与记录不匹配。");
-                    records.add(record);
-                } catch (Exception invalid) {
-                    throw new IllegalStateException("子 agent 数据库记录损坏，原记录已保留。", invalid);
-                }
-            }
-        } finally { c.close(); }
-        return records;
-    }
-
-    /** Child-only work must also survive when its parent has already become idle. */
-    public synchronized List<Long> subAgentWorkSessionIds() {
-        java.util.Map<Long, Boolean> pending = new java.util.LinkedHashMap<Long, Boolean>();
-        java.util.Set<Long> allowed = new java.util.HashSet<Long>();
-        java.util.Set<Long> detached = new java.util.HashSet<Long>();
-        java.util.Set<Long> authorizedChildWork = new java.util.HashSet<Long>();
-        java.util.Set<Long> stopped = new java.util.HashSet<Long>();
-        Cursor c = getReadableDatabase().query("sub_agent_records", new String[]{"owner", "record_json"},
-                null, null, null, null, null);
-        try {
-            while (c.moveToNext()) {
-                String owner = c.getString(0);
-                if (owner == null || !owner.matches("session-[0-9]+")) continue;
-                long sessionId;
-                try { sessionId = Long.parseLong(owner.substring(8)); }
-                catch (NumberFormatException invalid) { continue; }
-                try {
-                    JSONObject record = new JSONObject(c.getString(1));
-                    if ("main".equals(record.optString("id"))) {
-                        if (record.optBoolean("managerCancelled")) stopped.add(sessionId);
-                        else if (record.optBoolean("userRestartOnly") && !record.optBoolean("rootWakeAllowed")) {
-                            detached.add(sessionId);
-                        } else if (record.optBoolean("rootWakeAllowed")) {
-                            allowed.add(sessionId); pending.put(sessionId, Boolean.TRUE);
-                        }
-                    } else {
-                        String status = record.optString("status");
-                        if ("queued".equals(status) || "running".equals(status) || "waiting".equals(status))
-                            pending.put(sessionId, Boolean.TRUE);
-                        if (userRestartWorkPending(record)) authorizedChildWork.add(sessionId);
-                    }
-                } catch (Exception invalid) {
-                    try { recordDiagnostic(sessionId, "sub_agent_store", "子 agent 恢复索引损坏，原记录已保留",
-                            Diagnostics.boundedJson(Diagnostics.failure(invalid))); }
-                    catch (RuntimeException unavailable) { }
-                }
-            }
-        } finally { c.close(); }
-        detached.retainAll(authorizedChildWork);
-        allowed.addAll(detached);
-        pending.keySet().removeAll(stopped);
-        pending.keySet().retainAll(allowed);
-        return new ArrayList<Long>(pending.keySet());
-    }
-
-    private static boolean userRestartWorkPending(JSONObject record) {
-        String status = record.optString("status");
-        if (!"queued".equals(status) && !"running".equals(status) && !"waiting".equals(status)) return false;
-        java.util.Set<String> authorized = new java.util.HashSet<String>();
-        JSONArray tasks = record.optJSONArray("tasks");
-        if (tasks != null) for (int i = 0; i < tasks.length(); i++) {
-            JSONObject task = tasks.optJSONObject(i);
-            if (task != null && task.optBoolean("userRestartOnly") && !task.has("resultId"))
-                authorized.add(task.optString("taskId"));
-        }
-        authorized.remove("");
-        if (authorized.contains(record.optString("currentTaskId"))) return true;
-        JSONArray queue = record.optJSONArray("pending");
-        if (queue != null) for (int i = 0; i < queue.length(); i++) {
-            JSONObject mail = queue.optJSONObject(i);
-            if (mail != null && mail.optBoolean("userRestartOnly")
-                    && authorized.contains(mail.optString("taskId"))) return true;
-        }
-        return false;
-    }
-
-    public synchronized boolean subAgentUserRestartOnly(long sessionId) {
-        Cursor c = getReadableDatabase().query("sub_agent_records", new String[]{"record_json"},
-                "owner=? AND agent_id=?", new String[]{subAgentOwner(sessionId), "main"}, null, null, null);
-        try {
-            if (!c.moveToFirst()) return false;
-            JSONObject root = new JSONObject(c.getString(0));
-            return root.optBoolean("userRestartOnly") && !root.optBoolean("rootWakeAllowed")
-                    && !root.optBoolean("managerCancelled");
-        } catch (org.json.JSONException invalid) {
-            throw new IllegalStateException("子 agent 恢复权限记录损坏，原记录已保留。", invalid);
-        } finally { c.close(); }
-    }
-
-    public synchronized void saveSubAgentRecord(String owner, JSONObject record) {
-        SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            requireSubAgentStore(db, owner);
-            ContentValues state = new ContentValues(); state.put("owner", owner); state.put("removed", 0);
-            db.insertWithOnConflict("sub_agent_stores", null, state, SQLiteDatabase.CONFLICT_IGNORE);
-            Cursor savedState = db.query("sub_agent_stores", new String[]{"removed"}, "owner=?",
-                    new String[]{owner}, null, null, null);
-            try {
-                if (!savedState.moveToFirst() || savedState.getInt(0) != 0)
-                    throw new IllegalStateException("无法建立子 agent 数据库所有权。");
-            } finally { savedState.close(); }
-            writeSubAgentRecord(db, owner, record);
-            db.setTransactionSuccessful();
-        } finally { db.endTransaction(); }
-    }
-
-    private static void requireSubAgentStore(SQLiteDatabase db, String owner) {
-        if (owner == null || !owner.matches("(?:session-[0-9]+|draft-[A-Za-z0-9_-]+)"))
-            throw new IllegalArgumentException("子 agent 存储所有者不合法。");
-        Cursor state = db.query("sub_agent_stores", new String[]{"removed"}, "owner=?",
-                new String[]{owner}, null, null, null);
-        try {
-            if (state.moveToFirst() && state.getInt(0) != 0)
-                throw new IllegalStateException("子 agent 会话已删除。");
-        } finally { state.close(); }
-    }
-
-    private static void writeSubAgentRecord(SQLiteDatabase db, String owner, JSONObject record) {
-        try {
-            String id = record.getString("id"); long revision = record.getLong("revision");
-            if (!id.matches("[A-Za-z0-9_-]{1,80}") || revision < 0)
-                throw new IllegalArgumentException("子 agent 编号或版本不合法。");
-            Cursor old = db.query("sub_agent_records", new String[]{"revision"}, "owner=? AND agent_id=?",
-                    new String[]{owner, id}, null, null, null);
-            try { if (old.moveToFirst() && old.getLong(0) >= revision) return; }
-            finally { old.close(); }
-            ContentValues values = new ContentValues(); values.put("owner", owner); values.put("agent_id", id);
-            values.put("revision", Long.valueOf(revision)); values.put("record_json", record.toString());
-            if (db.insertWithOnConflict("sub_agent_records", null, values, SQLiteDatabase.CONFLICT_REPLACE) < 0)
-                throw new IllegalStateException("无法保存子 agent 数据库记录。");
-        } catch (org.json.JSONException invalid) { throw new IllegalArgumentException("子 agent 数据库记录不完整。", invalid); }
-    }
-
-    public synchronized void bindSubAgentRecords(String owner, String next) {
-        if (owner.equals(next)) return;
-        SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
-        try {
-            requireSubAgentStore(db, owner); requireSubAgentStore(db, next);
-            Cursor c = db.query("sub_agent_records", new String[]{"record_json"}, "owner=?",
-                    new String[]{owner}, null, null, null);
-            try {
-                while (c.moveToNext()) {
-                    try { writeSubAgentRecord(db, next, new JSONObject(c.getString(0))); }
-                    catch (org.json.JSONException invalid) { throw new IllegalStateException("子 agent 草稿记录损坏。", invalid); }
-                }
-            } finally { c.close(); }
-            markSubAgentStoreRemoved(db, owner);
-            db.setTransactionSuccessful();
-        } finally { db.endTransaction(); }
-    }
-
-    public synchronized void removeSubAgentRecords(String owner) {
-        SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
-        try { markSubAgentStoreRemoved(db, owner); db.setTransactionSuccessful(); }
-        finally { db.endTransaction(); }
-    }
-
-    private static void markSubAgentStoreRemoved(SQLiteDatabase db, String owner) {
-        ContentValues state = new ContentValues(); state.put("owner", owner); state.put("removed", 1);
-        if (db.insertWithOnConflict("sub_agent_stores", null, state, SQLiteDatabase.CONFLICT_REPLACE) < 0)
-            throw new IllegalStateException("无法保存子 agent 会话删除状态。");
-        db.delete("sub_agent_records", "owner=?", new String[]{owner});
+    /** 子代理记录改存 JSON 文件（JsonSubAgentStore），同版本的旧库里留下的两张表打开时顺手删掉。 */
+    @Override
+    public void onOpen(SQLiteDatabase db) {
+        super.onOpen(db);
+        if (db.isReadOnly()) return;
+        db.execSQL("DROP TABLE IF EXISTS sub_agent_records");
+        db.execSQL("DROP TABLE IF EXISTS sub_agent_stores");
     }
 
     private static void createCompactionEvents(SQLiteDatabase db) {
@@ -879,7 +697,6 @@ public class ChatStore extends SQLiteOpenHelper {
             db.delete("request_events", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("diagnostic_errors", "session_id=?", new String[]{String.valueOf(sessionId)});
             db.delete("compaction_events", "session_id=?", new String[]{String.valueOf(sessionId)});
-            markSubAgentStoreRemoved(db, subAgentOwner(sessionId));
             db.delete("sessions", "id=?", new String[]{String.valueOf(sessionId)});
             db.setTransactionSuccessful();
         } finally {

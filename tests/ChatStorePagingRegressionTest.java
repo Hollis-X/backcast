@@ -58,10 +58,10 @@ public final class ChatStorePagingRegressionTest {
                 "public abstract class SQLiteOpenHelper { private static final SQLiteDatabase db=new SQLiteDatabase();"
                 + "public static int requestedVersion;public SQLiteOpenHelper(android.content.Context c,String n,Object f,int v){requestedVersion=v;}"
                 + "public SQLiteDatabase getReadableDatabase(){return db;} public SQLiteDatabase getWritableDatabase(){return db;}"
-                + "public abstract void onCreate(SQLiteDatabase db); public abstract void onUpgrade(SQLiteDatabase db,int o,int n); }");
+                + "public void onOpen(SQLiteDatabase db){} public abstract void onCreate(SQLiteDatabase db); public abstract void onUpgrade(SQLiteDatabase db,int o,int n); }");
         add(files, "android.database.sqlite.SQLiteDatabase",
                 "import java.util.*; import android.database.Cursor; import android.content.ContentValues;"
-                + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5,CONFLICT_IGNORE=4;"
+                + "public class SQLiteDatabase { public static final int CONFLICT_REPLACE=5,CONFLICT_IGNORE=4;public boolean isReadOnly(){return false;}"
                 + "private static final List<Map<String,Object>> rows=new ArrayList<Map<String,Object>>(); private static long next=1;"
                 + "public static final List<String> statements=new ArrayList<String>();public static boolean requestDiagnosticColumn;"
                 + "public static final Set<String> runColumns=new HashSet<String>(),messageColumns=new HashSet<String>();"
@@ -519,7 +519,7 @@ public final class ChatStorePagingRegressionTest {
         int drops = 0;
         for (String statement : sql) if (statement.startsWith("DROP TABLE IF EXISTS ")) drops++;
         check(drops == 10 && sql.get(0).startsWith("DROP TABLE IF EXISTS ") && sql.get(9).startsWith("DROP TABLE IF EXISTS ")
-                        && sql.get(10).startsWith("CREATE TABLE sessions") && sql.toString().contains("CREATE TABLE IF NOT EXISTS sub_agent_records"),
+                        && sql.get(10).startsWith("CREATE TABLE sessions"),
                 "Older schemas were migrated step by step instead of rebuilt");
         for (String statement : sql) check(!statement.startsWith("ALTER TABLE"), "Rebuild still patched an old table");
     }

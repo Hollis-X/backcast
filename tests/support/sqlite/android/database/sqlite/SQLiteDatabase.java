@@ -8,7 +8,6 @@ import org.json.*;
 /** Android API fixture backed by a live Python sqlite3 connection and real transactions. */
 public final class SQLiteDatabase {
     public static final int CONFLICT_REPLACE=5,CONFLICT_IGNORE=4;
-    public static int failRecordWrite;
     public static String refuseInsertTable;
     private final Process bridge;
     private final BufferedWriter input;
@@ -31,6 +30,7 @@ public final class SQLiteDatabase {
             return result;
         }catch(IOException failure){throw new IllegalStateException(failure);}
     }
+    public boolean isReadOnly(){return false;}
     public void execSQL(String sql){execute(sql,null);}
     public void execSQL(String sql,Object[] args){execute(sql,args);}
     public void beginTransaction(){execute("BEGIN IMMEDIATE",null);successful=false;}
@@ -39,7 +39,6 @@ public final class SQLiteDatabase {
     public long insert(String table,String nullable,ContentValues values){return insertWithOnConflict(table,nullable,values,0);}
     public long insertWithOnConflict(String table,String nullable,ContentValues values,int conflict){
         if(table.equals(refuseInsertTable)){refuseInsertTable=null;return -1;}
-        if(table.equals("sub_agent_records")&&failRecordWrite>0&&--failRecordWrite==0)throw new IllegalStateException("disk full fixture");
         StringBuilder names=new StringBuilder(),placeholders=new StringBuilder();List<Object> arguments=new ArrayList<Object>();
         for(Map.Entry<String,Object> value:values.entrySet()){
             if(names.length()>0){names.append(',');placeholders.append(',');}

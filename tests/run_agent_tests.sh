@@ -49,6 +49,7 @@ javac -proc:none -encoding UTF-8 -source 17 -target 17 -Xlint:-options -cp "$jso
     "$root"/tests/ToolkitDiagnosticsRegressionTest.java \
     "$root"/tests/ProgramArgumentRegressionTest.java \
     "$root"/tests/MultipleWorkspaceRegressionTest.java \
+    "$root"/tests/TemporaryRecoveryRegressionTest.java \
     "$root"/tests/ToolBatchProbeRegressionTest.java \
     "$root"/tests/ToolkitOperationManagerRegressionTest.java \
     "$root"/tests/ToolkitOperationRegressionTest.java \
@@ -93,6 +94,7 @@ cls com.mkei.backcast.tool.ToolkitRegressionTest
 cls com.mkei.backcast.tool.RootToolRegressionTest
 cls com.mkei.backcast.tool.ToolkitDiagnosticsRegressionTest
 cls com.mkei.backcast.tool.MultipleWorkspaceRegressionTest
+cls com.mkei.backcast.tool.TemporaryRecoveryRegressionTest
 cls com.mkei.backcast.tool.ToolBatchProbeRegressionTest
 cls com.mkei.backcast.tool.ToolkitOperationManagerRegressionTest
 cls com.mkei.backcast.tool.ToolkitOperationRegressionTest
@@ -102,7 +104,7 @@ cls PlanToolRegressionTest
 cls AskUserToolRegressionTest
 cls LineDeltaRegressionTest
 cls LlmUrlRegressionTest
-run SQLiteSubAgentStoreRegressionTest java -cp "$build:$json" "$root/tests/SQLiteSubAgentStoreRegressionTest.java" "$root"
+run JsonSubAgentStoreRegressionTest java -cp "$build:$json" "$root/tests/JsonSubAgentStoreRegressionTest.java" "$root"
 run ChatStorePagingRegressionTest java -cp "$build:$json" "$root/tests/ChatStorePagingRegressionTest.java" "$root"
 run McpRegressionTest java -cp "$build:$json" "$root/tests/McpRegressionTest.java" "$root"
 run RunHubRecoveryTest java -cp "$json" "$root/tests/RunHubRecoveryTest.java" "$root/app/src/main/java/com/mkei/backcast/RunHub.java"

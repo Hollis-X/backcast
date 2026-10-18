@@ -249,7 +249,7 @@ public class PlanAndTranscriptTest {
         }
         history.put(Message.assistant("核对完成：400 个文件都在。", null).toCheckpointJson());
         record.history = history;
-        store.saveSubAgentRecord("session-" + sid, record.toJson());
+        childStore(sid).save(record);
         store.close();
         Intent chat = new Intent(app, SubAgentChatActivity.class)
                 .putExtra(MainActivity.EXTRA_AGENT_ROOT, sid).putExtra(MainActivity.EXTRA_AGENT_ID, "long");
@@ -265,5 +265,10 @@ public class PlanAndTranscriptTest {
                 + ((TextView) page.findViewById(R.id.session_title)).getText() + " shown="
                 + seen.subList(Math.max(0, seen.size() - 6), seen.size()) + " count=" + seen.size(), shown);
         assertNotNull(page.findViewById(R.id.stream));
+    }
+
+    /** 和 RunHub 用同一个目录：子代理记录直接写成 JSON 文件，打开页面时由 RunHub 读回来。 */
+    private static JsonSubAgentStore childStore(long sid) {
+        return new JsonSubAgentStore(new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "sub-agents"), sid, null);
     }
 }
