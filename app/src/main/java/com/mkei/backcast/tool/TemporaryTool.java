@@ -69,4 +69,5 @@ public final class TemporaryTool implements Tool, TemporaryCleanup, com.mkei.bac
     }
     @Override public String cleanupTemporary() { return workspace.cleanup(); }
     @Override public String finishTurn() { return workspace.finishTurn(); }
+    @Override public String staleFailures() { return workspace.staleFailures(); }
 }

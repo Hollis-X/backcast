@@ -27,6 +27,8 @@
     <string name="history_loading">加载中...</string>
     <string name="history_load_failed">消息加载失败，请重新打开会话。</string>
     <string name="scroll_latest">回到最新消息</string>
+    <string name="send_message">发送</string>
+    <string name="send_resume">继续任务</string>
     <string name="drawer_title">回译</string>
     <string name="drawer_empty">还没有对话。</string>
     <string name="drawer_delete">删除这个会话？</string>

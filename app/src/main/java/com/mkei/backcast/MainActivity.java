@@ -2524,10 +2524,26 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         return out.toString();
     }
 
-    /** 发送键：M3 填充图标按钮（40dp、12dp 圆角）。有字是 primary，没字是禁用态 onSurface 12% / 38%。 */
+    /**
+     * 发送键：M3 填充图标按钮（40dp、12dp 圆角）。有字是 primary，没字是禁用态 onSurface 12% / 38%。
+     * 没字、上一轮因网络或服务错误中断时换成 primary 的三角（继续），点一下接着跑，不用再发「继续」。
+     */
     private void tintSend(boolean active) {
-        paintRound(send, active ? M3.primary : M3.alpha(M3.onSurface, 0.12f),
-                active ? M3.onPrimary : M3.alpha(M3.onSurface, 0.38f), Icons.SEND, dp(10));
+        boolean resume = !active && resumable();
+        paintRound(send, active || resume ? M3.primary : M3.alpha(M3.onSurface, 0.12f),
+                active || resume ? M3.onPrimary : M3.alpha(M3.onSurface, 0.38f), resume ? Icons.PLAY : Icons.SEND, dp(10));
+        send.setContentDescription(getString(resume ? R.string.send_resume : R.string.send_message));
+    }
+
+    /** 主会话空闲、上一轮停在请求失败且还没答完：可以一键续跑。 */
+    private boolean resumable() {
+        return !childMode && loop != null && stop.getVisibility() != View.VISIBLE && loop.interrupted();
+    }
+
+    /** 三角键：和重进会话时续跑同一条路，不插入用户消息，接着原来那一行「工作了」走。 */
+    private void resumeInterrupted() {
+        if (sessionOpening || loop == null || loop.busy() || !loop.interrupted()) return;
+        kick(loop);
     }
 
     /** 停止：同一个填充图标按钮，primary 底上一个 onPrimary 圆角小方块。 */
@@ -3083,6 +3099,7 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         if (sessionOpening || stop.getVisibility() == View.VISIBLE || loop != null && loop.busy()) return;
         final String text = prompt.getText().toString().trim();
         if (TextUtils.isEmpty(text)) {
+            if (resumable()) resumeInterrupted();
             return;
         }
         hideSlashPopup();
@@ -4313,6 +4330,8 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
                 sealLiveAnswer(); settleWork();
                 if (compactLive) dropCompactRow(); else settleCompact();
                 refreshGoal();
+                // 中断后发送键换成继续三角（收尾回调可能先到，这里再刷一次）。
+                if (stop.getVisibility() != View.VISIBLE) tintSend(prompt.getText().toString().trim().length() > 0);
                 if (replaying || errorToastSource == source && errorToastToken == token
                         && errorToastGeneration == generation) return;
                 errorToastSource = source; errorToastToken = token; errorToastGeneration = generation;
@@ -4710,11 +4729,15 @@ public class MainActivity extends AppCompatActivity implements ApprovalGate, com
         for (int i = 0; i < trace.order.size(); i++) {
             TurnTrace.Step step = trace.order.get(i).step;
             if (step == null || !TurnTrace.PLAN.equals(step.name)) continue;
+            // 工具拒绝的计划（例如两步同时进行中）不画：它没生效，画出来会冒充最新版，看着像同时在跑两件事。
+            if (step.done && step.result != null && step.result.startsWith("错误")) continue;
+            org.json.JSONArray planned = com.mkei.backcast.tool.PlanTool.normalize(step.args);
+            if (planned != null && com.mkei.backcast.tool.PlanTool.problem(planned) != null) continue;
             present.put(step, Boolean.TRUE);
             PlanCard card = cards.get(step);
             if (card == null) {
                 // 参数还在流式生成、解析不了时先不画，免得出现空卡片。
-                if (com.mkei.backcast.tool.PlanTool.normalize(step.args) == null) continue;
+                if (planned == null) continue;
                 View anchor = rangeView(flow, i);
                 if (anchor == null) continue;
                 int at = flow.box.indexOfChild(anchor) + 1;

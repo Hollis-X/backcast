@@ -109,6 +109,22 @@ public class ToolRegistry {
         }
     }
 
+    /** 各临时工具攒下的重启遗留清理失败（每条只给一次），供调用方写诊断。 */
+    public String staleTemporaryFailures() {
+        StringBuilder notes = new StringBuilder();
+        for (Tool tool : tools.values()) {
+            if (!(tool instanceof TemporaryCleanup)) continue;
+            String note;
+            try { note = ((TemporaryCleanup) tool).staleFailures(); }
+            catch (Exception failure) { note = null; }
+            if (note != null) {
+                if (notes.length() > 0) notes.append('\n');
+                notes.append(note);
+            }
+        }
+        return notes.length() == 0 ? null : notes.toString();
+    }
+
     public String cleanupTemporary(boolean finishing) {
         StringBuilder errors = new StringBuilder();
         for (Tool tool : tools.values()) {

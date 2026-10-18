@@ -267,6 +267,8 @@ public class AgentLoop {
      * 进程自己接上的不算，那种情况接着原来的计数停。
      */
     private boolean pardonReadonly;
+    /** 上一轮停在请求失败（断网、服务出错）；新一轮开始或换会话时清掉。 */
+    private boolean interruptedByRequestFailure;
     /** 上一轮还没退出时又被要求续跑。退出时接着跑，避免界面停在转圈、目标却没人接。 */
     private boolean resumeAfter;
     private int resumeUi;
@@ -1041,6 +1043,7 @@ public class AgentLoop {
         if (token != 0) {
             ToolRegistry tools = turnTools.get();
             String cleanup = tools == null ? null : tools.cleanupTemporary(true);
+            String leftover = tools == null ? null : tools.staleTemporaryFailures();
             turnTools.remove();
             dispatchContext.remove();
             synchronized (lock) {
@@ -1049,8 +1052,12 @@ public class AgentLoop {
                     activeTurnToolsToken = 0;
                 }
             }
+            // 重启前留下的目录与本轮无关：只写诊断，不打扰用户。
+            if (leftover != null) recordCleanup(leftover, "重启前留下的临时目录未能清理");
+            // 本轮自己的清理失败：完整原因进诊断，界面只给一句短提示（长原文会被提示框换成「请求失败」，像是别处出了错）。
             if (cleanup != null && !stale(token, gen)) {
-                listener.onError(gen, "临时材料清理失败：" + cleanup);
+                recordCleanup(cleanup, "临时材料清理失败");
+                listener.onError(gen, CLEANUP_NOTICE);
             }
         }
         if (token != 0 && stale(token, gen) && gen == generation) {
@@ -1284,6 +1291,7 @@ public class AgentLoop {
         synchronized (lock) {
             generation++;
             cancelled = true;
+            interruptedByRequestFailure = false;
             haltClocksLocked();
             turnClockInitialized = false;
             turnAccumMs = 0;
@@ -1446,6 +1454,15 @@ public class AgentLoop {
 
     private void recordError(JSONObject evidence) {
         recordError(evidence, "agent", "运行失败");
+    }
+
+    /** 本轮临时材料清理失败时给用户看的短提示；详细原因在诊断里。 */
+    public static final String CLEANUP_NOTICE = "临时材料没清理干净，已保留，详情已记录。";
+
+    private void recordCleanup(String detail, String summary) {
+        JSONObject evidence = new JSONObject();
+        try { evidence.put("error", detail); } catch (Exception ignored) { }
+        recordError(evidence, "temporary_cleanup", summary);
     }
 
     private void recordError(JSONObject evidence, String source, String summary) {
@@ -1668,6 +1685,7 @@ public class AgentLoop {
         acceptedUi = uiToken;
         cancelled = false;
         refused = false;
+        interruptedByRequestFailure = false;
         busy = true;
         childWakeSuspended = false;
         pinTurnToolsLocked(token);
@@ -1723,6 +1741,15 @@ public class AgentLoop {
         synchronized (lock) {
             return busy && activeTurnToolsToken == busyToken ? activeTurnTools : registry;
         }
+    }
+
+    /** 上一轮因网络或服务错误中断、还没答完：界面把发送键换成「继续」三角，点一下接着跑，不用再发「继续」。 */
+    public boolean interrupted() {
+        synchronized (lock) {
+            // 不看 busy：收尾回调先于清除 busy 到达界面，按 busy 判断会让按钮偶尔不变。
+            if (!interruptedByRequestFailure || Goal.PAUSED.equals(goalStatus)) return false;
+        }
+        return shouldContinue();
     }
 
     /** 还没答完。已经答完或正在跑的，回到界面时不要再开一轮。 */
@@ -2024,6 +2051,7 @@ public class AgentLoop {
 
     private void stopAfterRequestFailure(int token, int gen, String error, String userMessage) {
         if (!stopRun(token, gen)) return;
+        synchronized (lock) { interruptedByRequestFailure = true; }
         synchronized (uiLock) {
             // Failed partial text/arguments are not committed history. A later
             // explicit resume must not replay them or need a fake retry event.

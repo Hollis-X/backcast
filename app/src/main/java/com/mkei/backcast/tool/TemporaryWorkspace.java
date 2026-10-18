@@ -19,6 +19,7 @@ public final class TemporaryWorkspace {
     }
     private static final String MARKER = ".backcast-owner";
     private static final String RECOVERED = "recovered";
+    private static final String ROOT_SCAN_STATUS = "__backcast_root_scan_status:";
 
     private static final class Allocation {
         final File directory;
@@ -48,8 +49,10 @@ public final class TemporaryWorkspace {
     private final ArrayList<Allocation> allocations = new ArrayList<Allocation>();
     private final ThreadLocal<String> turn = new ThreadLocal<String>();
     private String loadError;
-    /** 重启前留下、本进程已经报过一次的清理失败；之后每轮重试仍失败时不再算进本轮的清理结果。 */
+    /** 重启前留下的目录：本进程已经记过一次的失败；之后每轮重试仍失败不再重复记。 */
     private final java.util.Set<String> reportedStale = new java.util.HashSet<String>();
+    /** 还没被取走的重启遗留失败，不算进本轮清理结果，由 staleFailures() 交给调用方写诊断。 */
+    private final StringBuilder staleNotes = new StringBuilder();
     public TemporaryWorkspace(String workDir, boolean useRoot, File stateDir, long sessionId) {
         configure(workDir, useRoot);
         this.stateDir = canonical(stateDir);
@@ -270,9 +273,15 @@ public final class TemporaryWorkspace {
             } catch (Exception failure) {
                 allocation.lease = RECOVERED;
                 String path = allocation.directory.getPath();
-                if (stale && !reportedStale.add(path)) continue;
+                if (stale) {
+                    // 重启遗留目录的失败与本轮无关：不进返回值（不让本轮显得没清干净），只交给诊断记一次。
+                    if (reportedStale.add(path)) {
+                        if (staleNotes.length() > 0) staleNotes.append('\n');
+                        staleNotes.append("（重启前留下的目录）").append(path).append("：").append(failure.getMessage());
+                    }
+                    continue;
+                }
                 if (errors.length() > 0) errors.append('\n');
-                if (stale) errors.append("（重启前留下的目录，与本轮无关）");
                 errors.append(path).append("：").append(failure.getMessage());
             }
         }
@@ -287,6 +296,14 @@ public final class TemporaryWorkspace {
 
     public String finishTurn() {
         return finishTurn(System.nanoTime() + CleanupBudget.DEFAULT_NANOS);
+    }
+
+    /** 取走攒下的重启遗留失败，取完清空；没有返回 null。 */
+    public synchronized String staleFailures() {
+        if (staleNotes.length() == 0) return null;
+        String notes = staleNotes.toString();
+        staleNotes.setLength(0);
+        return notes;
     }
 
     public synchronized String finishTurn(long deadlineNanos) {
@@ -320,28 +337,155 @@ public final class TemporaryWorkspace {
         return ownRecover(new File("/proc"), directory, budget);
     }
 
-    /** root：在一条命令里扫描、结束、循环等待再扫描，打印仍占用目录的进程。只结束占用本目录的进程。 */
+    /** root：批量列出链接，在 Java 中筛选后再结束占用本目录的进程。 */
     private String rootRecover(String directory, CleanupBudget budget) throws Exception {
-        String d = RootShell.quote(directory);
-        String command = "d=" + d + "; hold() { mode=$1; for p in /proc/[0-9]*; do [ -d \"$p\" ] || continue; "
-                + "pid=${p#/proc/}; hit=; "
-                + "case \"$(readlink \"$p/cwd\" 2>/dev/null)\" in \"$d\"|\"$d\"/*) hit=1;; esac; "
-                + "if [ -z \"$hit\" ]; then for f in \"$p\"/fd/*; do "
-                + "case \"$(readlink \"$f\" 2>/dev/null)\" in \"$d\"|\"$d\"/*) hit=1; break;; esac; done; fi; "
-                + "[ -n \"$hit\" ] || continue; "
-                + "cmd=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null | cut -c1-120); "
-                + "s=; IFS= read -r s 2>/dev/null < \"$p/stat\" || continue; s=${s##*) }; set -- $s; "
-                + "[ $# -ge 4 ] || continue; pgid=$3; "
-                + "if [ \"$mode\" = kill ]; then kill -9 \"$pid\" 2>/dev/null; "
-                + "[ \"$pid\" = \"$pgid\" ] && kill -9 -\"$pid\" 2>/dev/null; "
-                + "else printf '%s %s\\n' \"$pid\" \"$cmd\"; fi; "
-                + "done; }; "
-                + "hold kill; i=0; while [ $i -lt 20 ]; do [ -z \"$(hold)\" ] && break; sleep 0.1; i=$((i+1)); done; "
-                + "hold; exit 0";
-        RootShell.Out out = RootShell.exec(command, null, 8192, budget.remainingMillis(4000), budget);
+        java.util.List<String> pids = rootScan(directory, budget);
+        if (pids.isEmpty()) return null;
+        rootKill(rootMetadata(pids, budget), budget);
+
+        // 结束后只用短暂的重扫窗口等待 /proc 链接消失；每次扫描都是一次 ls，
+        // 不再为每个进程的每个 fd 启动 readlink。
+        long rescanDeadline = Math.min(budget.deadlineNanos, System.nanoTime() + 2000000000L);
+        while (System.nanoTime() < rescanDeadline) {
+            budget.check();
+            pids = rootScan(directory, budget);
+            if (pids.isEmpty()) return null;
+            budget.pause(100);
+        }
+        java.util.List<RootHolder> remaining = rootMetadata(pids, budget);
+        if (remaining.isEmpty()) return joinPids(pids);
+        StringBuilder text = new StringBuilder();
+        for (RootHolder holder : remaining) {
+            if (text.length() > 0) text.append('；');
+            text.append(holder.pid).append(' ').append(holder.command);
+        }
+        return text.toString();
+    }
+
+    /** Parse one batched `ls -l /proc/.../cwd /proc/.../fd` result. */
+    static java.util.List<String> parseRootScan(String output, String directory) {
+        java.util.LinkedHashSet<String> result = new java.util.LinkedHashSet<String>();
+        String fdPid = null;
+        if (output == null) return new ArrayList<String>();
+        for (String line : output.split("\\n")) {
+            String value = line.trim();
+            if (value.matches("/proc/[0-9]+/fd:")) {
+                fdPid = value.substring("/proc/".length(), value.length() - "/fd:".length());
+                continue;
+            }
+            int source = line.indexOf("/proc/");
+            int arrow = line.indexOf(" -> ");
+            if (arrow < 0) continue;
+            String target = line.substring(arrow + 4).trim();
+            if (target.endsWith(" (deleted)")) target = target.substring(0, target.length() - " (deleted)".length());
+            if (!inside(target, directory)) continue;
+            String link = source < 0 || source > arrow ? "" : line.substring(source, arrow).trim();
+            if (link.matches("/proc/[0-9]+/cwd")) {
+                result.add(link.substring("/proc/".length(), link.length() - "/cwd".length()));
+            } else if (fdPid != null) {
+                result.add(fdPid);
+            }
+        }
+        return new ArrayList<String>(result);
+    }
+
+    /** Accept the minor /proc races reported by ls, but never an unverified scan. */
+    static boolean rootScanStatusAccepts(String output) {
+        int status = -1;
+        boolean sawFdHeader = false;
+        if (output == null) return false;
+        for (String line : output.split("\\n")) {
+            String value = line.trim();
+            if (value.startsWith(ROOT_SCAN_STATUS)) {
+                try { status = Integer.parseInt(value.substring(ROOT_SCAN_STATUS.length())); }
+                catch (NumberFormatException invalid) { return false; }
+            } else if (value.matches("/proc/[0-9]+/fd:")) {
+                sawFdHeader = true;
+            }
+        }
+        return status == 0 || ((status == 1 || status == 2) && sawFdHeader);
+    }
+
+    private static int rootScanStatus(String output) {
+        if (output == null) return -1;
+        for (String line : output.split("\\n")) {
+            String value = line.trim();
+            if (!value.startsWith(ROOT_SCAN_STATUS)) continue;
+            try { return Integer.parseInt(value.substring(ROOT_SCAN_STATUS.length())); }
+            catch (NumberFormatException invalid) { return -1; }
+        }
+        return -1;
+    }
+
+    private static final class RootHolder {
+        final String pid, started, group, command;
+        RootHolder(String pid, String started, String group, String command) {
+            this.pid = pid; this.started = started; this.group = group; this.command = command;
+        }
+    }
+
+    private static java.util.List<String> rootScan(String directory, CleanupBudget budget) throws Exception {
+        String command = "{ ls -l /proc/[0-9]*/cwd /proc/[0-9]*/fd 2>/dev/null; status=$?; printf '%s%s\\n' "
+                + RootShell.quote(ROOT_SCAN_STATUS) + " \"$status\"; } | grep -F -e '/fd:' -e "
+                + RootShell.quote(" -> " + directory) + " -e " + RootShell.quote(ROOT_SCAN_STATUS);
+        RootShell.Out out = RootShell.exec(command, null, 4 * 1024 * 1024,
+                budget.remainingMillis(2000), budget);
+        String output = new String(out.stdout, "UTF-8");
+        if (out.exit != 0 || !rootScanStatusAccepts(output)) {
+            int status = rootScanStatus(output);
+            throw new IllegalStateException("root 清理残留进程失败，exit="
+                    + (status < 0 ? out.exit : status) + "，保留临时目录。");
+        }
+        return parseRootScan(output, directory);
+    }
+
+    private static java.util.List<RootHolder> rootMetadata(java.util.List<String> pids,
+            CleanupBudget budget) throws Exception {
+        if (pids.isEmpty()) return new ArrayList<RootHolder>();
+        StringBuilder command = new StringBuilder("for pid in");
+        for (String pid : pids) command.append(' ').append(RootShell.quote(pid));
+        command.append("; do s=; IFS= read -r s 2>/dev/null < /proc/$pid/stat || continue; "
+                + "s=${s##*) }; set -- $s; [ $# -ge 20 ] || continue; "
+                + "group=$3; shift 19; start=$1; "
+                + "cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); "
+                + "printf '%s\\t%s\\t%s\\t%s\\n' \"$pid\" \"$start\" \"$group\" \"$cmd\"; done");
+        RootShell.Out out = RootShell.exec(command.toString(), null, 4 * 1024 * 1024,
+                budget.remainingMillis(2000), budget);
         if (out.exit != 0) throw new IllegalStateException("root 清理残留进程失败，exit=" + out.exit + "，保留临时目录。");
-        String text = new String(out.stdout, "UTF-8").trim();
-        return text.length() == 0 ? null : text.replace('\n', '；');
+        java.util.List<RootHolder> result = new ArrayList<RootHolder>();
+        for (String line : new String(out.stdout, "UTF-8").split("\\n")) {
+            String[] fields = line.split("\\t", -1);
+            if (fields.length < 3 || !fields[0].matches("[0-9]+") || !fields[1].matches("[0-9]+")
+                    || !fields[2].matches("[0-9]+")) continue;
+            result.add(new RootHolder(fields[0], fields[1], fields[2], fields.length > 3 ? fields[3] : ""));
+        }
+        return result;
+    }
+
+    private static void rootKill(java.util.List<RootHolder> holders, CleanupBudget budget) throws Exception {
+        if (holders.isEmpty()) return;
+        StringBuilder command = new StringBuilder();
+        for (RootHolder holder : holders) {
+            command.append("(s=; IFS= read -r s 2>/dev/null < /proc/").append(holder.pid)
+                    .append("/stat || exit 0; s=${s##*) }; set -- $s; [ $# -ge 20 ] || exit 0; ")
+                    .append("group=$3; shift 19; [ \"$1\" = ").append(RootShell.quote(holder.started))
+                    .append(" ] && [ \"$group\" = ").append(RootShell.quote(holder.group))
+                    .append(" ] || exit 0; kill -s KILL ").append(holder.pid)
+                    .append(" 2>/dev/null; [ \"$group\" = ").append(holder.pid)
+                    .append(" ] && kill -s KILL -- -").append(holder.pid).append(" 2>/dev/null; ); ");
+        }
+        RootShell.Out out = RootShell.exec(command.append("exit 0").toString(), null, 1024,
+                budget.remainingMillis(2000), budget);
+        if (out.exit != 0) throw new IllegalStateException("root 清理残留进程失败，exit=" + out.exit + "，保留临时目录。");
+    }
+
+    private static String joinPids(java.util.List<String> pids) {
+        StringBuilder text = new StringBuilder();
+        for (String pid : pids) {
+            if (text.length() > 0) text.append('；');
+            text.append(pid);
+        }
+        return text.toString();
     }
 
     /** 没有 root 时只扫本 App 能读的进程；读不到的属于别的用户，不会是这里起的非 root 进程。 */

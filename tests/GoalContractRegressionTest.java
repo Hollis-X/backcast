@@ -1057,6 +1057,62 @@ public final class GoalContractRegressionTest {
         @Override public String finishTurn() { return null; }
     }
 
+    /** 网络或服务错误中断、还没答完：interrupted() 为真，界面据此显示继续三角；续跑后清掉。 */
+    private static void requestFailureMarksTheTurnInterrupted() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) {
+                LlmClient.Reply reply = new LlmClient.Reply();
+                if (f.client.calls == 1) reply.error = "SocketTimeoutException: fixture";
+                else reply.content = "answered after resume";
+                return reply;
+            }
+        };
+        check(!fixture.loop.interrupted(), "Fresh loop looked interrupted");
+        fixture.loop.submit("inspect", 1L, fixture.loop.generation(), 1, null);
+        check(fixture.loop.interrupted(), "Network failure did not mark the turn resumable");
+        fixture.loop.resume(1L, 2);
+        check(fixture.client.calls == 2 && !fixture.loop.interrupted(), "Resume did not continue or did not clear the mark");
+        check("answered after resume".equals(last(fixture.loop.historySnapshot()).content), "Resume did not finish the answer");
+    }
+
+    /** 本轮临时材料没清掉：界面只收到短提示，不是被换成「请求失败」的长原文。 */
+    private static void turnCleanupFailureShowsAShortNotice() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(new CleanupProbe("own-dir: busy", null));
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) { return text("done"); }
+        };
+        fixture.loop.submit("inspect", 1L, fixture.loop.generation(), 1, null);
+        check(fixture.errors.size() == 1 && AgentLoop.CLEANUP_NOTICE.equals(fixture.errors.get(0)),
+                "Turn cleanup failure was not reported as the short notice: " + fixture.errors);
+    }
+
+    /** 只有重启前留下的目录清不掉：只写诊断，不弹提示。 */
+    private static void staleCleanupFailureIsOnlyDiagnosed() throws Exception {
+        Fixture fixture = new Fixture();
+        fixture.registry.register(new CleanupProbe(null, "old-dir: unverifiable"));
+        fixture.client.script = new Script() {
+            @Override public LlmClient.Reply next(Fixture f, List<Message> messages, JSONArray tools) { return text("done"); }
+        };
+        fixture.submit("inspect");
+        check(fixture.errors.isEmpty(), "Leftover from a previous process was shown as this turn's error");
+    }
+
+    private static final class CleanupProbe implements Tool, com.mkei.backcast.agent.TemporaryCleanup {
+        final String own, stale;
+        CleanupProbe(String own, String stale) { this.own = own; this.stale = stale; }
+        @Override public String name() { return "temporary"; }
+        @Override public String description() { return "Temporary fixture"; }
+        @Override public JSONObject parameters() { return new JSONObject(); }
+        @Override public String run(JSONObject args) { return "ok"; }
+        @Override public void abort() { }
+        @Override public void beginTurn() { }
+        @Override public String cleanupTemporary() { return own; }
+        @Override public String finishTurn() { return own; }
+        @Override public String staleFailures() { return stale; }
+    }
+
     public static void main(String[] args) {
         String[] tests = {
             "firstGoalRequestHasRulesWithoutStartingAnotherTurn", "ordinaryToolRequestGetsItsFinalAnswer",
@@ -1079,7 +1135,8 @@ public final class GoalContractRegressionTest {
             "userResumeReopensToolsAfterAnOldGoalStatusResult",
             "goalToolsExposePauseAndStructuredState", "changedObjectiveReachesTheNextToolRequestOnce",
             "goalTemplatesEscapeObjectiveDelimiters", "summaryWithoutCompletionGetsAWrapUpPrompt",
-            "cleanupFailureDoesNotBlockCompletion"
+            "cleanupFailureDoesNotBlockCompletion", "requestFailureMarksTheTurnInterrupted",
+            "turnCleanupFailureShowsAShortNotice", "staleCleanupFailureIsOnlyDiagnosed"
         };
         for (String name : tests) {
             try {

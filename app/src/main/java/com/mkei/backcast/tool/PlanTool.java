@@ -75,22 +75,34 @@ public final class PlanTool implements Tool {
         try { return normalize(new JSONObject(args)); } catch (Exception partial) { return null; }
     }
 
-    @Override public String run(JSONObject args) {
-        JSONArray items = normalize(args);
+    /** 清单不合规时的错误文字，合规返回 null。工具和界面共用：界面只画这里放行的计划。 */
+    public static String problem(JSONArray items) {
         if (items == null || items.length() == 0 || items.length() > MAX_STEPS)
             return "错误：items 必须是 1 到 " + MAX_STEPS + " 项的清单。";
-        int done = 0, doing = 0;
-        String current = "";
+        int doing = 0;
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.optJSONObject(i);
             String content = item == null ? "" : item.optString("content", "").trim();
             String status = item == null ? "" : item.optString("status", "");
             if (content.length() == 0 || content.length() > MAX_TEXT) return "错误：第 " + (i + 1) + " 步的 content 不能为空或超过 " + MAX_TEXT + " 字。";
-            if ("completed".equals(status)) done++;
-            else if ("in_progress".equals(status)) { doing++; current = content; }
-            else if (!"pending".equals(status)) return "错误：第 " + (i + 1) + " 步的 status 必须是 pending、in_progress 或 completed。";
+            if ("in_progress".equals(status)) doing++;
+            else if (!"completed".equals(status) && !"pending".equals(status)) return "错误：第 " + (i + 1) + " 步的 status 必须是 pending、in_progress 或 completed。";
         }
-        if (doing > 1) return "错误：同一时间只能有一个 in_progress。";
+        return doing > 1 ? "错误：同一时间只能有一个 in_progress。" : null;
+    }
+
+    @Override public String run(JSONObject args) {
+        JSONArray items = normalize(args);
+        String problem = problem(items);
+        if (problem != null) return problem;
+        int done = 0;
+        String current = "";
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            String status = item.optString("status", "");
+            if ("completed".equals(status)) done++;
+            else if ("in_progress".equals(status)) current = item.optString("content", "").trim();
+        }
         String summary = "计划已更新：共 " + items.length() + " 步，已完成 " + done + " 步";
         if (done == items.length()) return summary + "，全部完成。";
         return summary + (current.length() == 0 ? "，没有进行中的步骤，请开始下一步。" : "，进行中：" + current + "。");

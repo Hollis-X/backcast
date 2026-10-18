@@ -129,6 +129,74 @@ public class PlanAndTranscriptTest {
         assertTrue("history keeps its old count", texts(cards.get(0)).contains("0/2"));
     }
 
+    /** 工具拒绝的计划（两步同时进行中）不画卡片，不冒充最新版。 */
+    @Test
+    public void rejectedPlanIsNotDrawn() throws Exception {
+        Context app = configure();
+        ChatStore store = new ChatStore(app);
+        long sid = store.create("被拒绝的计划");
+        store.append(sid, Message.user("分两步做"));
+        store.append(sid, Message.assistant("", call("p1", "update_plan", plan("读代码", "in_progress", "改代码", "pending"))));
+        store.append(sid, Message.toolResult("p1", "计划已更新"));
+        store.append(sid, Message.assistant("", call("p2", "update_plan", plan("读代码", "in_progress", "改代码", "in_progress"))));
+        store.append(sid, Message.toolResult("p2", "错误：同一时间只能有一个 in_progress。"));
+        Message done = Message.assistant("好了。", null);
+        done.elapsedMs = 3000;
+        store.append(sid, done);
+        store.close();
+        Activity main = open(app);
+        List<PlanCard> cards = find(main.findViewById(R.id.stream), PlanCard.class, new ArrayList<PlanCard>());
+        assertEquals("rejected plan must not get a card", 1, cards.size());
+        assertFalse("the accepted plan stays the latest", cards.get(0).isHistory());
+    }
+
+    /** 上一轮停在网络错误、还没答完：输入框为空时发送键是「继续任务」三角，一输入文字就变回发送。 */
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    public void interruptedTurnTurnsSendIntoResume() throws Exception { resumeCase("24-resume-button.png"); }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    @Config(qualifiers = "w411dp-h914dp-night-xxhdpi")
+    public void interruptedTurnTurnsSendIntoResumeDark() throws Exception { resumeCase("24-resume-button-dark.png"); }
+
+    private void resumeCase(String shot) throws Exception {
+        Context app = configure();
+        ChatStore store = new ChatStore(app);
+        long sid = store.create("断网");
+        store.append(sid, Message.user("帮我检查一下 demo 目录"));
+        store.close();
+        Activity main = open(app);
+        java.lang.reflect.Field loopField = MainActivity.class.getDeclaredField("loop");
+        loopField.setAccessible(true);
+        com.mkei.backcast.agent.AgentLoop loop = (com.mkei.backcast.agent.AgentLoop) loopField.get(main);
+        assertNotNull("session loop", loop);
+        java.lang.reflect.Field flag = com.mkei.backcast.agent.AgentLoop.class.getDeclaredField("interruptedByRequestFailure");
+        flag.setAccessible(true);
+        flag.setBoolean(loop, true);
+        java.lang.reflect.Method tint = MainActivity.class.getDeclaredMethod("tintSend", boolean.class);
+        tint.setAccessible(true);
+        tint.invoke(main, false);
+        settle(2);
+        View send = main.findViewById(R.id.send);
+        assertEquals("继续任务", String.valueOf(send.getContentDescription()));
+        String dir = System.getenv("BACKCAST_SCREENSHOTS");
+        if (dir != null && dir.length() > 0) {
+            View decor = main.getWindow().getDecorView();
+            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(decor.getWidth(), decor.getHeight(),
+                    android.graphics.Bitmap.Config.ARGB_8888);
+            decor.draw(new android.graphics.Canvas(bitmap));
+            new java.io.File(dir).mkdirs();
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dir, shot))) {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+            }
+        }
+        ((android.widget.EditText) main.findViewById(R.id.prompt)).setText("换个问题");
+        settle(2);
+        assertEquals("发送", String.valueOf(send.getContentDescription()));
+        flag.setBoolean(loop, false);
+    }
+
     /** 同一任务里续跑出来的新工作段不再画「工作了」，总耗时只在最上面那一行。 */
     @Test
     public void elapsedTimeIsShownOnlyAtTheTopOfTheTask() throws Exception {
